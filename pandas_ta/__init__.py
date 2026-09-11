@@ -46,6 +46,7 @@ Category = {
     "cycles": [
         "dsp", "ebsw", "ht_dcperiod", "ht_dcphase", "ht_phasor", "ht_sine",
         "ht_trendmode",
+        "ht",
     ],
     # Momentum
     "momentum": [
@@ -54,7 +55,7 @@ Category = {
         "mom", "pgo", "po", "ppo", "pressure_pulse", "psl", "pvo", "qqe", "roc", "rsi", "rsi_divergence", "rsx", "rvgi",
         "slope", "smi", "squeeze", "squeeze_pro", "stc", "stoch", "stochrsi", "td_seq", "trix",
         "trixh", "tsi", "uo", "vwmacd", "wavetrend", "willr",
-        "pzo", "rwi", "szo", "wpo"
+        "pzo", "szo", "wpo", "stc_tv"
     ],
     # Overlap
     "overlap": [
@@ -63,7 +64,8 @@ Category = {
         "nadaraya_watson_envelope", "ohlc4", "pwma", "rainbow", "rma", "rma2", "sinwma", "sma", "ssf", "supertrend",
         "supertrend2",
         "swma", "t3", "t3_tv", "tema", "tema2", "trima", "vidya", "vwap", "vwma", "wcp",
-        "wilder_rma", "wma", "zlma"
+        "wilder_rma", "wma", "zlma",
+        "frama"
     ],
     # Performance
     "performance": ["log_return", "percent_return", "trend_return"],
@@ -71,8 +73,7 @@ Category = {
     "statistics": [
         "entropy", "kurtosis", "mad", "median", "quantile", "skew", "stdev",
         "variance", "zscore",
-        "rolling_sum", "normalize", "covariance",
-        "rms"
+        "rolling_sum", "normalize", "covariance"
     ],
     # Trend
     "trend": [
@@ -86,20 +87,20 @@ Category = {
         "triangle_wedge", "triple_top_bottom",
         "ttm_trend", "tvstop",
         "vhf", "volume_sr_zones", "vortex", "xsignals", "zigzag", "zigzag_fib",
-        "pivot"
+        "pivot",
+        "vstop", "vstop2"
     ],
     # Volatility
     "volatility": [
         "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "cvi", "donchian", "har_park", "hwc", "kc",
-        "massi", "natr", "pdist", "range_profile", "rvi", "thermo", "true_range", "ui",
-        "kcw"
+        "massi", "natr", "pdist", "range_profile", "rvi", "thermo", "true_range", "ui"
     ],
 
     # Volume, "vp" or "Volume Profile" is unique
     "volume": [
         "ad", "adosc", "aobv", "avwap_z", "bw_mfi", "cmf", "efi", "eom", "kvo", "mfi", "nvi", "obv", "pocket_pivot", "pvi",
         "pvol", "pvr", "pvt", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "weis_wave",
-        "vzo"
+        "vzo", 
         # `up_and_down_volume` and `volume_delta` are deliberately NOT here.
         # They REQUIRE a second (lower-timeframe) frame, which `df.ta.strategy()`
         # cannot supply -- registering them took the whole multiprocessing sweep

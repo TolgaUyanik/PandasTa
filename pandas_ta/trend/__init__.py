@@ -56,3 +56,5 @@ from .xsignals import xsignals
 from .zigzag import zigzag
 from .zigzag_fib import zigzag_fib
 from .pivot import pivot
+from .vstop import vstop
+from .vstop2 import vstop2

@@ -6,3 +6,4 @@ from .ht_phasor import ht_phasor
 from .ht_sine import ht_sine
 from .ht_trendmode import ht_trendmode
 from .ebsw import ebsw
+from .ht import ht

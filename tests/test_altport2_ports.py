@@ -157,11 +157,12 @@ REGISTERED = {
 }
 
 #: `Category` totals AFTER this port. 221 before; the three buckets each +1.
-#: Moved 224 -> 231 by PINEBI-1b tranche 1 (kcw, rwi, pzo, vzo, szo, rms, wpo).
-#: The number is pinned, not computed, precisely so an accidental Category
-#: edit fails here instead of silently shipping.
-CATEGORY_TOTAL = 231
-CATEGORY_BUCKETS = {"trend": 56, "volatility": 20, "volume": 23}
+#: 224 -> 231 by PINEBI-1b tranche 1, -> 240 by tranche 2, -> 233 once Gate E
+#: reverted 7 of the 16 (see docs/PineBuiltinsMeasured.md). Pinned, not
+#: computed, precisely so an accidental Category edit fails here instead of
+#: shipping silently.
+CATEGORY_TOTAL = 233
+CATEGORY_BUCKETS = {"trend": 58, "volatility": 19, "volume": 23}
 
 #: Gate E, re-measured on the SHIPPED columns over 89 BIST_100 daily frames /
 #: 408,253 bars against 496 comparators. See docstring item 4.

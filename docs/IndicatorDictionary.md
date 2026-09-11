@@ -26,7 +26,7 @@ window per ticker before concatenating tickers.
 `*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is
 invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
-**233 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
+**235 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
 
 ### How many indicators is that, exactly
 
@@ -34,8 +34,8 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | surface | n | what it means |
 |---|---|---|
-| registered in `Category` | **231** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **239** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| registered in `Category` | **233** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **241** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
@@ -50,12 +50,13 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `cdl_z` | O/H/L/C | `length=None`, `full=None`, `ddof=None` | `open_Z_30_1` SF<br>`high_Z_30_1` SF<br>`low_Z_30_1` SF<br>`close_Z_30_1` SF | 29 | Normalizes OHLC Candles with a rolling Z Score. |
 | `ha` | O/H/L/C | — | `HA_open` PX<br>`HA_high` PX<br>`HA_low` PX<br>`HA_close` PX | 0 | The Heikin-Ashi technique averages price data to create a Japanese candlestick chart that filters out market noise. Heikin-Ashi charts, developed by… |
 
-## cycles (7)
+## cycles (8)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
 | `dsp` | C | `length=None` | `DSP_14` PX | 13 | Detrended Synthetic Price removes the trend component from price data to reveal the cyclical component. It's useful for cycle analysis and… |
 | `ebsw` | C | `length=None`, `bars=None` | `EBSW_40_10` SF | 39 | This indicator measures market cycles and uses a low pass filter to remove noise. Its output is bound signal between -1 and 1 and the maximum length… |
+| `ht` | C | — | `HT_PCT` SF | 6 | The quadrature filter underneath the Hilbert-transform family: a 4-tap FIR that shifts the input by roughly 90 degrees, used to build the in-phase /… |
 | `ht_dcperiod` | C | — | `HT_DCPERIOD` SF | 32 | The smoothed dominant cycle period, in BARS, of the price series, measured by a homodyne discriminator over a Hilbert-transform quadrature pair.… |
 | `ht_dcphase` | C | — | `HT_DCPHASE` SF | 63 | The phase, in DEGREES, of the dominant cycle: a one-bin DFT of the smoothed price over the current dominant-cycle length, corrected for the one-bar… |
 | `ht_phasor` | C | — | `HT_PHASOR_IP` SF<br>`HT_PHASOR_Q` SF | 32 | The in-phase and quadrature components of the Hilbert-transform analytic signal built on the detrended, smoothed price. Together they are the… |
@@ -104,12 +105,12 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `rsi_divergence` | H/L/C | `rsi_length=None`, `pivot_left=None`, `pivot_right=None`, `min_lookback=None`, `max_lookback=None`, `rsi_oversold=None`, `rsi_overbought=None` | `RSIDIV_BULL_14_4_4` BIN<br>`RSIDIV_BEAR_14_4_4` CONST | 0 | Classic RSI/price divergence: a confirmed price pivot low that undercuts the PRIOR pivot low (a lower low) while RSI at that same pivot bar sits… |
 | `rsx` | C | `length=None`, `drift=None` | `RSX_14` SF | 13 | The Relative Strength Xtra is based on the popular RSI indicator and inspired by the work Jurik Research. The code implemented is based on published… |
 | `rvgi` | O/H/L/C | `length=None`, `swma_length=None` | `RVGI_14_4` SF<br>`RVGIs_14_4` SF | 19 | The Relative Vigor Index attempts to measure the strength of a trend relative to its closing price to its trading range. It is based on the belief… |
-| `rwi` | H/L/C | `length=None` | `RWIh_14` SF<br>`RWIl_14` SF | 14 | Compares the actual move over `length` bars against the move a random walk of the same volatility would be expected to produce. The denominator is… |
 | `slope` | C | `length=None`, `as_angle=None`, `to_degrees=None`, `vertical=None` | `SLOPE_1` PX | 1 | Returns the slope of a series of length n. Can convert the slope to angle. Default: slope. |
 | `smi` | C | `fast=None`, `slow=None`, `signal=None`, `scalar=None` | `SMI_5_20_5` SF<br>`SMIs_5_20_5` SF<br>`SMIo_5_20_5` SF | 19 | The SMI Ergodic Indicator is the same as the True Strength Index (TSI) developed by William Blau, except the SMI includes a signal line. The SMI uses… |
 | `squeeze` | H/L/C | `bb_length=None`, `bb_std=None`, `kc_length=None`, `kc_scalar=None`, `mom_length=None`, `mom_smooth=None`, `use_tr=None` | `SQZ_20_2.0_20_1.5` PX<br>`SQZ_ON` BIN<br>`SQZ_OFF` BIN<br>`SQZ_NO` BIN | 17 | The default is based on John Carter's "TTM Squeeze" indicator, as discussed in his book "Mastering the Trade" (chapter 11). The Squeeze indicator… |
 | `squeeze_pro` | H/L/C | `bb_length=None`, `bb_std=None`, `kc_length=None`, `kc_scalar_wide=None`, `kc_scalar_normal=None`, `kc_scalar_narrow=None`, `mom_length=None`, `mom_smooth=None`, `use_tr=None`, `mamode=None` | `SQZPRO_20_2.0_20_2_1.5_1` PX<br>`SQZPRO_ON_WIDE` BIN<br>`SQZPRO_ON_NORMAL` BIN<br>`SQZPRO_ON_NARROW` BIN<br>`SQZPRO_OFF` BIN<br>`SQZPRO_NO` BIN | 17 | This indicator is an extended version of "TTM Squeeze" from John Carter. The default is based on John Carter's "TTM Squeeze" indicator, as discussed… |
 | `stc` | C | `tclength=None`, `fast=None`, `slow=None`, `factor=None` | `STC_10_12_26_0.5` SF<br>`STCmacd_10_12_26_0.5` PX<br>`STCstoch_10_12_26_0.5` SF | 25 | The Schaff Trend Cycle is an evolution of the popular MACD incorportating two cascaded stochastic calculations with additional smoothing. |
+| `stc_tv` | C | `fast=None`, `slow=None`, `cycle=None`, `d1=None`, `d2=None` | `STCTV_23_50_10_3_3` SF | 71 | A MACD put through two stochastic rescales with an EMA between them, clamped to [0, 100]. The double rescale is what makes it snap between extremes… |
 | `stoch` | H/L/C | `k=None`, `d=None`, `smooth_k=None` | `STOCHk_14_3_3` SF<br>`STOCHd_14_3_3` SF | 17 | The Stochastic Oscillator (STOCH) was developed by George Lane in the 1950's. He believed this indicator was a good way to measure momentum because… |
 | `stochrsi` | C | `length=None`, `rsi_length=None`, `k=None`, `d=None` | `STOCHRSIk_14_14_3_3` SF<br>`STOCHRSId_14_14_3_3` SF | 31 | "Stochastic RSI and Dynamic Momentum Index" was created by Tushar Chande and Stanley Kroll and published in Stock & Commodities V.11:5 (189-199) |
 | `szo` | C | `length=None` | `SZO_14` SF | 13 | A triple-EMA of the bar-direction sign, rescaled by `100 / length`. It reads persistence of direction rather than size of move: a run of up bars… |
@@ -123,7 +124,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `willr` | H/L/C | `length=None` | `WILLR_14` SF | 13 | William's Percent R is a momentum oscillator similar to the RSI that attempts to identify overbought and oversold conditions. |
 | `wpo` | H/C | `length=None` | `WPO_14` SF | 13 | Reads an implied cycle period off how far the previous close sat inside the current bar's high, via `2*pi / asin(close[1] / high)`, then signs it by… |
 
-## overlap (48)
+## overlap (49)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -134,6 +135,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `ema` | C | `length=None` | `EMA_10` PX | 9 | The Exponential Moving Average is more responsive moving average compared to the Simple Moving Average (SMA). The weights are determined by alpha… |
 | `ema2` | C | `length=None` | `EMA2_10` PX | 0 | TradingView `ta.ema2()` -- an EMA whose `length` may vary bar by bar and whose recursion is seeded with the source rather than with an SMA, so it… |
 | `ema_align` | C | — | `EMA_ALIGN_BULL` ORD<br>`EMA_ALIGN_BEAR` ORD | 0 | Counts how many of the EMA(9), EMA(21), EMA(50), EMA(100), EMA(200) relationships are aligned bullishly or bearishly. The result is an integer 0-4… |
+| `frama` | H/L/C | `length=None` | `FRAMA_DIST_PCT_16` SF | 15 | An EMA whose smoothing constant is driven by the fractal dimension of recent price. When the market is trending the estimated dimension falls toward… |
 | `fwma` | C | `length=None`, `asc=None` | `FWMA_10` PX | 9 | Fibonacci's Weighted Moving Average is similar to a Weighted Moving Average (WMA) where the weights are based on the Fibonacci Sequence. |
 | `hilo` | H/L/C | `high_length=None`, `low_length=None`, `mamode=None` | `HILO_13_21` PX<br>`HILOl_13_21` PX<br>`HILOs_13_21` PX | 49 | The Gann High Low Activator Indicator was created by Robert Krausz in a 1998 issue of Stocks & Commodities Magazine. It is a moving average based… |
 | `hl2` | H/L | — | `HL2` PX | 0 | Indicator: HL2 |
@@ -185,7 +187,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `percent_return` | C | `length=None`, `cumulative=False` | `PCTRET_1` SF | 1 | Calculates the percent return of a Series. See also: help(df.ta.percent_return) for additional **kwargs a valid 'df'. |
 | `trend_return` | C | `trend`, `log=True`, `asbool=None`, `trend_reset=0`, `trade_offset=None` | `TR_LOGRET_1` SF<br>`TR_CUMLOGRET_1` SF<br>`TR_Trends` BIN<br>`TR_Trades` BIN<br>`TR_Entries` BIN<br>`TR_Exits` BIN | 1 | Calculates the Returns and Cumulative Returns of a Trend as defined by a sequence of booleans called a 'trend'. One popular example in TA literature… |
 
-## statistics (13)
+## statistics (12)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -196,14 +198,13 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `median` | C | `length=None` | `MEDIAN_30` PX | 29 | Rolling Median of over 'n' periods. Sibling of a Simple Moving Average. |
 | `normalize` | C | `length=None` | `NORM_14` SF | 13 | Where the current value sits inside its own trailing range, on [0, 1]. 0 is the window low, 1 the window high. |
 | `quantile` | C | `length=None`, `q=None` | `QTL_30_0.5` PX | 29 | Sources: |
-| `rms` | C | `length=None` | `RMS_DIST_PCT_14` SF | 13 | The root mean square of the source over a rolling window. Because it squares before averaging, it weights large excursions more heavily than a simple… |
 | `rolling_sum` | C | `length=None` | `SUM_10` PX | 9 | The sliding sum of the last `length` values. |
 | `skew` | C | `length=None` | `SKEW_30` SF | 29 | Sources: |
 | `stdev` | C | `length=None`, `ddof=1` | `STDEV_30` PX | 29 | Sources: |
 | `variance` | C | `length=None`, `ddof=None` | `VAR_30` PX2 | 29 | Sources: |
 | `zscore` | C | `length=None`, `std=None` | `Z_30` SF | 29 | Sources: |
 
-## trend (56)
+## trend (58)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -260,11 +261,13 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `vhf` | C | `length=None`, `drift=None` | `VHF_28` SF | 28 | VHF was created by Adam White to identify trending and ranging markets. |
 | `volume_sr_zones` | H/L/C/V | `pivot_length=None`, `vol_length=None`, `vol_mult=None`, `atr_length=None`, `zone_atr_mult=None`, `max_levels=None` | `VOLSR_RES_DIST_10_20` SF<br>`VOLSR_SUP_DIST_10_20` SF<br>`VOLSR_RES_BROKEN_10_20` CONST<br>`VOLSR_SUP_BROKEN_10_20` BIN | 215 | Confirmed swing pivots that formed on ABOVE-AVERAGE volume (volume at the pivot's own bar > its own `vol_length`-bar SMA * `vol_mult`) become… |
 | `vortex` | H/L/C | `length=None`, `drift=None` | `VTXP_14` SF<br>`VTXM_14` SF | 14 | Two oscillators that capture positive and negative trend movement. |
+| `vstop` | H/L/C | `length=None`, `factor=None` | `VSTOP_DIST_PCT_20_1.0` SF<br>`VSTOP_TREND_20_1.0` BIN | 1 | An ATR-distance trailing stop with a trend flag. In an uptrend the stop ratchets up behind the running maximum and never falls; when price crosses it… |
+| `vstop2` | H/L/C | `length=None`, `factor=None` | `VSTOP2_DIST_PCT_20_1.0` SF<br>`VSTOP2_TREND_20_1.0` BIN | 1 | `vstop` with a per-bar ATR length. Hand it a Series and the stop's ATR window changes bar by bar — useful when the window is itself driven by a… |
 | `xsignals` | — | `signal:pandas.core.series.Series`, `xa:float`, `xb:float`, `above=True`, `long=True`, `asbool=None`, `trend_reset=0`, `trade_offset=None` | `TS_Trends` CONST<br>`TS_Trades` CONST<br>`TS_Entries` CONST<br>`TS_Exits` CONST | 0 | Cross Signals returns Trend Signal (TSIGNALS) results for Signal Crossings. This is useful for indicators like RSI, ZSCORE, et al where one wants… |
 | `zigzag` | C | `pct_threshold=None` | `ZIGZAG_5` ?? | 0 | Marks pivot highs and lows where the price has reversed by at least `pct_threshold` from the last pivot. Non-pivot bars are NaN. |
 | `zigzag_fib` | H/L/C | `length=None` | `ZZFIB_50_5` SF<br>`ZZFIB_618_5` SF | 13 | Scale-free % distance from close to the 0.5 and 0.618 (golden ratio) Fibonacci retracement levels of the CURRENT zigzag leg -- the alternating… |
 
-## volatility (20)
+## volatility (19)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -279,7 +282,6 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `har_park` | H/L/C | `short_length=None`, `medium_length=None`, `long_length=None`, `fit_window=None` | `HARPARK_1_5_22_500` SF | 499 | A causal, rolling-refit HAR (Heterogeneous AutoRegressive) regression that forecasts NEXT-bar Parkinson range-based volatility (as a % of price,… |
 | `hwc` | C | `na=None`, `nb=None`, `nc=None`, `nd=None`, `scalar=None`, `channel_eval=None` | `HW-MID` PX<br>`HW-UPPER` PX<br>`HW-LOWER` PX | 0 | Channel indicator HWC (Holt-Winters Channel) based on HWMA - a three-parameter moving average calculated by the method of Holt-Winters. |
 | `kc` | H/L/C | `length=None`, `scalar=None`, `mamode=None` | `KCLe_20_2` PX<br>`KCBe_20_2` PX<br>`KCUe_20_2` PX | 19 | A popular volatility indicator similar to Bollinger Bands and Donchian Channels. |
-| `kcw` | H/L/C | `length=None`, `scalar=None`, `mamode=None` | `KCWe_20_2.0` SF | 19 | The Keltner channel's width as a fraction of its own basis -- `(upper - lower) / basis`. Pine ships this as a core built-in, `ta.kcw`, alongside… |
 | `massi` | H/L | `fast=None`, `slow=None` | `MASSI_9_25` SF | 32 | The Mass Index is a non-directional volatility indicator that utilitizes the High-Low Range to identify trend reversals based on range expansions. |
 | `natr` | H/L/C | `length=None`, `mamode=None`, `scalar=None`, `drift=None` | `NATR_14` SF | 13 | Normalized Average True Range attempt to normalize the average true range. |
 | `pdist` | O/H/L/C | `drift=None` | `PDIST` PX | 1 | Measures the "distance" covered by price movements. |
@@ -322,7 +324,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation needed.
 
-`cdl_doji` `cdl_inside` `cdl_z` `ebsw` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `cti` `er` `fisher` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `rwi` `smi` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `iama` `ichimoku_ml` `ma_disparity` `log_return` `percent_return` `trend_return` `covariance` `entropy` `kurtosis` `normalize` `rms` `skew` `zscore` `adx` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `zigzag_fib` `atr_ma_multiple` `cvi` `har_park` `kcw` `massi` `natr` `range_profile` `rvi` `ui` `ad` `adosc` `aobv` `avwap_z` `bw_mfi` `cmf` `kvo` `mfi` `nvi` `obv` `pocket_pivot` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `vzo`
+`cdl_doji` `cdl_inside` `cdl_z` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `cti` `er` `fisher` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `ma_disparity` `log_return` `percent_return` `trend_return` `covariance` `entropy` `kurtosis` `normalize` `skew` `zscore` `adx` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `cvi` `har_park` `massi` `natr` `range_profile` `rvi` `ui` `ad` `adosc` `aobv` `avwap_z` `bw_mfi` `cmf` `kvo` `mfi` `nvi` `obv` `pocket_pivot` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `vzo`
 
 ## Never fires on the probe
 

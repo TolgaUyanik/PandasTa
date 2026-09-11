@@ -47,6 +47,12 @@ VERDICTS = {
     "have", "port", "port - primitive", "port - alternate impl",
     "port - blocked on data", "n/a - not a Pine built-in",
     "n/a - not worth a primitive", "n/a - never called live in the corpus",
+    # PINEBI-1b, 2026-09-11: built, measured against the engine's full column
+    # set, and DELETED because it restates a shipped column. A distinct
+    # verdict from `port` on purpose -- without it these rows read as
+    # unfilled gaps and the next session re-ports, re-measures and re-deletes
+    # them. `REVERTED_ON_GATE_E` in the generator carries the rho per row.
+    "n/a - measured and reverted on Gate E",
 }
 
 
@@ -149,7 +155,8 @@ def _load_classifier():
     ("requestVolumeDelta", 0, 3, {"requestVolumeDelta"}, "port - blocked on data"),
     ("changePercent", 0, 0, {"changePercent"}, "n/a - not worth a primitive"),
     ("covariance", 1, 0, set(), "n/a - not a Pine built-in"),
-    ("frama", 0, 0, {"frama"}, "port"),
+    # frama landed 2026-09-11 (PINEBI-1b tranche 2), rho 0.8540 -> disclose.
+    ("frama", 0, 0, {"frama"}, "have"),
 ])
 def test_classify_is_stable_without_the_corpus(name, clean, lib, exports, expected):
     """`classify` is a pure function of four scalars -- guard it directly.
@@ -187,40 +194,26 @@ def test_non_rolling_primitives_are_not_described_as_rolling(name, expected_shap
     assert expected_shape in note
 
 
-def test_kcw_is_covered_by_its_own_port_and_not_by_an_alias_to_kc():
-    """`pandas_ta.kc` ships the Keltner bands, not the Keltner WIDTH.
+def test_kcw_is_recorded_as_measured_and_reverted_not_as_an_unfilled_gap():
+    """`kcw` has been three things, and the third is the one to protect.
 
-    HISTORY, kept because the failure mode outlived the bug: an alias to `kc`
-    marked this `have` and silently deleted a real port. The sibling
-    `bbw -> bbands` is correct only because `bbands` does emit `BBB_`; the two
-    cases were never checked separately.
+    1. Classified `have` by PINEBI-0 on the strength of `kc` existing -- WRONG:
+       `kc` emits KCLe_/KCBe_/KCUe_, three price LEVELS and no width.
+    2. Ported in PINEBI-1b tranche 1, so `have` for a real reason.
+    3. Measured on Gate E at rho +0.9843 against `natr` over 37,030 bars --
+       both are an ATR-scaled width -- and DELETED.
 
-    `kcw` is now genuinely ported (PINEBI-1b tranche 1), so the assertion
-    flips: it must be `have`, and it must be `have` because a real `ta.kcw`
-    exists emitting a WIDTH column -- not because something aliased it back to
-    the band function. Both halves are checked, because only the second one
-    would have caught the original bug.
+    The risk now is state 3 decaying back into "unfilled gap", which would
+    invite exactly the work that was just measured as worthless. So the CSV
+    must say it was reverted, and the reason must carry the number.
     """
     import pandas_ta as _ta
-    gen = _load_classifier()
-    verdict = gen.classify("kcw", 1, 0, set())[1]
-    assert verdict == "have", "kcw is ported; the classifier should see it"
-
-    assert callable(getattr(_ta, "kcw", None)), "no real ta.kcw"
-    assert _ta.kcw is not _ta.kc, "kcw must not be an alias to kc"
-
-    import numpy as _np
-    from pandas import Series as _S
-    n = 200
-    rng = _np.random.default_rng(0)
-    c = _S(100 * _np.exp(_np.cumsum(rng.normal(0, 0.01, n))))
-    out = _ta.kcw(c * 1.01, c * 0.99, c)
-    assert out is not None and out.ndim == 1, "kcw must emit one width column"
-    # The width is a RATIO: scale every price and it does not move. A band
-    # level would.
-    out8 = _ta.kcw(c * 8 * 1.01, c * 8 * 0.99, c * 8)
-    m = out.notna() & out8.notna()
-    assert float((out[m] - out8[m]).abs().max()) == 0.0,         "kcw is not scale-free, so it is returning a level, not a width"
+    rows = {r["name"]: r for r in _rows()}
+    assert "kcw" in rows
+    assert rows["kcw"]["verdict"] == "n/a - measured and reverted on Gate E"
+    assert "0.9843" in rows["kcw"]["note"],         "the revert note must carry the measured rho, not just the verdict"
+    # and the module really is gone, not merely unregistered
+    assert not hasattr(_ta, "kcw")
 
 
 def test_every_tier2_have_row_was_docstring_audited():

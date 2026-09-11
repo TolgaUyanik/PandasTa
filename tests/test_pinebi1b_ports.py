@@ -48,7 +48,10 @@ from pandas import DataFrame, Series, date_range
 
 import pandas_ta as ta
 
-_NAMES = ["kcw", "rwi", "pzo", "vzo", "szo", "rms", "wpo"]
+#: `kcw`, `rwi` and `rms` were built, measured and DELETED on Gate E
+#: (rho 0.9843 vs `natr`, 0.9399 vs `vortex_VTXM_14`, 0.9900 vs
+#: `NWE_MID_200_8.0_8.0`). See docs/PineBuiltinsMeasured.md.
+_NAMES = ["pzo", "vzo", "szo", "wpo"]
 
 
 def _frame(n=600, seed=11):
@@ -64,12 +67,9 @@ def _frame(n=600, seed=11):
 
 
 _CALLS = {
-    "kcw": lambda f, d: f(d["high"], d["low"], d["close"]),
-    "rwi": lambda f, d: f(d["high"], d["low"], d["close"]),
     "pzo": lambda f, d: f(d["close"]),
     "vzo": lambda f, d: f(d["close"], d["volume"]),
     "szo": lambda f, d: f(d["close"]),
-    "rms": lambda f, d: f(d["close"]),
     "wpo": lambda f, d: f(d["high"], d["close"]),
 }
 
@@ -149,13 +149,13 @@ def test_every_port_is_wired_through_all_call_styles(name):
     assert name in flat, f"{name} is not registered in Category"
 
 
-def test_the_bulk_sweep_reaches_all_seven():
+def test_the_bulk_sweep_reaches_all_four():
     d = _frame()
     before = d.shape[1]
     d.ta.strategy(ta.Strategy(name="pinebi1b",
                               ta=[{"kind": k} for k in _NAMES]))
-    assert d.shape[1] - before == 8, \
-        f"expected 8 new columns (rwi emits 2), got {d.shape[1] - before}"
+    assert d.shape[1] - before == 4, \
+        f"expected 4 new columns, got {d.shape[1] - before}"
 
 
 # ------------------------------------------------------------- Gate C: fires
@@ -190,20 +190,6 @@ def test_scale_invariance_is_bit_identical(name, k):
         f"{name}'s NaN mask moved under x{k}"
 
 
-def test_rms_raw_is_a_price_level_and_therefore_not_scale_free():
-    """The raw=True escape hatch must stay a LEVEL.
-
-    If this ever passes as scale-free, `raw=True` has stopped returning the
-    level and the percent-distance default has been applied twice.
-    """
-    d = _frame()
-    a = np.asarray(ta.rms(d["close"], raw=True), dtype=float)
-    b = np.asarray(ta.rms(d["close"] * 8, raw=True), dtype=float)
-    m = np.isfinite(a) & np.isfinite(b)
-    assert float(np.abs(a[m] - b[m]).max()) > 1.0
-    assert ta.rms(d["close"], raw=True).name == "RMS_14"
-    assert ta.rms(d["close"]).name == "RMS_DIST_PCT_14"
-
 
 # -------------------------------------------------------- Gate B: causality
 
@@ -236,12 +222,6 @@ def test_no_port_reads_the_future(name):
     # degenerate mutant is the failure mode this whole gate exists to avoid.
     ("pandas_ta.momentum.wpo", "wpo = ema(ti, length=length)",
      "wpo = ti.rolling(length, center=True, min_periods=1).mean()", "wpo"),
-    ("pandas_ta.statistics.rms",
-     "level = sqrt((close ** 2).rolling(length).sum() / length)",
-     "level = sqrt((close ** 2).rolling(length, center=True).sum() / length)",
-     "rms"),
-    ("pandas_ta.momentum.rwi", "prior_low = low.shift(length)",
-     "prior_low = low.shift(-length)", "rwi"),
 ])
 def test_the_backdating_mutant_is_caught(module, old, new, name):
     """A causal implementation and a non-causal one must be distinguishable.
@@ -312,27 +292,8 @@ def test_wpo_is_nan_where_asin_is_out_of_domain_and_not_clamped():
     assert np.isnan(arcsin(ratio.where(ratio.abs() <= 1.0))[out_of_domain]).all()
 
 
-def test_kcw_delegates_to_kc_rather_than_reimplementing_the_channel():
-    d = _frame()
-    bands = ta.kc(d["high"], d["low"], d["close"], length=20, scalar=2.0)
-    lower, basis, upper = (bands.iloc[:, 0], bands.iloc[:, 1], bands.iloc[:, 2])
-    expected = (upper - lower) / basis
-    got = ta.kcw(d["high"], d["low"], d["close"], length=20, scalar=2.0)
-    m = expected.notna() & got.notna()
-    assert m.any()
-    assert float(np.abs(expected[m] - got[m]).max()) == 0.0
 
 
-def test_rwi_masks_the_nz_warmup_instead_of_shipping_a_zeroed_prior():
-    """Pine's nz() maps the missing prior bar to 0; that is a real, large value.
-
-    `(high - 0) / divisor` is a plausible-looking number on every warm-up bar.
-    Shipping it would plant a synthetic reading on the first `length` bars.
-    """
-    d = _frame()
-    out = ta.rwi(d["high"], d["low"], d["close"], length=14)
-    assert out.iloc[:14].isna().all().all(), \
-        "rwi is shipping nz()-zeroed warm-up values"
 
 
 def test_zone_helper_is_shared_not_duplicated():

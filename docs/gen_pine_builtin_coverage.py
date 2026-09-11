@@ -143,16 +143,22 @@ if _HERE not in sys.path:
 from audit_pine_have_rows import NOT_CERTIFIED as PINEBI_0B_UNCERTIFIED
 
 AUDITED = {
+    'frama': 'RA2vGpkA-ta.pine:205 `export frama(series float source, series int length) =>` ported as pandas_ta/overlap/frama.py:49 `def frama(high, low, close, length=None, offset=None, **kwargs):` -- variable-alpha EWMA driven by the fractal dimension; ta.highest/lowest default to high/low NOT source, and n2 reads the window `half` bars back. Adaptive average is a price LEVEL so the shipped column is the percent distance, level behind raw=True (TALIB-1 convention). Gate E rho +0.8540 vs NWE_MID_200_8.0_8.0, n=35,944 -- ships WITH DISCLOSURE',
+    'ht': 'RA2vGpkA-ta.pine:246 `export ht(series float source) =>` ported as pandas_ta/cycles/ht.py:43 `def ht(close, offset=None, **kwargs):` -- the bare 4-tap quadrature FIR, NOT TA-Libs Hilbert state machine (this fork ships that separately as ht_dcperiod/ht_dcphase/ht_phasor/ht_sine/ht_trendline/ht_trendmode). Taps sum to zero so the raw filter is a price DIFFERENCE; shipped column is the percent form, raw=True gives the filter. Gate E rho +0.7660 vs ebsw, n=36,910 -- ships WITH DISCLOSURE',
+    'pzo': 'RA2vGpkA-ta.pine:322 `export pzo(simple int length) =>` ported as pandas_ta/momentum/pzo.py:22 `def pzo(close, length=None, offset=None, **kwargs):` via the shared zone() helper (pandas_ta/momentum/_zone.py, Pine L315), one implementation for both pzo and vzo per the FVGENG no-fourth-copy rule. Gate E rho +0.7877 vs psl, n=37,066 -- ships WITH DISCLOSURE',
+    'szo': 'RA2vGpkA-ta.pine:715 `export szo(series float source, simple int length) =>` ported as pandas_ta/momentum/szo.py:41 `def szo(close, length=None, offset=None, **kwargs):` -- triple-EMA of sign(change(close)) divided by `length`, giving a range of about +/-100/length (+/-7.1 at the default 14) and NOT +/-100. That reads like a bug and is the sources behaviour; a mined rule would match on its thresholds. Gate E rho +0.7289 vs aobv_AOBV_LR_2, n=37,066 -- SHIPS CLEAN',
+    'stc': 'RA2vGpkA-ta.pine:527 `export stc(series float source, simple int fast, simple int slow, simple int cycle, simple int d1, simple int d2) =>` ported as pandas_ta/momentum/stc_tv.py:54 `def stc_tv(close, fast=None, slow=None, cycle=None, d1=None, d2=None,` -- renamed because this forks `stc` is a different calculation (round 7: no d1/d2, no clamp, and a lowest_xmacd > 0 guard that freezes its first stochastic whenever the rolling MACD minimum is <= 0). Gate E rho +0.8136 vs rsx, n=36,738 -- ships WITH DISCLOSURE',
+    'vStop': 'RA2vGpkA-ta.pine:773 `export vStop(series float source, simple int atrLength, series float atrFactor = 1) =>` ported as pandas_ta/trend/vstop.py:82 `def vstop(high, low, close, length=None, factor=None, offset=None, **kwargs):` -- stateful ATR trailing stop; max/min/stop/trendUp are Pine `var`s carried across bars, NOT rolling windows (a rolling max would let the stop ratchet down inside an uptrend, pinned by test_vstops_state_is_carried_not_rolling). Stop is a price level so the shipped columns are the percent distance plus the trend flag. Gate E rho +0.7503 vs dist_from_high_5, n=37,132 -- SHIPS CLEAN',
+    'vStop2': 'RA2vGpkA-ta.pine:799 `export vStop2(series float source, series float atrLength, series float atrFactor = 1) =>` ported as pandas_ta/trend/vstop2.py:56 `def vstop2(high, low, close, length=None, factor=None, offset=None, **kwargs):` -- identical to vStop except atrLength is `series float`, reaching a per-bar ATR window where the sibling raises ValueError; the stateful recursion is IMPORTED from vstop, not duplicated. Column carries a dyn{min}-{max} token. Gate E rho +0.7492 vs dist_from_high_5, n=37,132 -- SHIPS CLEAN',
+    'vzo': 'RA2vGpkA-ta.pine:820 `export vzo(simple int length) =>` ported as pandas_ta/volume/vzo.py:31 `def vzo(close, volume, length=None, offset=None, **kwargs):` via the same zone() helper. THE TRAP: Pines zone() signs the source by sign(ta.change(close)), the PRICE direction, while vzo passes volume as the source -- reading sign(change(volume)) answers a different question in the same range. Scale-free in BOTH price and volume. Gate E rho +0.7760 vs NWE_MID_200_8.0_8.0, n=35,944 -- ships WITH DISCLOSURE',
+    'wpo': 'RA2vGpkA-ta.pine:860 `export wpo(simple int length) =>` ported as pandas_ta/momentum/wpo.py:40 `def wpo(high, close, length=None, offset=None, **kwargs):` -- asin is undefined wherever close[1] > high (any gap down); those bars are NaN by design rather than clamped, because clamping manufactures a period reading exactly where the construction has none. Gate E rho +0.6477 vs psl, n=37,066 -- SHIPS CLEAN, the lowest overlap of the whole batch',
     # PINEBI-1b tranche 1 (2026-09-11). These are `have` BECAUSE they were
     # ported in this batch, which is certification by construction: each is a
     # line-by-line transcription of the cited source with a test module
     # carrying Gate B (mutant), Gate C (fires) and Gate D (scale-free).
-    'kcw': 'Pine v6 core built-in `ta.kcw` ported as pandas_ta/volatility/kcw.py:24 `def kcw(high, low, close, length=None, scalar=None, mamode=None, offset=None,` -- `(upper - lower) / basis` over `kc`s own three columns, DELEGATED to `kc` rather than re-deriving the channel (pinned by test_kcw_delegates_to_kc_rather_than_reimplementing_the_channel). Was misclassified `have` until round 4: `kc` emits KCLe_/KCBe_/KCUe_, three price LEVELS and no width. Gate D bit-identical under x8/x64; column KCWe_20_2.0',
-    'rwi': 'RA2vGpkA-ta.pine:512 `export rwi(simple int length) =>` ported as pandas_ta/momentum/rwi.py:37 `def rwi(high, low, close, length=None, offset=None, **kwargs):` -- `(high - nz(low[length])) / (atr * sqrt(length))`. TWO transcription traps pinned: Pine `ta.atr` is WILDER smoothing so the port uses `wilder_rma`, NOT this forks `rma` (a different filter, PINEBI-1c measured it); and Pines nz() maps the missing prior bar to 0, which is a real large value, so the warm-up is masked instead of shipped (test_rwi_masks_the_nz_warmup_instead_of_shipping_a_zeroed_prior). Columns RWIh_14/RWIl_14',
     'pzo': 'RA2vGpkA-ta.pine:322 `export pzo(simple int length) =>` ported as pandas_ta/momentum/pzo.py:22 `def pzo(close, length=None, offset=None, **kwargs):` via the shared `zone()` helper (pandas_ta/momentum/_zone.py, Pine L315), one implementation for both pzo and vzo per the FVGENG no-fourth-copy rule. Gate D bit-identical x8/x64; column PZO_14',
     'vzo': 'RA2vGpkA-ta.pine:820 `export vzo(simple int length) =>` ported as pandas_ta/volume/vzo.py:31 `def vzo(close, volume, length=None, offset=None, **kwargs):` via the same `zone()` helper. THE TRAP, pinned by test_vzo_signs_volume_by_price_direction_not_its_own: Pines zone() signs the source by `sign(ta.change(close))`, the PRICE direction, while vzo passes `volume` as the source -- reading `sign(change(volume))` gives a plausible series in the same range answering a different question. Scale-free in BOTH price and volume; column VZO_14',
     'szo': 'RA2vGpkA-ta.pine:715 `export szo(series float source, simple int length) =>` ported as pandas_ta/momentum/szo.py:41 `def szo(close, length=None, offset=None, **kwargs):` -- triple-EMA of `sign(change(close))`, divided by `length`. The `/length` is the sources own behaviour and gives a range of about +/-100/length (+/-7.1 at the default 14), NOT +/-100; it reads like a bug and is reproduced exactly because a mined rule would match on its thresholds (test_szo_range_is_scaled_by_one_over_length_not_plus_minus_100). Column SZO_14',
-    'rms': 'RA2vGpkA-ta.pine:505 `export rms(series float source, series int length) =>` ported as pandas_ta/statistics/rms.py:36 `def rms(close, length=None, offset=None, **kwargs):`. `sqrt(mean(close**2))` is a PRICE LEVEL and therefore not an ML feature, so the shipped column is the percent distance `RMS_DIST_PCT_14` and the level sits behind `raw=True` -- the same convention TALIB-1 set for HT_TRENDLINE/MAMA/FAMA/SAREXT. test_rms_raw_is_a_price_level_and_therefore_not_scale_free asserts the raw form is NOT scale-free, so the escape hatch cannot silently become the default',
     'wpo': 'RA2vGpkA-ta.pine:860 `export wpo(simple int length) =>` ported as pandas_ta/momentum/wpo.py:40 `def wpo(high, close, length=None, offset=None, **kwargs):` -- `ema(sign(change(close)) * 2*pi/asin(close[1]/high), length)`. `asin` is undefined where `close[1] > high` (any gap down); those bars are NaN by design rather than clamped into the domain, because clamping would manufacture a period reading exactly where the construction has none (test_wpo_is_nan_where_asin_is_out_of_domain_and_not_clamped). Column WPO_14',
     'atr2': 'RA2vGpkA-ta.pine:102 `export atr2(series float length) =>` ported as pandas_ta/volatility/atr2.py:56 `def atr2(high, low, close, length=None, drift=None, offset=None, **kwargs):` -- PINEBI-1c measured: 14 bars of warm-up saved vs `atr(14)`, per-bar Series length reached; rho vs sibling 0.9708 on the 400-bar fixture, 0.9963-1.0000 across 40 BIST_100 daily parquets',
     'dema2': 'RA2vGpkA-ta.pine:168 `export dema2(series float source, series float length) =>` ported as pandas_ta/overlap/dema2.py:33 `def dema2(close, length=None, offset=None, **kwargs):` -- PINEBI-1c measured: 9 bars of warm-up saved vs `dema(10)`, per-bar Series length reached; rho 0.99997 / 0.9980-1.0000',
@@ -406,6 +412,54 @@ def equivalent(name):
     return ""
 
 
+#: Rows that WERE ported, measured on Gate E against the engine's full
+#: production column set, and DELETED because they restate a shipped column.
+#:
+#: This table exists so the coverage CSV cannot invite the same work twice.
+#: Without it these rows flip straight back to `port`, and the next session
+#: re-ports them, re-measures them and re-deletes them. `PandasTa/CLAUDE.md`
+#: is explicit that "deleting an over-correlated column you just built is the
+#: expected outcome, not a failure" -- but only if the deletion is RECORDED.
+#: Measured 2026-09-11, 6 BIST daily frames / 37,144 bars, 492 comparators
+#: through `_comparators.py`. Receipts: `docs/PineBuiltinsMeasured.md`.
+#: Ported under a DIFFERENT name because the Pine name already means
+#: something else in this fork. A name-matching classifier cannot see these.
+RENAMED_PORTS = {
+    "stc": "ported as `stc_tv` (pandas_ta/momentum/stc_tv.py), NOT as `stc`: "
+           "this fork's `stc` is a different calculation -- no `d1`/`d2`, no "
+           "clamp, and a `lowest_xmacd > 0` guard that freezes its first "
+           "stochastic whenever the rolling MACD minimum is <= 0, the normal "
+           "case for a zero-centred oscillator. Same `t3`/`t3_tv` precedent "
+           "PINEBI-1c set. Gate E: rho +0.8136 vs `rsx`, n=36,738 -- ships "
+           "with disclosure.",
+}
+
+
+REVERTED_ON_GATE_E = {
+    "ift": "rho +1.0000 vs `RSI` -- and it is 1.0000 BY CONSTRUCTION, not by "
+           "coincidence: the inverse Fisher transform is `tanh`, strictly "
+           "monotone, so it is rank-identical to whatever drives it. A "
+           "monotone transform can never add rank information over its input, "
+           "and a tree that splits on thresholds gains literally nothing from "
+           "it. No choice of driver fixes this.",
+    "relativeVolume": "rho +0.9980 vs the engine's own `VOL_RATIO`, n=37,024. "
+                      "The engine already ships this ratio.",
+    "williamsFractal": "rho +0.9884 vs the engine's own `FRACTAL_UP`, "
+                       "n=37,144 -- exactly the collision `TODO.md` predicted "
+                       "and required be measured before shipping.",
+    "kcw": "rho +0.9843 vs `natr`, n=37,030. Both are an ATR-scaled width; "
+           "the Keltner framing does not make it a different measurement.",
+    "rms": "rho +0.9900 vs `NWE_MID_200_8.0_8.0`, n=35,944. A percent "
+           "distance to a smooth central tendency, which the engine has "
+           "several of.",
+    "rwi": "rho +0.9399 (`RWIl_14`) vs `vortex_VTXM_14`, n=37,060.",
+    "dm": "rho +0.8992 (`DEM_14`) vs `vortex_VTXP_14`, n=37,059. Reverted on "
+          "the APPROXIMATE reading of the ship line: `CLAUDE.md` writes "
+          "\"rho ~ 0.9 -> revert\", and 0.8992 is that. A hard 0.90 cutoff "
+          "would have shipped it on the strength of the fourth decimal.",
+}
+
+
 def classify(name, clean_files, lib_files, exports):
     """-> (tier, verdict, note)"""
     if name in NOT_BUILTIN:
@@ -422,6 +476,13 @@ def classify(name, clean_files, lib_files, exports):
         tier = "1+2"          # the library re-exports a core name
     else:
         tier = "1"
+
+    if name in RENAMED_PORTS:
+        return tier, "have", RENAMED_PORTS[name]
+
+    if name in REVERTED_ON_GATE_E:
+        return tier, "n/a - measured and reverted on Gate E", (
+            REVERTED_ON_GATE_E[name])
 
     if name in WRONG_NAME_MATCH:
         return tier, "port", WRONG_NAME_MATCH[name] + "; PINEBI-1b"

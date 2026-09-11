@@ -2311,19 +2311,7 @@ class AnalysisIndicators(BasePandasObject):
         result = kc(high=high, low=low, close=close, length=length, scalar=scalar, mamode=mamode, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
-    def kcw(self, length=None, scalar=None, mamode=None, offset=None, **kwargs):
-        high = self._get_column(kwargs.pop("high", "high"))
-        low = self._get_column(kwargs.pop("low", "low"))
-        close = self._get_column(kwargs.pop("close", "close"))
-        result = kcw(high=high, low=low, close=close, length=length, scalar=scalar, mamode=mamode, offset=offset, **kwargs)
-        return self._post_process(result, **kwargs)
 
-    def rwi(self, length=None, offset=None, **kwargs):
-        high = self._get_column(kwargs.pop("high", "high"))
-        low = self._get_column(kwargs.pop("low", "low"))
-        close = self._get_column(kwargs.pop("close", "close"))
-        result = rwi(high=high, low=low, close=close, length=length, offset=offset, **kwargs)
-        return self._post_process(result, **kwargs)
 
     def pzo(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
@@ -2341,15 +2329,46 @@ class AnalysisIndicators(BasePandasObject):
         result = szo(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
-    def rms(self, length=None, offset=None, **kwargs):
-        close = self._get_column(kwargs.pop("close", "close"))
-        result = rms(close=close, length=length, offset=offset, **kwargs)
-        return self._post_process(result, **kwargs)
 
     def wpo(self, length=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         close = self._get_column(kwargs.pop("close", "close"))
         result = wpo(high=high, close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+
+    def ht(self, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ht(close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+
+    def frama(self, length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = frama(high=high, low=low, close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+
+
+    def vstop(self, length=None, factor=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = vstop(high=high, low=low, close=close, length=length, factor=factor, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def vstop2(self, length=None, factor=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = vstop2(high=high, low=low, close=close, length=length, factor=factor, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def stc_tv(self, fast=None, slow=None, cycle=None, d1=None, d2=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = stc_tv(close=close, fast=fast, slow=slow, cycle=cycle, d1=d1, d2=d2, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def massi(self, fast=None, slow=None, offset=None, **kwargs):

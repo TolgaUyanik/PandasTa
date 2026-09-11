@@ -27,7 +27,7 @@
 | Params (**declared signature**) | `length=None` |
 | Params (**effective defaults**) | STUB: not measured — fill from pandas_ta/momentum/szo.py |
 | Warm-up (dictionary probe) | 13 |
-| Engine wiring | **not reached by the engine** — absent from `INDICATOR_SPECS`, the import aliases and the `ta.szo(` scan of `indicator_engine.py` / `speedy_indicators.py` (INDREF-2 §5b). Call sites outside those two modules are a separate question: no script under `../Backtesting/scripts/analysis/` calls it either |
+| Engine wiring | **not reached by the engine** — absent from `INDICATOR_SPECS`, the import aliases and the `ta.szo(` scan of `indicator_engine.py` / `speedy_indicators.py` (INDREF-2 §5b). Call sites outside those two modules are a separate question: **1 Gate-E/analysis script(s)** under `../Backtesting/scripts/analysis/` do call it |
 | Provenance | STUB: not measured — fill from pandas_ta/momentum/szo.py |
 | Status | STUB: not measured — fill from docs/indicators/_facts.json |
 

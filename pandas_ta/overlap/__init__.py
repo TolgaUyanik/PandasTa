@@ -66,3 +66,4 @@ from .wcp import wcp
 from .wilder_rma import wilder_rma
 from .wma import wma
 from .zlma import zlma
+from .frama import frama
