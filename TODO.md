@@ -929,7 +929,8 @@ per row.
       `(h−l)/volume`, max|d| **4.99908e-11**). Its Gate A must go to Bill Williams directly.
       ⚠ **`TVPTA-9` still OPEN** — this fixed ONE harness; ~14 others still `select_dtypes`.
 
-- [ ] **ALTPORT-2 — Port the survivors through Gates A–F (MAJOR, depends on ALTPORT-1).**
+- [x] **ALTPORT-2 — Port the survivors through Gates A–F. ✅ DONE 2026-09-10** (`d3da929` port, `d5ad8ac` wiring + count reconciliation).
+      **3 of 20 shipped:** `cvi` (Gate E 0.501290 vs `CHOP`), `bw_mfi` (0.578897 vs `vol_at_low_ratio`), `smc_sweep` (0.161383 vs `CCI`) — all three below the 0.76 ship line, and all three later cleared by WIRE-0 and now called by the engine. Receipts: `docs/AltportPortsMeasured.md`. *(The checkbox sat unticked until 2026-09-11; the work was committed a day earlier.)*
       Five wiring touch points per `CLAUDE.md`. Attribution: pandas-ta-classic is MIT, tti is MIT —
       permissive, but attribution is still required on any port and neither repo may be committed
       into this one.
