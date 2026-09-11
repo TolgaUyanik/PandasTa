@@ -55,7 +55,7 @@ about the engine, not about this indicator.
 
 | Column | Dictionary ML form | warm-up | observed range on the probe fixture | Register verdict |
 |---|---|---|---|---|
-| `SSF_10_2` | `PX` | 0 | 36.1992 … 101.238 | no row |
+| `SSF_10_2` | `PX` | 0 | 36.1992 … 100.425 | no row |
 
 Per-column one-line descriptions are owed with §1: STUB: not measured — fill from pandas_ta/overlap/ssf.py
 
@@ -71,7 +71,7 @@ and were alive on real prices (`CLAUDE.md`, FVGDEAD).
 | | |
 |---|---|
 | Source | STUB: not measured — fill from pandas_ta/overlap/ssf.py |
-| Module length | 93 newline-terminated lines, 3122 bytes (`grep -c '' pandas_ta/overlap/ssf.py`) |
+| Module length | 105 newline-terminated lines, 3813 bytes (`grep -c '' pandas_ta/overlap/ssf.py`) |
 | Version / licence | STUB: not measured — fill from pandas_ta/overlap/ssf.py |
 | TA-Lib equivalent | STUB: not measured — fill from docs/TalibPortsMeasured.md |
 | Gate A anchor | STUB: not measured — fill from pandas_ta/overlap/ssf.py |

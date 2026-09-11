@@ -62,6 +62,7 @@ about the engine, not about this indicator.
 | `LINREG_LOWER_1` | `PX` | 19 | 35.8363 … 94.3431 | RELATIONAL (as `LINREG_LOWER_1`) |
 | `LINREG_UPPER_2` | `PX` | 19 | 37.7415 … 97.8352 | RELATIONAL (as `LINREG_UPPER_2`) |
 | `LINREG_LOWER_2` | `PX` | 19 | 35.1612 … 93.179 | RELATIONAL (as `LINREG_LOWER_2`) |
+| `LINREG_LOWER_2_DIST_PCT` | `SF` | 19 | -1.7667 … 8.99064 | no row |
 
 Per-column one-line descriptions are owed with §1: STUB: not measured — fill from pandas_ta/overlap/linreg_channel.py
 
@@ -77,7 +78,7 @@ and were alive on real prices (`CLAUDE.md`, FVGDEAD).
 | | |
 |---|---|
 | Source | STUB: not measured — fill from pandas_ta/overlap/linreg_channel.py |
-| Module length | 109 newline-terminated lines, 3552 bytes (`grep -c '' pandas_ta/overlap/linreg_channel.py`) |
+| Module length | 119 newline-terminated lines, 4105 bytes (`grep -c '' pandas_ta/overlap/linreg_channel.py`) |
 | Version / licence | STUB: not measured — fill from pandas_ta/overlap/linreg_channel.py |
 | TA-Lib equivalent | STUB: not measured — fill from docs/TalibPortsMeasured.md |
 | Gate A anchor | STUB: not measured — fill from pandas_ta/overlap/linreg_channel.py |
@@ -152,6 +153,8 @@ grep -c 'LINREG_DEV' ../Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'LINREG_DEV' ../Backtesting/backtest_results/
 grep -c 'LINREG_LOWER' ../Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'LINREG_LOWER' ../Backtesting/backtest_results/
+grep -c 'LINREG_LOWER_2_DIST_PCT' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -rl --no-ignore-files 'LINREG_LOWER_2_DIST_PCT' ../Backtesting/backtest_results/
 grep -c 'LINREG_SLOPE' ../Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'LINREG_SLOPE' ../Backtesting/backtest_results/
 grep -c 'LINREG_UPPER' ../Backtesting/datastore/source/StrategyMaster.csv
@@ -164,6 +167,7 @@ grep -rl --no-ignore-files 'LINREG_VALUE' ../Backtesting/backtest_results/
 |---|---|---|
 | `LINREG_DEV` | 0 | 212 |
 | `LINREG_LOWER` | 0 | 212 |
+| `LINREG_LOWER_2_DIST_PCT` | STUB: not measured — fill from docs/indicators/_facts.json | STUB: not measured — fill from docs/indicators/_facts.json |
 | `LINREG_SLOPE` | 0 | 226 |
 | `LINREG_UPPER` | 0 | 212 |
 | `LINREG_VALUE` | 0 | 212 |
@@ -206,7 +210,7 @@ changes, or deletes a number here without saying where it came from.
 
 | metric | n | @ artifact / provenance class |
 |---|---|---|
-| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=14 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/docs/knowledgebase/IndicatorMLRegister.md |
+| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=16 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/docs/knowledgebase/IndicatorMLRegister.md |
 | §6#P — the probe's scale ratio | n=1 | @ docs/gen_indicator_dictionary.py — ×137 probe ratio, live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 |
 | §7#P — overlap ship line | n=4 | @ ../Backtesting/scripts/analysis/measure_linreg_channel_overlap_full.py |
 

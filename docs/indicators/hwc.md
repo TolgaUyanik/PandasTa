@@ -58,6 +58,8 @@ about the engine, not about this indicator.
 | `HW-MID` | `PX` | 0 | 36.4237 … 100.081 | no row |
 | `HW-UPPER` | `PX` | 0 | 37.2451 … 100.081 | no row |
 | `HW-LOWER` | `PX` | 0 | 35.6022 … 100.081 | no row |
+| `HW-UPPER_DIST_PCT` | `SF` | 0 | -9.90662 … 4.52267 | no row |
+| `HW-LOWER_DIST_PCT` | `SF` | 0 | -4.12822 … 11.4732 | no row |
 
 Per-column one-line descriptions are owed with §1: STUB: not measured — fill from pandas_ta/volatility/hwc.py
 
@@ -73,7 +75,7 @@ and were alive on real prices (`CLAUDE.md`, FVGDEAD).
 | | |
 |---|---|
 | Source | STUB: not measured — fill from pandas_ta/volatility/hwc.py |
-| Module length | 153 newline-terminated lines, 5818 bytes (`grep -c '' pandas_ta/volatility/hwc.py`) |
+| Module length | 170 newline-terminated lines, 6659 bytes (`grep -c '' pandas_ta/volatility/hwc.py`) |
 | Version / licence | STUB: not measured — fill from pandas_ta/volatility/hwc.py |
 | TA-Lib equivalent | STUB: not measured — fill from docs/TalibPortsMeasured.md |
 | Gate A anchor | STUB: not measured — fill from pandas_ta/volatility/hwc.py |
@@ -146,17 +148,23 @@ Column-name stems (the parameter tail is what a mined rule varies, so the grep d
 ```sh
 grep -c 'HW-LOWER' ../Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'HW-LOWER' ../Backtesting/backtest_results/
+grep -c 'HW-LOWER_DIST_PCT' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -rl --no-ignore-files 'HW-LOWER_DIST_PCT' ../Backtesting/backtest_results/
 grep -c 'HW-MID' ../Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'HW-MID' ../Backtesting/backtest_results/
 grep -c 'HW-UPPER' ../Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'HW-UPPER' ../Backtesting/backtest_results/
+grep -c 'HW-UPPER_DIST_PCT' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -rl --no-ignore-files 'HW-UPPER_DIST_PCT' ../Backtesting/backtest_results/
 ```
 
 | stem | lines in `StrategyMaster.csv` | files under `backtest_results/` |
 |---|---|---|
 | `HW-LOWER` | 0 | 0 |
+| `HW-LOWER_DIST_PCT` | STUB: not measured — fill from docs/indicators/_facts.json | STUB: not measured — fill from docs/indicators/_facts.json |
 | `HW-MID` | 0 | 0 |
 | `HW-UPPER` | 0 | 0 |
+| `HW-UPPER_DIST_PCT` | STUB: not measured — fill from docs/indicators/_facts.json | STUB: not measured — fill from docs/indicators/_facts.json |
 
 **Nothing in either.** This generator cannot tell you whether that means *no mining sweep
 has run since this module landed* or *swept and never selected* — those have opposite
@@ -197,7 +205,7 @@ changes, or deletes a number here without saying where it came from.
 
 | metric | n | @ artifact / provenance class |
 |---|---|---|
-| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=6 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/docs/knowledgebase/IndicatorMLRegister.md |
+| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=10 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/docs/knowledgebase/IndicatorMLRegister.md |
 | §6#P — the probe's scale ratio | n=1 | @ docs/gen_indicator_dictionary.py — ×137 probe ratio, live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 |
 | §7#P — overlap ship line | n=4 | @ ../Backtesting/scripts/analysis/measure_hwc_overlap_full.py |
 

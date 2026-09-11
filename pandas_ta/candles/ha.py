@@ -27,6 +27,14 @@ def ha(open_, high, low, close, offset=None, **kwargs):
     df["HA_high"] = df[["HA_open", "HA_high", "HA_close"]].max(axis=1)
     df["HA_low"] = df[["HA_open", "HA_low", "HA_close"]].min(axis=1)
 
+    # MLCOL-1 companion. All four HA columns are PX (price levels) and so
+    # unusable as ML features; this is the one whose DISTANCE form survived
+    # the screen (max rho 0.7035 vs `DIST_PREV_HIGH`) AND axis 3a.
+    # ⚠ Its evidence is at h=1 ONLY -- at h=5 it beats its shuffled null on
+    # just 10 of 15 runs with a negative mean importance. Disclosed rather
+    # than averaged away.
+    df["HA_high_DIST_PCT"] = 100.0 * (close - df["HA_high"]) / close
+
     # Offset
     if offset != 0:
         df = df.shift(offset)

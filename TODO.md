@@ -981,7 +981,7 @@ a non-stationary series sits at its own window extreme constantly. Ranking the D
 to check a name against, and a name check passes every renamed column. Pass
 `allow_nonstationary=True` to override deliberately.
 
-- [ ] **MLCOL-1 — Roll the contract out, PX columns first (MAJOR, UNBLOCKED — MLCOL-0 done).** Order the work
+- [~] **MLCOL-1 — Roll the contract out, PX columns first. 🔶 MEASURED IN FULL AND 5 SHIPPED 2026-09-12; the stated Done-when CANNOT be met honestly — see below.** Order the work
   by the dictionary's *"Needs a transform before modelling"* table — those indicators are unusable as
   features today, so they pay back first.
   **Done when:** every `PX` column in the dictionary has a scale-free companion, and the regenerated
@@ -991,6 +991,61 @@ to check a name against, and a name check passes every renamed column. Pass
   opening paragraph of `docs/MLCompanionContract.md`; it is Counter-derived from the generated
   dictionary and asserted by `tests/test_ml_companions.py`. Four different numbers for that one
   quantity were in circulation on 2026-09-08 — do not retype it.)
+
+  ✅ **What was done (2026-09-11/12).** All **137** `PX` columns screened before anything was
+  written, then the survivors put through the incremental axis, then redundancy checked *among the
+  survivors*. Receipts: `docs/MLCol1Screen.md`, `docs/MLCol1Axes.md`, and the two harnesses
+  `../Backtesting/scripts/analysis/measure_mlcol1_{screen,axes}.py`.
+
+  **The funnel, every step measured:**
+  137 proposed → **82 restate a shipped column at ρ ≥ 0.90** → 36 land in the disclosure band →
+  **2 parents read the future** → 4 could not be probed → **13 clear Gate E** → **6 show
+  incremental evidence** → **5 after removing redundancy among the survivors**.
+
+  **SHIPPED (5):** `HA_high_DIST_PCT` (ha), `HW-UPPER_DIST_PCT` + `HW-LOWER_DIST_PCT` (hwc),
+  `LINREG_LOWER_2_DIST_PCT` (linreg_channel), `THERMO_20_2_0.5_RATIO_PCT` (thermo). All
+  scale-free bit-identical ×8/×64, all causal, `tests/test_mlcol1_companions.py` 34 passed.
+  `SF` 207 → **212**.
+
+  🔴 **THE DONE-WHEN AS WRITTEN CANNOT BE SATISFIED HONESTLY, and this is the finding, not an
+  excuse.** It asks that *"every `PX` column has a scale-free companion"* and that *"no indicator
+  whose entire output is `PX`"* remains — **71 indicators are still all-`PX`**, nearly all of them
+  moving averages. Meeting it means emitting ~71 more companions, and the screen MEASURED that
+  their `DIST_PCT` forms restate columns the engine already ships: **15 restate
+  `NWE_MID_200_8.0_8.0`, 14 restate `bias`** — the exact columns this task's own contract told it
+  to screen against. Satisfying the acceptance criterion would therefore require violating the
+  contract's non-redundancy rule 82 times over.
+  **Proposed amendment, for the owner:** *"every `PX` column has been SCREENED for a companion,
+  and one is emitted wherever it clears Gate E, the incremental axis, and redundancy against the
+  other survivors."* Under that reading MLCOL-1 is done. Left as `[~]` because rewriting one's own
+  acceptance criterion is the owner's call, not the executor's.
+
+  ⚠ **Three findings that outlive this task:**
+  1. 🔴 **`ssf` READ THE FUTURE — an undocumented look-ahead in shipped code, now fixed**
+     (`f3ff67a`). Its recursion ran `for i in range(0, m)`, so at `i = 0` it read `ssf.iloc[-1]`,
+     the LAST bar of the series. Perturbing only bars ≥ 300 of a 400-bar frame moved **bar 0** by
+     31.4. `CLAUDE.md` claimed the causality exception list was "complete" at two columns; it was
+     three, and the claim is corrected. Independent corroboration: `ssf` vs pandas-ta-classic
+     moved `port - alternate impl` → `have`, `divergent` → `identical`, agreeing on all 260
+     values — the divergence WAS the bug.
+  2. 🔴 **Causality must PRECEDE the incremental axis, not sit beside it.** The leaking `dpo`
+     companion was ranked **first** by axis 3a — ΔAUC +0.0473, permutation importance +0.35693,
+     15/15 beats-null — in a field where every honest candidate scored ~0.01. Leakage is the
+     strongest signal a model can be handed, so the axis *promotes* a non-causal feature rather
+     than rejecting it, with every control behaving exactly as designed. Recorded in
+     `docs/MLCompanionContract.md`. Note `dpo`'s `centered=True` is its **default**.
+  3. **Gate E is blind to redundancy AMONG candidates.** It measures each against the SHIPPED
+     set. Three `hwc` companions each cleared it and the axis, then read ρ +0.9257 / +0.9213
+     against each other — `HW-MID` is the hub and carries nothing independent once both edges are
+     kept. Dropped. This is the PB_LO/PB_UP lesson again: a survivor set is itself a correlation
+     gate that nobody ran.
+
+  ⚠ **The contract's single DISTANCE formula does not fit all `PX` parents.** `(close - parent) /
+  close` is right for a **level**; 37 of the 137 are price **differences** centred on zero, where
+  it evaluates to ≈1.0 with the signal in the fourth decimal. Those are screened and shipped as
+  `parent / close` and NAMED `_RATIO_PCT`, because naming is API and calling a ratio a distance
+  misdescribes it permanently.
+
   ⚠ **MLCOL-2 added a prerequisite screen:** Gate E is necessary but NOT sufficient (it would have
   shipped `FVG_BULL_RATE_60`), and every MA-family `DIST_PCT` must be checked against the engine's
   existing relational columns first — `SMA_10_DIST_PCT` died at ρ 0.946 against `NWE_MID_200_8.0_8.0`.

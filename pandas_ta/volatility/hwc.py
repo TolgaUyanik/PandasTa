@@ -93,15 +93,32 @@ def hwc(close, na=None, nb=None, nc=None, nd=None, scalar=None, channel_eval=Non
         hwc_width.name = 'HW-WIDTH'
         hwc_pctwidth.name = 'HW-PCTW'
 
+    # MLCOL-1 companions. The three channel lines are PX; their DISTANCE
+    # forms were screened and axis-3a'd, and the two EDGES survived
+    # (15/15 beats-null each). **`HW-MID`'s companion is deliberately NOT
+    # emitted**: it reads rho +0.9257 against HW-LOWER's and +0.9213 against
+    # HW-UPPER's, so with both edges kept it carries nothing independent --
+    # three columns for one signal is what the contract's non-redundancy rule
+    # forbids. The two edges are 0.7306 apart and are kept.
+    hwc_upper_dist = 100.0 * (close - hwc_upper) / close
+    hwc_lower_dist = 100.0 * (close - hwc_lower) / close
+    hwc_upper_dist.name = "HW-UPPER_DIST_PCT"
+    hwc_lower_dist.name = "HW-LOWER_DIST_PCT"
+    hwc_upper_dist.category = hwc_lower_dist.category = hwc.category
+
     # Prepare DataFrame to return
     if channel_eval:
         data = {hwc.name: hwc, hwc_upper.name: hwc_upper, hwc_lower.name: hwc_lower,
-                hwc_width.name: hwc_width, hwc_pctwidth.name: hwc_pctwidth}
+                hwc_width.name: hwc_width, hwc_pctwidth.name: hwc_pctwidth,
+                hwc_upper_dist.name: hwc_upper_dist,
+                hwc_lower_dist.name: hwc_lower_dist}
         df = DataFrame(data)
         df.name = "hwc"
         df.category = hwc.category
     else:
-        data = {hwc.name: hwc, hwc_upper.name: hwc_upper, hwc_lower.name: hwc_lower}
+        data = {hwc.name: hwc, hwc_upper.name: hwc_upper, hwc_lower.name: hwc_lower,
+                hwc_upper_dist.name: hwc_upper_dist,
+                hwc_lower_dist.name: hwc_lower_dist}
         df = DataFrame(data)
         df.name = "hwc"
         df.category = hwc.category

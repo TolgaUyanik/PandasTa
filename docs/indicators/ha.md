@@ -59,6 +59,7 @@ about the engine, not about this indicator.
 | `HA_high` | `PX` | 0 | 36.3435 … 100.985 | RELATIONAL (as `ha_HA_high`) |
 | `HA_low` | `PX` | 0 | 35.4226 … 99.8187 | RELATIONAL (as `ha_HA_low`) |
 | `HA_close` | `PX` | 0 | 35.9194 … 100.382 | RELATIONAL (as `ha_HA_close`) |
+| `HA_high_DIST_PCT` | `SF` | 0 | -5.89227 … -0.00297924 | no row |
 
 Per-column one-line descriptions are owed with §1: STUB: not measured — fill from pandas_ta/candles/ha.py
 
@@ -74,7 +75,7 @@ and were alive on real prices (`CLAUDE.md`, FVGDEAD).
 | | |
 |---|---|
 | Source | STUB: not measured — fill from pandas_ta/candles/ha.py |
-| Module length | 94 newline-terminated lines, 3149 bytes (`grep -c '' pandas_ta/candles/ha.py`) |
+| Module length | 102 newline-terminated lines, 3521 bytes (`grep -c '' pandas_ta/candles/ha.py`) |
 | Version / licence | STUB: not measured — fill from pandas_ta/candles/ha.py |
 | TA-Lib equivalent | STUB: not measured — fill from docs/TalibPortsMeasured.md |
 | Gate A anchor | STUB: not measured — fill from pandas_ta/candles/ha.py |
@@ -149,6 +150,8 @@ grep -c 'HA_close' ../Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'HA_close' ../Backtesting/backtest_results/
 grep -c 'HA_high' ../Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'HA_high' ../Backtesting/backtest_results/
+grep -c 'HA_high_DIST_PCT' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -rl --no-ignore-files 'HA_high_DIST_PCT' ../Backtesting/backtest_results/
 grep -c 'HA_low' ../Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'HA_low' ../Backtesting/backtest_results/
 grep -c 'HA_open' ../Backtesting/datastore/source/StrategyMaster.csv
@@ -159,6 +162,7 @@ grep -rl --no-ignore-files 'HA_open' ../Backtesting/backtest_results/
 |---|---|---|
 | `HA_close` | 0 | 211 |
 | `HA_high` | 0 | 211 |
+| `HA_high_DIST_PCT` | STUB: not measured — fill from docs/indicators/_facts.json | STUB: not measured — fill from docs/indicators/_facts.json |
 | `HA_low` | 0 | 211 |
 | `HA_open` | 0 | 211 |
 
@@ -200,7 +204,7 @@ changes, or deletes a number here without saying where it came from.
 
 | metric | n | @ artifact / provenance class |
 |---|---|---|
-| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=8 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/docs/knowledgebase/IndicatorMLRegister.md |
+| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=10 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/docs/knowledgebase/IndicatorMLRegister.md |
 | §6#P — the probe's scale ratio | n=1 | @ docs/gen_indicator_dictionary.py — ×137 probe ratio, live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 |
 | §7#P — overlap ship line | n=4 | @ ../Backtesting/scripts/analysis/measure_ha_overlap_full.py |
 

@@ -111,7 +111,7 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`cdl_inside`](cdl_inside.md) | yes | 1 | stub |
 | [`cdl_pattern`](cdl_pattern.md) | yes | 62 | stub |
 | [`cdl_z`](cdl_z.md) | yes | 4 | stub |
-| [`ha`](ha.md) | yes | 4 | stub |
+| [`ha`](ha.md) | yes | 5 | stub |
 
 ### 5.2 `cycles` (8)
 
@@ -212,7 +212,7 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`jma`](jma.md) | yes | 1 | stub |
 | [`kama`](kama.md) | yes | 1 | stub |
 | [`linreg`](linreg.md) | yes | 1 | stub |
-| [`linreg_channel`](linreg_channel.md) | yes | 7 | stub |
+| [`linreg_channel`](linreg_channel.md) | yes | 8 | stub |
 | [`ma_disparity`](ma_disparity.md) | yes | 2 | stub |
 | [`mama`](mama.md) | **no** | 0 | measured |
 | [`mcgd`](mcgd.md) | yes | 1 | stub |
@@ -348,14 +348,14 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`cvi`](cvi.md) | yes | 1 | measured |
 | [`donchian`](donchian.md) | yes | 3 | stub |
 | [`har_park`](har_park.md) | yes | 1 | measured |
-| [`hwc`](hwc.md) | yes | 3 | stub |
+| [`hwc`](hwc.md) | yes | 5 | stub |
 | [`kc`](kc.md) | yes | 3 | stub |
 | [`massi`](massi.md) | yes | 1 | stub |
 | [`natr`](natr.md) | yes | 1 | stub |
 | [`pdist`](pdist.md) | yes | 1 | stub |
 | [`range_profile`](range_profile.md) | yes | 3 | measured |
 | [`rvi`](rvi.md) | yes | 1 | stub |
-| [`thermo`](thermo.md) | yes | 4 | stub |
+| [`thermo`](thermo.md) | yes | 5 | stub |
 | [`true_range`](true_range.md) | yes | 1 | stub |
 | [`ui`](ui.md) | yes | 1 | stub |
 

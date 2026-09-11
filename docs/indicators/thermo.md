@@ -23,7 +23,7 @@
 | Registered in `Category` | yes — `Category['volatility']`, so `df.ta.strategy()` sweeps it |
 | Accessor | yes — `df.ta.thermo()` |
 | Tests | no `tests/test_thermo.py`; covered only by the suite-wide guards (`tests/test_wiring_accessors.py`, the category suites) |
-| Inputs | H/L |
+| Inputs | H/L/C |
 | Params (**declared signature**) | `length=None`, `long=None`, `short=None`, `mamode=None`, `drift=None` |
 | Params (**effective defaults**) | STUB: not measured — fill from pandas_ta/volatility/thermo.py |
 | Warm-up (dictionary probe) | 19 |
@@ -56,6 +56,7 @@ about the engine, not about this indicator.
 | Column | Dictionary ML form | warm-up | observed range on the probe fixture | Register verdict |
 |---|---|---|---|---|
 | `THERMO_20_2_0.5` | `PX` | 1 | 0.0414915 … 3.13223 | no row |
+| `THERMO_20_2_0.5_RATIO_PCT` | `SF` | 1 | 0.0687796 … 4.15372 | no row |
 | `THERMOma_20_2_0.5` | `PX` | 19 | 0.352614 … 1.41969 | no row |
 | `THERMOl_20_2_0.5` | `BIN` | 0 | 0 … 1 | no row |
 | `THERMOs_20_2_0.5` | `BIN` | 0 | 0 … 1 | no row |
@@ -74,7 +75,7 @@ and were alive on real prices (`CLAUDE.md`, FVGDEAD).
 | | |
 |---|---|
 | Source | STUB: not measured — fill from pandas_ta/volatility/thermo.py |
-| Module length | 124 newline-terminated lines, 4220 bytes (`grep -c '' pandas_ta/volatility/thermo.py`) |
+| Module length | 143 newline-terminated lines, 5290 bytes (`grep -c '' pandas_ta/volatility/thermo.py`) |
 | Version / licence | STUB: not measured — fill from pandas_ta/volatility/thermo.py |
 | TA-Lib equivalent | STUB: not measured — fill from docs/TalibPortsMeasured.md |
 | Gate A anchor | STUB: not measured — fill from pandas_ta/volatility/thermo.py |
@@ -147,6 +148,8 @@ Column-name stems (the parameter tail is what a mined rule varies, so the grep d
 ```sh
 grep -c 'THERMO' ../Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'THERMO' ../Backtesting/backtest_results/
+grep -c 'THERMO_20_2_0.5_RATIO_PCT' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -rl --no-ignore-files 'THERMO_20_2_0.5_RATIO_PCT' ../Backtesting/backtest_results/
 grep -c 'THERMOl' ../Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'THERMOl' ../Backtesting/backtest_results/
 grep -c 'THERMOma' ../Backtesting/datastore/source/StrategyMaster.csv
@@ -158,6 +161,7 @@ grep -rl --no-ignore-files 'THERMOs' ../Backtesting/backtest_results/
 | stem | lines in `StrategyMaster.csv` | files under `backtest_results/` |
 |---|---|---|
 | `THERMO` | 0 | 0 |
+| `THERMO_20_2_0.5_RATIO_PCT` | STUB: not measured — fill from docs/indicators/_facts.json | STUB: not measured — fill from docs/indicators/_facts.json |
 | `THERMOl` | 0 | 0 |
 | `THERMOma` | 0 | 0 |
 | `THERMOs` | 0 | 0 |
@@ -201,7 +205,7 @@ changes, or deletes a number here without saying where it came from.
 
 | metric | n | @ artifact / provenance class |
 |---|---|---|
-| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=4 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/docs/knowledgebase/IndicatorMLRegister.md |
+| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=6 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/docs/knowledgebase/IndicatorMLRegister.md |
 | §6#P — the probe's scale ratio | n=1 | @ docs/gen_indicator_dictionary.py — ×137 probe ratio, live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 |
 | §7#P — overlap ship line | n=4 | @ ../Backtesting/scripts/analysis/measure_thermo_overlap_full.py |
 
