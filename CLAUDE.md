@@ -122,7 +122,22 @@ hurt to lose, with the measured numbers. Match that when adding one — see `tes
 
 ## Known breaks
 
-None outstanding. Two indicators (`up_and_down_volume`, `volume_delta`) are **not probed** —
+🔴 **One test fails on a clean checkout, and it is not flaky.**
+`tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` asserts that every
+`<path>:<n>` citation in `docs/pine_builtin_coverage.csv`'s audit evidence resolves to a real
+file. It does not: the first failing row is `supertrend`, citing `RA2vGpkA-ta.pine`. **The cause
+is `8d8f705`, which untracked the 2,211-file `docs/pine/` corpus for licensing reasons** — 912 of
+those files are MPL-2.0 under a root MIT `LICENSE`. The citations were never updated, so the
+guard now demands files this repo deliberately does not carry, and it will fail for every person
+who clones it.
+
+Full suite as of 2026-09-12: **1 failed, 3197 passed, 24 skipped**.
+
+Neither fix is small, which is why this is recorded rather than patched: re-adding the corpus
+reverses a licensing decision, and rewriting the guard to accept unresolvable citations removes
+the only thing standing between "audited" and "asserted". **Owner's call.**
+
+Separately, two indicators (`up_and_down_volume`, `volume_delta`) are **not probed** —
 they need a lower-timeframe frame the single-frame harness cannot synthesise — and the generated
 *Known breaks* section says so rather than counting them either way. Verify with
 `python docs/gen_indicator_dictionary.py`, whose *Known breaks* section is generated from a live

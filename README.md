@@ -66,6 +66,37 @@ help(ta.bbands)                    # signature, params, output columns, sources
 
 ---
 
+## Runnable examples
+
+Two, in `examples/`. Both compute a wide indicator panel and then check it against the three
+rules in the next section — a column must be **causal**, **scale-free** and **non-redundant**.
+
+| file | what it is |
+|---|---|
+| [`examples/market_dashboard.py`](examples/market_dashboard.py) | The tested reference. Run it. |
+| [`examples/speedy_analysis.ipynb`](examples/speedy_analysis.ipynb) | The same ground as a narrative notebook, with committed outputs. **Not executed by the test suite** — its outputs are a snapshot, not a guarantee. |
+
+```sh
+pip install "pandas-ta[examples]"                # only if you want the yfinance loader
+
+python examples/market_dashboard.py --offline    # no network at all, synthetic data
+python examples/market_dashboard.py              # AAPL via yfinance, or synthetic if offline
+python examples/market_dashboard.py --out panel.csv
+```
+
+It exits non-zero if any indicator call fails, and reports which — the source it derives from
+used a bare `except: continue`, and **16 of its indicator specs had been raising on every call
+without ever emitting a column**. It also prints how many of the registered indicators it
+exercises, computed from `ta.Category` rather than typed in.
+
+**What the examples deliberately do not contain:** any composite score, threshold, weighting or
+BULLISH/BEARISH verdict. This library computes indicators; deciding what they mean is your job.
+The reasoning is recorded in [`docs/SHOWCASE_SCOPE.md`](docs/SHOWCASE_SCOPE.md) and enforced by
+`tests/test_showcase.py`. The demo data is **not** cleaned for corporate actions or exchange
+price limits — that belongs in your data layer.
+
+---
+
 ## Using this for machine learning
 
 Fork rules. Read before feeding any column to a model.
