@@ -75,10 +75,6 @@ setup(
     # for a `data` package that does not exist in this tree.
     install_requires=["pandas", "numpy"],
     extras_require={
-        # The shipped examples need exactly one thing beyond the base install. Its own extra,
-        # not buried in `dev` beside talib/vectorbt/scikit-learn, so that running an example
-        # does not mean installing a research toolchain. Same reasoning as the `talib` extra.
-        "examples": ["yfinance"],
         "dev": [
             "alphaVantage-api", "matplotlib", "mplfinance", "scipy",
             "scikit-learn", "statsmodels", "stochastic",

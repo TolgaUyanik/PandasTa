@@ -12,8 +12,8 @@ Column inventory and ML form of everything currently shipped: `docs/IndicatorDic
 
 # ═══ ACTIVE ═══
 
-**Three items are open: MLCOL-1 (its acceptance criterion cannot be met honestly), SHOWCASE and
-IMPL (both added 2026-09-12 on the owner's request).** Everything else in this file's history is finished; the full blocks — with the
+**Two items are open: MLCOL-1 (its acceptance criterion cannot be met honestly) and IMPL (added
+2026-09-12 on the owner's request).** Everything else in this file's history is finished; the full blocks — with the
 measured evidence, the reverts and the traps — moved to **[`docs/CompletedWork.md`](docs/CompletedWork.md)**
 on 2026-09-12. Read that before re-opening anything, because most of what it records is *why a
 column is not here*.
@@ -22,8 +22,8 @@ Suite at that point: **3,166 passed / 0 failed / 23 skipped**. `Category` **233*
 
 ## Open
 
-Three items: **MLCOL-1** (below, open only because its acceptance criterion cannot be
-met honestly), **SHOWCASE** and **IMPL** (both new 2026-09-12, owner-requested).
+Two items: **MLCOL-1** (below, open only because its acceptance criterion cannot be
+met honestly) and **IMPL** (new 2026-09-12, owner-requested).
 
 ## IMPL — the indicator implementation manual + scaffolding (NEW 2026-09-12, owner)
 
@@ -128,8 +128,7 @@ the current process assumes a runnable oracle exists, and for a paper it does no
   executed, not that a column shipped.
 
 ⚠ **Ties.** Supersedes the recipe half of `../Backtesting/docs/TVPTA6-Indicator-Porting-Process.md`
-(which keeps its case-study half). Feeds **SHOWCASE-3**, which has to demonstrate the fork's own
-indicators and will need this doc's covered-name discipline. Gate rationale and the ρ ≈ 0.9 revert
+(which keeps its case-study half). Gate rationale and the ρ ≈ 0.9 revert
 / 0.76–0.80 disclose / < 0.76 ship lines come from the same protocol — do not restate them with
 different numbers. Companion-column rules live in `docs/MLCompanionContract.md` and stay there; the
 manual links, it does not fork them. Reference-page generation is already solved by
@@ -142,98 +141,6 @@ review, almost none of them on the mathematics. A manual is where that defect pr
 because every future port inherits its wording. Every sentence in it containing *only, never,
 always, every, all, identical* or a specific count must correspond to a run, and the doc must say
 so about itself.
-
-## SHOWCASE — a runnable demo that shows what the fork can actually do (NEW 2026-09-12, owner)
-
-> **Goal (user):** *"I want to add `Backtesting/SpeedyAnalysisDaily.py` to PandasTa with latest
-> improvements. It can show the full potential of the library."* — a flagship example in this repo
-> that a stranger can run, that exercises the fork rather than upstream, and that is honest about
-> what it computes.
-
-**Source file, measured 2026-09-12:** `../Backtesting/SpeedyAnalysisDaily.py`, 1,207 lines,
-**untracked in git** (`git status` → `??`, not ignored). It calls **128 distinct pandas_ta names**
-— 104 `INDICATOR_SPECS` rows plus 24 direct `ta.<name>(` calls — of which **125 are in `Category`**
-(`drawdown`, `hwma`, `vp` are module-level only). **16 of those raise on every call**, so what the
-file demonstrates today is **109 of 233** registered indicators, and **zero of the 34 this fork
-added**. As a showcase of "full potential" it is currently a showcase of upstream.
-
-- [~] **SHOWCASE-0 — Decide what may be published, BEFORE writing any code (BLOCKER). 🔶 DELIVERED 2026-09-12, ESCALATED: needs the owner's signature.** OUTCOME: [`docs/SHOWCASE_SCOPE.md`](docs/SHOWCASE_SCOPE.md) — 15 blocks, each `publish`/`synthesise`/`drop`. Owner chose **drop** for the scoring layer, overruling this task's own `synthesise` default. Enforced by `test_examples_contain_no_strategy_content` and `test_no_private_universe_leaks_into_the_examples`. 🔴 **The signature line is the acceptance criterion and only the owner can supply it** — an executor signing on the owner's behalf would defeat an IP gate. ⚠ SHOWCASE-1..5 were built before it closed, contrary to this item's own wording. Log: [`docs/reviews/auto-2026-09-12-showcase/`](docs/reviews/auto-2026-09-12-showcase/)
-
-  ⚠ **Two self-inflicted leaks were caught during the run, both in files that ship publicly.** The scope document itself restated the exact threshold ladder, weights and verdict boundaries it was refusing to publish; and the leak-guard test hard-coded twenty real symbols. Both fixed — the doc now names the *shape* of a rule and never its values, and the test compares truncated SHA-256 digests. **A document about what must not be published is the worst possible place to leak from; check new prose against the never-infer list, not against the block table.**
-
-  `PandasTa` is a **public** repo and the root `CLAUDE.md` rule is *"Do not publish strategy rules
-  externally — these are internal IP."* The file as it stands cannot be copied across:
-  it imports `SIGNAL_THRESHOLDS`, `INDICATOR_WEIGHTS`, `GLOBAL_MARKETS`, `US_SECTOR_ETFS`,
-  `BIST_SECTORS`, `get_all_market_tickers` from `deploy/app/core/config.py`, and
-  `MarketSignalCalculator.calculate_composite_score` encodes a live weighting and threshold ladder
-  (RSI bands, ADX strength cuts, the 25/25/25/25 composite, the BULLISH/NEUTRAL/BEARISH cut points).
-  **Done when:** a short `docs/SHOWCASE_SCOPE.md` states, per block, `publish` / `synthesise` /
-  `drop`, and the owner has signed it. Default proposal, for the owner to accept or overrule:
-  publish the **indicator computation**, replace every threshold/weight with neutral demo constants
-  defined *in the example file itself*, drop the BIST sector map and the ticker universes, keep no
-  import from `deploy/`.
-  ⚠ This is the gate. Nothing below starts until it closes.
-
-- [x] **SHOWCASE-1 — Fix the 16 broken specs IN THE COPY. ✅ DONE 2026-09-12.** OUTCOME: all 16 corrected in `examples/market_dashboard.py`, each marked `# FIXED:` with its defect. The three needing a DERIVED series (`long_run`, `short_run`, `trend_return`) are in `DERIVED_SPECS` — a table keyed on column names cannot express them, which is why the original called them wrongly. 125 specs + 3 derived → **0 failures**. The blind test reinstates the original defect (`aberration` with `close` alone) to prove the reporting path sees a raising call. Log: [`docs/reviews/auto-2026-09-12-showcase/`](docs/reviews/auto-2026-09-12-showcase/)
-  <!-- superseded heading text follows -->
-- [ ] ~~SHOWCASE-1 (original text)~~ ** The file carries a **7th copy**
-  of the `INDICATOR_SPECS` table — INDREF-2 §5d counted six, and this untracked file was outside
-  that census. All **16** known-broken arg lists are present, verified 2026-09-12:
-  `aberration eom hilo kc long_run pdist pgo pvol pvr rvgi short_run smi squeeze thermo
-  trend_return ttm_trend`. Each raises `TypeError` (`smi` raises `ValueError`) and is swallowed by
-  the bulk loop's bare `except: continue`, so it has never emitted a column.
-  **Done when:** the example's spec table calls every one of the 16 with a signature-correct arg
-  list, and a test executes all 104 specs against a synthetic frame asserting **zero** swallowed
-  exceptions. Publishing the table unfixed would ship the defect as the fork's recommended usage.
-  ⚠ **Scope is the PandasTa copy only.** The four copies inside `deploy/` are frozen (owner
-  decision 1 in this file's *Owner decisions outstanding*); do not touch them, and do not treat
-  fixing them as implied by this task.
-
-- [x] **SHOWCASE-2 — Delete the bare `except: continue`. ✅ DONE 2026-09-12.** OUTCOME: failures returned as `(name, exception)` and printed; exit status non-zero on any failure, on an unknown look-ahead, or on a probe that raised. 🔴 **The gate caught the same swallow rebuilt by typo** — `check_causality`'s error branch wrote a `causal` key while every reader looked at `verdict`, so a raising probe became a NaN, invisible to the summary, the exit code and its own test. Three of four reviewers found it independently. Pinned by `test_a_raising_probe_is_reported_not_swallowed`. Log: [`docs/reviews/auto-2026-09-12-showcase/`](docs/reviews/auto-2026-09-12-showcase/)
-  <!-- superseded -->
-- [ ] ~~SHOWCASE-2 (original text)~~ ** `calculate_advanced_indicators`
-  wraps each call in `except: continue` and the per-block helpers in
-  `except Exception as e: print(...)`. That construct is exactly what hid the 16 for the life of
-  the file. An example teaches its error handling as much as its indicators.
-  **Done when:** failures are collected into a reported list (name → exception) and printed as a
-  summary, the run's exit status reflects an unexpected failure, and no bare `except:` remains.
-
-- [x] **SHOWCASE-3 — Make it exercise THIS fork, not upstream. ✅ DONE 2026-09-12.** OUTCOME: coverage **158 → 190 of 233 (68% → 82%)**, computed from `ta.Category` at runtime and asserted by test. First pass shipped five SMC ports and called the family done; the gate found 16 more registered structure modules plus 7 PINEBI alternates and 9 other fork originals untouched. All five MLCOL-1 companions reachable and asserted; `HW-MID_DIST_PCT` pinned absent; the seven Gate-E reverts pinned un-resurrected. `NOT_EXERCISED_BY_DESIGN` carries a reason per skip and the example prints the 43 that still have none. Log: [`docs/reviews/auto-2026-09-12-showcase/`](docs/reviews/auto-2026-09-12-showcase/)
-  <!-- superseded -->
-- [ ] ~~SHOWCASE-3 (original text)~~ ** 108 `Category` names are
-  never touched, and none of the fork's additions appear. Add a section covering the fork's own
-  work: the Pine built-ins (`pzo`, `szo`, `vzo`, `wpo`, `frama`, `ht`, `stc_tv`, `vstop`,
-  `vstop2`), the TA-Lib gap fills (Hilbert family, `imi`, `sarext`), the chart patterns, the SMC
-  ports, `ichimoku_ml`, `wilder_rma`, and the five MLCOL-1 companions.
-  **Done when:** the example's covered-name count is **printed by the example itself** and
-  asserted by a test against `Category` — never retyped into prose. Two named columns from the
-  fork's ML-companion work appear in the output frame.
-  ⚠ Deliberate absences are load-bearing: `beta`, `up_and_down_volume` and `volume_delta` are out
-  of `Category` on purpose, and the seven Gate-E reverts must not be "completed" back in. State
-  the covered count as a fraction of what is registered, not as coverage of everything nameable.
-
-- [x] **SHOWCASE-4 — Sever `yfinance` and `deploy/` from the test path. ✅ DONE 2026-09-12.** OUTCOME: `tests/test_showcase.py`, **38 passed offline in 45s**. `yfinance` imported only inside the optional loader and given its own `extras_require["examples"]`; output path an argument; no `deploy/` reference. 🔴 **The gate found the test module gated behind `pytest.importorskip` on a FIRST-PARTY file** — all 38 could vanish as skips, which satisfies SHOWCASE-5's "0 failed" perfectly. Replaced with `spec_from_file_location`, which also removed a permanent `sys.path` mutation. Log: [`docs/reviews/auto-2026-09-12-showcase/`](docs/reviews/auto-2026-09-12-showcase/)
-  <!-- superseded -->
-- [ ] ~~SHOWCASE-4 (original text)~~ ** The file
-  downloads from Yahoo, `sys.path`-injects `deploy/app/core`, and writes CSVs into a sibling
-  `CSVs/` directory. None of that can run in `PandasTa`'s suite.
-  **Done when:** the example takes a DataFrame, a data loader is one optional pluggable function,
-  `yfinance` is an `extras_require` entry and never a hard import, output path is an argument, and
-  the test drives the whole pipeline on a synthetic frame with **no network and no `deploy/`
-  import**. `tests/test_showcase.py`, green offline.
-
-- [~] **SHOWCASE-5 — Land it and point at it. 🔶 DELIVERED 2026-09-12, ESCALATED on its own numeric criterion.** OUTCOME: README *Runnable examples* section links both files and says what they do NOT do; the example's docstring names version, branch and commit; `.gitignore` gained `!examples/*.ipynb` (a blanket `*.ipynb` would have made the notebook uncommittable). 🔴 **The done-when is "`pytest -q` stays at 0 failed" and it is 1.** `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` fails on a clean checkout: it requires every audit citation in `docs/pine_builtin_coverage.csv` to resolve to a file, and `8d8f705` untracked `docs/pine/` for licensing reasons. **Pre-existing and unrelated to this work**, now recorded in `CLAUDE.md` *Known breaks* — which until today read "None outstanding" and was false. Owner's call. Log: [`docs/reviews/auto-2026-09-12-showcase/`](docs/reviews/auto-2026-09-12-showcase/)
-  <!-- superseded -->
-- [ ] ~~SHOWCASE-5 (original text)~~ ** Place as `examples/market_dashboard.py`
-  (or `docs/examples/`) with a README section that says what it demonstrates and what it does not.
-  **Done when:** `README.md` links it, the file's docstring names the fork commit it was written
-  against, and `python -m pytest -q` stays at **0 failed**.
-
-⚠ **The showcase is a claim surface.** Every count in the example's own output and in its prose
-must come from a run — this repo's dominant historical defect is a number written before it was
-measured (17 of 18 ports failed first review on exactly that). Prefer printing a computed number
-over writing one down. Ties to [[data-split-contamination]] on the data side: the demo must not
-imply its yfinance output is clean BIST data — `clean_if_bist` lives in the consumer, not here.
 
 ## Owner decisions outstanding — not tasks, and not mine to take
 
