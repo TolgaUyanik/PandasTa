@@ -82,6 +82,11 @@ live package and lists every column's observed form.
   range(0, m)`, so at `i = 0` it read `ssf.iloc[-1]` — Python negative indexing, the LAST bar of
   the series — and the recursion propagated that forward. Perturbing only bars ≥ 300 of a 400-bar
   frame moved **bar 0** by 31.4. Fixed and pinned by `tests/test_ssf_causality.py`.
+  🔴 **`bos` is a fourth, and it is still OPEN** — all four columns. It flags swings with
+  `rolling(swing_length, center=True)`, so it reads exactly `(swing_length - 1) // 2` bars ahead
+  (measured: 1 / 2 / 3 / 4 at `swing_length` 4 / 5 / 7 / 9). A bug, not a design choice; fixing it
+  changes column values, so **owner's call**. `swing_equilibrium` is the causal model for a fix.
+  Pinned by `tests/test_bos_lookahead.py`, which fails if the reach changes in either direction.
   **Do not trust this list as a substitute for measuring.** It was found by a per-parent
   perturbation probe in MLCOL-1's companion screen, not by reading it; a hand-maintained list
   contains only the cases someone already thought of.
