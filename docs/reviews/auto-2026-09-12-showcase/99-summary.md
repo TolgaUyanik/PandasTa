@@ -1,5 +1,8 @@
 # Auto-run summary — SHOWCASE batch, 2026-09-12
 
+> **Superseded 2026-10-20 (`ab8ba88`):** the showcase was removed, so the escalations and
+> pending re-gates below are void. The `bos` finding lives on in `tests/test_bos_lookahead.py`.
+
 Mode C, `--fletcher` on. Six tasks, one round of gates, four reviewer subagents.
 
 ## Result

@@ -1,5 +1,8 @@
 # Auto-run manifest — SHOWCASE batch
 
+> **Superseded 2026-10-20 (`ab8ba88`):** the showcase was removed, so the escalations and
+> pending re-gates below are void. The `bos` finding lives on in `tests/test_bos_lookahead.py`.
+
 - **Run:** 2026-09-12, Mode C (batch task execution), `--fletcher` on
 - **Invocation:** `/brutally-honest-review --auto SHOWCASE-0 SHOWCASE-1 SHOWCASE-2 SHOWCASE-3 SHOWCASE-4 SHOWCASE-5`
 - **Task source:** `PandasTa/TODO.md`, `## SHOWCASE` block (lines 146-224)

@@ -64,10 +64,11 @@ def _prose_files():
     # `IndicatorList.md` is the TALIB-2/PTCLASSIC deliverable and lives in the
     # sibling directory, which is NOT a git repo -- it was outside every guard
     # precisely because it is outside the tree the tests walk.
-    for path in (os.path.join(_FORK, "TODO.md"),
-                 os.path.join(SIBLING, "IndicatorList.md")):
-        if os.path.exists(path):
-            out.append(path)
+    # `TODO.md` was scanned here until it was removed (2026-10-20). Its successor, `docs/issues/`,
+    # is gitignored and deliberately NOT scanned: a guard must see the same files on every clone.
+    path = os.path.join(SIBLING, "IndicatorList.md")
+    if os.path.exists(path):
+        out.append(path)
     reviews = os.path.join(_FORK, "docs", "reviews")
     for root, _dirs, files in os.walk(reviews):
         for name in files:

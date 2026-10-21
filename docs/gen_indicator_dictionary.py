@@ -487,7 +487,7 @@ def main(argv=None):
         A("Do NOT delete these columns. The rule above — *confirm on real data, then repair")
         A("or delete* — was followed here, and the answer was that they are fine.")
         A("")
-        DEAD_TASKS = {"fvg": "FVGDEAD in `TODO.md` — the zone is evicted on the bar that "
+        DEAD_TASKS = {"fvg": "FVGDEAD (`CLAUDE.md`, closed 2026-09-07) — the zone is evicted on the bar that "
                              "creates it (`pandas_ta/trend/fvg.py:46`, `:54`)",
                       "cdl_pattern": "none — fixture artifact, 0 of 62 constant on "
                                      "91,197 real BIST bars (CANDLE-0)"}

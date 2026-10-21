@@ -16,9 +16,8 @@ changes its column values, so fixing it is the owner's call; until then this mod
 
 Blast radius, measured 2026-10-20 by grep, not assumed: the parent repo has **zero** calls to
 `ta.bos` / `df.ta.bos` and **zero** `df.ta.strategy()` sweeps, so no parent column comes from this
-function. ⚠ The parent's own private `BOS_BULL` / `FRACTAL_*` builders (e.g. the live
-`hourly_paper_trading.py`) use `center=True` / `shift(-1)`, `shift(-2)` and are the same class of
-leak, but they are a separate copy. This module says nothing about them.
+function. The parent's own private `BOS_BULL` / `FRACTAL_*` builders are a separate copy and a
+separate question; this module says nothing about them.
 
 WHAT IS PINNED, in order of how much it would hurt to lose
 -----------------------------------------------------------

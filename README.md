@@ -227,7 +227,7 @@ over 89 BIST_100 frames and 408,253 daily bars, with Gates C/D/E cleared (max |Ï
 `../Backtesting/scripts/analysis/measure_fvg_overlap_full.py` and its four CSVs.
 
 âš  The **live trading container** still runs an unrepaired private copy of the same loop
-(`FVGENG-2` in `TODO.md`), so research and live currently compute different `IN_FVG_*`
+(`FVGENG-2`, tracked in the Backtesting repo), so research and live currently compute different `IN_FVG_*`
 values. Account for that before comparing them.
 
 ---

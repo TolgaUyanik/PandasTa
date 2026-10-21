@@ -245,7 +245,7 @@ def test_every_tier2_have_row_was_docstring_audited():
 
 # The one document allowed to state the verdict split. Everything else points
 # at it. See `test_no_other_document_retypes_the_split`.
-SPLIT_SOURCE = "TODO.md"
+SPLIT_SOURCE = os.path.join("docs", "CompletedWork.md")
 
 # A line carrying this marker may quote a wrong split on purpose -- review
 # records narrate the numbers that WERE wrong, and "correcting" those would
@@ -341,7 +341,7 @@ def test_the_docs_quote_the_csvs_actual_split():
 
     The verdict split was hand-written into three documents and went stale in
     all three across four review rounds -- the repo's dominant defect, per
-    CLAUDE.md. `TODO.md` is now the single place allowed to state it, and this
+    CLAUDE.md. `docs/CompletedWork.md` is now the single place allowed to state it, and this
     asserts it against the CSV; `test_no_other_document_retypes_the_split`
     keeps it single.
     """
@@ -367,7 +367,7 @@ def test_the_docs_quote_the_csvs_actual_split():
     seen = collections.Counter(name for name, _ in named)
     duplicated = sorted(n for n, c in seen.items() if c > 1)
     assert duplicated == [], (
-        f"verdict rows appearing more than once in TODO.md: {duplicated}. Two "
+        f"verdict rows appearing more than once in {SPLIT_SOURCE}: {duplicated}. Two "
         f"tables mean one of them is stale; keep a single table."
     )
 
@@ -378,18 +378,18 @@ def test_the_docs_quote_the_csvs_actual_split():
     # silently discarded and the reverse containment could never fail.
     missing = sorted(set(actual) - set(quoted))
     assert missing == [], (
-        f"verdicts in the CSV with no row in TODO.md's table: {missing}. "
+        f"verdicts in the CSV with no row in {SPLIT_SOURCE}'s table: {missing}. "
         f"Add them, or the table is no longer the split it claims to be."
     )
     unknown = sorted({name.strip() for name, _ in rows}
                      - set(actual) - {"verdict"})
     assert unknown == [], (
-        f"TODO.md's table names verdicts the CSV does not have: {unknown}"
+        f"{SPLIT_SOURCE}'s table names verdicts the CSV does not have: {unknown}"
     )
 
     wrong = {k: (v, actual[k]) for k, v in quoted.items() if v != actual[k]}
     assert wrong == {}, (
-        f"TODO.md quotes counts the CSV does not support "
+        f"{SPLIT_SOURCE} quotes counts the CSV does not support "
         f"{{verdict: (quoted, actual)}}: {wrong}"
     )
 
@@ -617,9 +617,9 @@ def test_every_scoped_row_is_named_in_its_task(verdict, block, next_block):
     could not see it: that test reads markdown TABLES, and a scope written in
     prose is unguarded. This reads the task block itself.
     """
-    todo = os.path.join(_FORK, "TODO.md")
+    todo = os.path.join(_FORK, SPLIT_SOURCE)
     if not os.path.exists(todo):
-        pytest.skip("TODO.md missing")
+        pytest.skip(f"{SPLIT_SOURCE} missing")
     text = io.open(todo, encoding="utf8").read()
     # Anchor on the task BLOCK, not the first bare mention. `text.index(block)`
     # matched the ACTIVE band's one-line summary ("**PINEBI-1c/-1d/-1e**"),

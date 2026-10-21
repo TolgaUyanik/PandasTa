@@ -87,7 +87,7 @@ live package and lists every column's observed form.
   (measured: 1 / 2 / 3 / 4 at `swing_length` 4 / 5 / 7 / 9). A bug, not a design choice; fixing it
   changes column values, so **owner's call**. `swing_equilibrium` is the causal model for a fix.
   Pinned by `tests/test_bos_lookahead.py`, which fails if the reach changes in either direction.
-  **Do not trust this list as a substitute for measuring.** It was found by a per-parent
+  **Do not trust this list as a substitute for measuring.** `ssf` was found by a per-parent
   perturbation probe in MLCOL-1's companion screen, not by reading it; a hand-maintained list
   contains only the cases someone already thought of.
 - **Scale-free.** A column that scales with price (`SMA_10`, `MACD_12_26_9`) is not a feature; a tree
@@ -165,7 +165,7 @@ close exactly at an extreme — so the columns fired at 4.63% / 3.51%, driven by
 than by structure. Gates C/D/E cleared (Gate E max |ρ| 0.6390 / 0.5962, under the 0.76 ship line);
 evidence in `../Backtesting/scripts/analysis/measure_fvg_overlap_full.py` and its four CSVs.
 
-What is still open is **FVGENG** in `TODO.md`: the engine kept three private copies of the same
+What is still open is **FVGENG**, tracked in the Backtesting repo since 2026-09-07: the engine kept three private copies of the same
 loop. Two are now delegating to `pandas_ta.fvg` (`indicator_engine._calculate_fvg`,
 `speedy_indicators`), and the third — `deploy/app/paper_trading/paper_trading.py:~804`, inside the
 live container — is unchanged behind the TRADING FREEZE. **Do not add a fourth copy: import the
@@ -199,6 +199,13 @@ Four things worth knowing before touching any of it:
   `SAREXT` ship as percent distances; the levels are behind `raw=True` and are registered
   nowhere. `BETA` needs a benchmark series, so it is out of `Category` AND in
   `strategy`'s exclusion list.
+
+## Open work
+
+Local tracker: `docs/issues/` — **gitignored, so it exists only on the owner's machine**; a clone
+does not have it. One file per issue, index and status conventions in `docs/issues/README.md`. `TODO.md` was removed 2026-10-20 after its open sections were copied into
+issues; finished work is in `docs/CompletedWork.md`, which is also where the PINEBI verdict-count
+table now lives (`tests/test_pine_coverage_csv.py` asserts it there).
 
 ## Commit conventions
 
