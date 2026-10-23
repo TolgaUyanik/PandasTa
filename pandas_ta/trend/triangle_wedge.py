@@ -36,7 +36,7 @@ def _scan(high, low, close, left, right, max_wait, include_rect=False):
     and no rectangle ever reaches a column. See the RECTANGLE section of this
     module's docstring for the pre-registered trigger that decided it.
     `include_rect=True` restores the branch and exists for exactly one caller,
-    `measure_candle1_overlap_full.py`, so the measurement that FIRED the
+    `measure_candle1_overlap_full.py` (never committed, Backtesting #107; rebuilt harness: `gate_e_overlap.py`), so the measurement that FIRED the
     trigger stays reproducible after the trigger has been honoured. Honouring
     a decision must not delete its evidence.
 
@@ -352,7 +352,7 @@ SHIP), and then DELETED on the INTERNAL overlap:
     TRIW_CONV x TRIW_WIDTH    spearman rho = -0.8928    n = 90,547
 
 measured on 50 BIST tickers / 91,197 daily bars
-(`../Backtesting/scripts/analysis/measure_candle1_overlap_full.py`). This
+(`../Backtesting/scripts/analysis/measure_candle1_overlap_full.py` (never committed, Backtesting #107; rebuilt harness: `gate_e_overlap.py`)). This
 repo's bands are "0.76-0.80 ship with disclosure, rho ~ 0.9 revert"; 0.8928 is
 ~0.9, and it was treated as a revert rather than argued into the disclosure
 band.

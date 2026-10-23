@@ -1,5 +1,10 @@
 # Chart Patterns — what was built, what was measured, what was reverted (CANDLE-1)
 
+> **Note (2026-10-24, Backtesting #107):** the `measure_*` scripts this record cites were never
+> committed. The rebuilt Gate E harness is `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py`,
+> and its comparator set differs: 329 + 358 columns today vs the 485/492-column engine of 2026-09,
+> which no longer exists. The text below is left as it was run.
+
 Status: results document for **CANDLE-1**. It records, per pattern, the fire rate, the Gate D
 result, the Gate E maximum with the column it hit and the sample size, and a SHIP / DISCLOSE /
 REVERT verdict. **Reverted columns stay in the table** — deleting an over-correlated column you

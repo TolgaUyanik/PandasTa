@@ -27,7 +27,7 @@
 | Params (**declared signature**) | `tenkan=9`, `kijun=26`, `senkou=52` |
 | Params (**effective defaults**) | STUB: not measured — fill from pandas_ta/overlap/ichimoku_ml.py |
 | Warm-up (dictionary probe) | 77 |
-| Engine wiring | **called by the parent engine** — imported alias + literal call site |
+| Engine wiring | no literal `ta.ichimoku_ml(` call site; a `getattr`/alias dispatch is not visible to this scan |
 | Provenance | STUB: not measured — fill from pandas_ta/overlap/ichimoku_ml.py |
 | Status | module first appears in this repo's history 2026-06-29 (`git log --diff-filter=A -- pandas_ta/overlap/ichimoku_ml.py`) |
 
@@ -49,20 +49,20 @@ Ichimoku ML features (ichimoku_ml).
 
 Machine-filled from the live probe in `docs/gen_indicator_dictionary.py` (synthetic 600-bar
 OHLCV frame, computed twice with price ×137). The register verdict is joined on column name
-from `../Backtesting/docs/knowledgebase/IndicatorMLRegister.md` and copied verbatim; "no row"
+from `../Backtesting/Backtesting/docs/IndicatorMLRegister.md` and copied verbatim; "no row"
 means the engine's production config does not emit a column of that name, which is a fact
 about the engine, not about this indicator.
 
 | Column | Dictionary ML form | warm-up | observed range on the probe fixture | Register verdict |
 |---|---|---|---|---|
-| `ICHI_PRICE_VS_CLOUD` | `SF` | 51 | -0.256231 … 0.0622905 | OK (as `ICHI_PRICE_VS_CLOUD`) |
-| `ICHI_PRICE_VS_KIJUN` | `SF` | 25 | -0.103252 … 0.0648366 | OK (as `ICHI_PRICE_VS_KIJUN`) |
-| `ICHI_TK_DIST` | `SF` | 25 | -0.0977044 … 0.0373152 | OK (as `ICHI_TK_DIST`) |
-| `ICHI_TK_CROSS_AGE` | `SF` | 0 | 0 … 138 | OK (as `ICHI_TK_CROSS_AGE`) |
-| `ICHI_CLOUD_COLOR` | `BIN` | 77 | -1 … 1 | CATEGORICAL (as `ICHI_CLOUD_COLOR`) |
-| `ICHI_CLOUD_THICK` | `SF` | 77 | 0 … 0.100889 | OK (as `ICHI_CLOUD_THICK`) |
-| `ICHI_FUTURE_CLOUD_COLOR` | `BIN` | 51 | -1 … 1 | CATEGORICAL (as `ICHI_FUTURE_CLOUD_COLOR`) |
-| `ICHI_CHIKOU_VS_CLOUD` | `SF` | 77 | -0.370856 … 0.0527328 | OK (as `ICHI_CHIKOU_VS_CLOUD`) |
+| `ICHI_PRICE_VS_CLOUD` | `SF` | 51 | -0.256231 … 0.0622905 | no row |
+| `ICHI_PRICE_VS_KIJUN` | `SF` | 25 | -0.103252 … 0.0648366 | no row |
+| `ICHI_TK_DIST` | `SF` | 25 | -0.0977044 … 0.0373152 | no row |
+| `ICHI_TK_CROSS_AGE` | `SF` | 0 | 0 … 138 | no row |
+| `ICHI_CLOUD_COLOR` | `BIN` | 77 | -1 … 1 | no row |
+| `ICHI_CLOUD_THICK` | `SF` | 77 | 0 … 0.100889 | no row |
+| `ICHI_FUTURE_CLOUD_COLOR` | `BIN` | 51 | -1 … 1 | no row |
+| `ICHI_CHIKOU_VS_CLOUD` | `SF` | 77 | -0.370856 … 0.0527328 | no row |
 
 Per-column one-line descriptions are owed with §1: STUB: not measured — fill from pandas_ta/overlap/ichimoku_ml.py
 
@@ -116,54 +116,53 @@ STUB: not measured — fill from tests/test_ichimoku_ml.py
 
 ## 7. Overlap (Gate E)
 
-**This generator found no campaign record for this indicator.** There is no
-`../Backtesting/scripts/analysis/measure_ichimoku_ml_overlap_full.py`, and none of the batch campaign documents
+**This generator found no campaign record for this indicator.** No Gate E run
+(`gate_e_overlap.py run`) exists for this indicator, and none of the batch campaign documents
 (`docs/AltportPortsMeasured.md`, `docs/CandlePatternsMeasured.md`, `docs/PineAlternatesMeasured.md`, `docs/TalibPortsMeasured.md`) names any of this
 indicator's emitted column names. **That is what the scan tested — column names, not
 prose mentions** — so it is a statement about this scan, not proof that no
-measurement exists. To start
-a campaign, copy any existing `measure_*_overlap_full.py` and grid the shipped
-columns against `IndicatorEngine(include_advanced=True).compute_all()`.
+measurement exists. To measure it, run
+`gate_e_overlap.py run --module pandas_ta.overlap.ichimoku_ml`.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_ichimoku_ml_overlap_full.py
+STUB: not measured — fill from ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.overlap.ichimoku_ml --name ichimoku_ml
 
-Ship line: ρ ≈ 0.9 → revert · 0.76–0.80 → ship with disclosure · below 0.76 → ship.
+Bands (`r3-perframe-0.90`): STRUCK if pooled |ρ| ≥ 0.90 or the per-frame median of any top-5 comparator ≥ 0.90 · DISCLOSE_GAP 0.80–0.90 · DISCLOSE 0.76–0.80 · SHIP below 0.76.
 
 ## 8. Reachability (Gate C)
 
 Per-frame firing counts against `BeamMiner(min_support=30)`
-(`../Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below
+(`../Backtesting/Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below
 `min_support` is a PARTIAL, not a PASS.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_ichimoku_ml_overlap_full.py
+STUB: not measured — no harness yet (the Gate E harness measures Gate E only)
 
 ## 9. BIST specifics
 
 Behaviour on the DI-5 / DI-5b contaminated frames (`MGROS.IS`, `ARCLK.IS`) against clean
 controls, and the SHAPE of any failure — suppression, fabrication, or a pinned value.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_ichimoku_ml_overlap_full.py
+STUB: not measured — no harness yet (the Gate E harness measures Gate E only)
 
 ## 10. Mining track record
 
 Column-name stems (the parameter tail is what a mined rule varies, so the grep drops it):
 
 ```sh
-grep -c 'ICHI_CHIKOU_VS_CLOUD' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'ICHI_CHIKOU_VS_CLOUD' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'ICHI_CHIKOU_VS_CLOUD' ../Backtesting/backtest_results/
-grep -c 'ICHI_CLOUD_COLOR' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'ICHI_CLOUD_COLOR' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'ICHI_CLOUD_COLOR' ../Backtesting/backtest_results/
-grep -c 'ICHI_CLOUD_THICK' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'ICHI_CLOUD_THICK' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'ICHI_CLOUD_THICK' ../Backtesting/backtest_results/
-grep -c 'ICHI_FUTURE_CLOUD_COLOR' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'ICHI_FUTURE_CLOUD_COLOR' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'ICHI_FUTURE_CLOUD_COLOR' ../Backtesting/backtest_results/
-grep -c 'ICHI_PRICE_VS_CLOUD' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'ICHI_PRICE_VS_CLOUD' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'ICHI_PRICE_VS_CLOUD' ../Backtesting/backtest_results/
-grep -c 'ICHI_PRICE_VS_KIJUN' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'ICHI_PRICE_VS_KIJUN' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'ICHI_PRICE_VS_KIJUN' ../Backtesting/backtest_results/
-grep -c 'ICHI_TK_CROSS_AGE' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'ICHI_TK_CROSS_AGE' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'ICHI_TK_CROSS_AGE' ../Backtesting/backtest_results/
-grep -c 'ICHI_TK_DIST' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'ICHI_TK_DIST' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'ICHI_TK_DIST' ../Backtesting/backtest_results/
 ```
 
@@ -198,9 +197,9 @@ STUB: not measured — fill from pandas_ta/overlap/ichimoku_ml.py
 |---|---|---|
 | A Correctness | STUB: not measured — fill from pandas_ta/overlap/ichimoku_ml.py | source not identified yet — see §3 |
 | B Causality | no recorded exception | §5: `LEAK_RULES` does not list this indicator; no mutant test recorded |
-| C Reachability | STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_ichimoku_ml_overlap_full.py | §8 |
+| C Reachability | STUB: not measured — no harness yet (the Gate E harness measures Gate E only) | §8 |
 | D Scale-free | probe tag only, see §2 | `docs/gen_indicator_dictionary.py` ×137 ratio |
-| E Attribution | STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_ichimoku_ml_overlap_full.py | §7 |
+| E Attribution | STUB: not measured — fill from ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.overlap.ichimoku_ml --name ichimoku_ml | §7 |
 | F Suites | 3 passed / 0 skipped in `tests/test_ichimoku_ml.py`, recorded full-suite run 2026-09-10 | §12 row above, `docs/indicators/_facts.json` |
 
 ---
@@ -216,9 +215,9 @@ changes, or deletes a number here without saying where it came from.
 
 | metric | n | @ artifact / provenance class |
 |---|---|---|
-| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=9 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/docs/knowledgebase/IndicatorMLRegister.md |
+| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=9 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/Backtesting/docs/IndicatorMLRegister.md |
 | §6#P — the probe's scale ratio | n=1 | @ docs/gen_indicator_dictionary.py — ×137 probe ratio, live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 |
-| §7#P — overlap ship line | n=4 | @ ../Backtesting/scripts/analysis/measure_ichimoku_ml_overlap_full.py |
+| §7#P — overlap ship line | n=8 | @ ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.overlap.ichimoku_ml --name ichimoku_ml |
 
 ⚠ Parsed by `tests/test_indref_pages.py`. Every group holding a number appears above with a
 matching `n=`; adding a table, adding a row, or adding a number to a paragraph without

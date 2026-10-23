@@ -110,11 +110,18 @@ clear:
 | B Causality | a **mutant** test: `importlib`-read the module source, shift a write index earlier, `exec` it in memory, show the real module clean and the mutant caught. Prefix truncation alone proves nothing — it cannot see back-dating. |
 | C Reachability | every shipped column fires on real data, with counts stated. |
 | D Scale-free | invariant under ×8/×64 (bit-identical) and ×10/×3.7 (tolerance, NaN masks matching), plus `0 < fires < n` so a constant column cannot pass. |
-| E Attribution | Spearman ρ of each new column against the **entire** shipped column set of the engine's production config. Report the measured max with its sample size. ρ ≈ 0.9 → revert; 0.76–0.80 → ship with disclosure; below 0.76 → ship. |
+| E Attribution | Spearman ρ of each new column against the engine's `compute_all` ∪ the `ml_features` manifest `1d` (329 + 358 = 687 comparators), over the 89 frozen ALTPORT-1 BIST frames (owner's rules, 2026-10-23). Report the measured max with its sample size. Bands (`r3-perframe-0.90`): STRUCK if pooled \|ρ\| ≥ 0.90 or a top-5 comparator's per-frame median ≥ 0.90 · DISCLOSE_GAP 0.80 ≤ ρ < 0.90 · DISCLOSE 0.76 ≤ ρ < 0.80 · SHIP < 0.76. |
 | F Suites | both repos green. |
 
-Measurement scripts live in the parent repo as
-`Backtesting/scripts/analysis/measure_<name>_overlap_full.py`.
+**Gate E harness:** `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py` (Backtesting #107,
+merged 2026-10-23; reference `../Backtesting/Backtesting/docs/gate_e.md` on Backtesting `main`).
+From `../Backtesting/Backtesting`: `python scripts/analysis/gate_e_overlap.py build` once, then
+`run --module pandas_ta.<category>.<name> --name <name>`; outputs land in
+`../Backtesting/backtest_results/gatee/<name>/`. `run` refuses a stale cache, but **pandas_ta's
+source is not in the stamp**: after editing a function the engine or `ml_features` calls, run
+`build --rebuild`. The old `measure_<name>_overlap_full.py` scripts were never committed; only
+their outputs survive under `../Backtesting/backtest_results/` (`talib1/`, `altport1/`, `tvpta6/`),
+measured against a 492-column engine that no longer exists.
 
 The dominant historical defect is **a claim written before it was measured** — 17 of 18 candidates
 failed first review, almost none on the mathematics. Every sentence containing *only, never, always,
@@ -163,12 +170,17 @@ synthetic continuous-float frames and was wrong on real prices: the old loop ret
 while `close <= zone_high`, true on an exact tie, and 86,415 of 408,253 BIST daily bars (21.17%)
 close exactly at an extreme — so the columns fired at 4.63% / 3.51%, driven by tick rounding rather
 than by structure. Gates C/D/E cleared (Gate E max |ρ| 0.6390 / 0.5962, under the 0.76 ship line);
-evidence in `../Backtesting/scripts/analysis/measure_fvg_overlap_full.py` and its four CSVs.
+evidence in the four `fvg_*` CSVs under `../Backtesting/backtest_results/tvpta6/`. The script
+that produced them was never committed; GATEE-3 re-ran the four columns on the new harness and
+they stay SHIP (Backtesting #107).
 
 What is still open is **FVGENG**, tracked in the Backtesting repo since 2026-09-07: the engine kept three private copies of the same
-loop. Two are now delegating to `pandas_ta.fvg` (`indicator_engine._calculate_fvg`,
-`speedy_indicators`), and the third — `deploy/app/paper_trading/paper_trading.py:~804`, inside the
-live container — is unchanged behind the TRADING FREEZE. **Do not add a fourth copy: import the
+loop. ⚠ The delegation of two of them to `pandas_ta.fvg` lived in an engine version that was
+never committed (Backtesting #107): today `indicator_engine._calculate_fvg` (`indicator_engine.py:398`)
+is its own loop again. Measured in #107 (`gate_e_acceptance.py fvg`): its `FVG_BULL`/`FVG_BEAR`
+match the module bit-for-bit on every frame, its `IN_FVG_*` do not (ρ 0.061 / 0.019 on AKBNK).
+`speedy_indicators` was not re-checked. The third copy — `deploy/app/paper_trading/paper_trading.py:~804`,
+inside the live container — is unchanged behind the TRADING FREEZE. **Do not add a fourth copy: import the
 function.**
 
 ## Porting a TA-Lib indicator
@@ -177,7 +189,8 @@ Done once, as **TALIB-1** (2026-09-08): the ten `port` rows of
 `../AlternativeRepos/altrepo_talib.csv`. Same five touch points, same Gates A-F; Gate A's
 citation becomes the TA-Lib C function name instead of a Pine line number. Measurements,
 per indicator: `docs/TalibPortsMeasured.md`. Tests: `tests/test_talib1_ports.py`.
-Overlap harness: `../Backtesting/scripts/analysis/measure_talib1_overlap_full.py`.
+Overlap outputs: `../Backtesting/backtest_results/talib1/`. The harness script was never committed;
+GATEE-3 re-ran 8 of its 14 columns on the new harness (Backtesting #107; see Gate E above).
 
 Four things worth knowing before touching any of it:
 

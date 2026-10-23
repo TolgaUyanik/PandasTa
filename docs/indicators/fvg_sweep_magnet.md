@@ -27,7 +27,7 @@
 | Params (**declared signature**) | `fvg_lookback=None`, `disp_atr_mult=None`, `atr_len=None`, `min_gap_atr=None`, `require_disp=None`, `max_fvg_age=None`, `pivot_len=None`, `liq_keep=None`, `sweep_wick_mult=None`, `sweep_confirm=None`, `magnet_window=None`, `min_score=None` |
 | Params (**effective defaults**) | STUB: not measured — fill from pandas_ta/trend/fvg_sweep_magnet.py |
 | Warm-up (dictionary probe) | 0 |
-| Engine wiring | **called by the parent engine** — imported alias |
+| Engine wiring | no literal `ta.fvg_sweep_magnet(` call site; a `getattr`/alias dispatch is not visible to this scan |
 | Provenance | STUB: not measured — fill from pandas_ta/trend/fvg_sweep_magnet.py |
 | Status | module first appears in this repo's history 2026-08-13 (`git log --diff-filter=A -- pandas_ta/trend/fvg_sweep_magnet.py`) |
 
@@ -49,18 +49,18 @@ Two engines coupled into one signal: (1) displacement-validated Fair Value Gaps 
 
 Machine-filled from the live probe in `docs/gen_indicator_dictionary.py` (synthetic 600-bar
 OHLCV frame, computed twice with price ×137). The register verdict is joined on column name
-from `../Backtesting/docs/knowledgebase/IndicatorMLRegister.md` and copied verbatim; "no row"
+from `../Backtesting/Backtesting/docs/IndicatorMLRegister.md` and copied verbatim; "no row"
 means the engine's production config does not emit a column of that name, which is a fact
 about the engine, not about this indicator.
 
 | Column | Dictionary ML form | warm-up | observed range on the probe fixture | Register verdict |
 |---|---|---|---|---|
-| `FSME_MAG_BULL_5` | `CONST` | 0 | 0 … 0 | OK (as `FSME_MAG_BULL_5`) |
-| `FSME_MAG_BEAR_5` | `CONST` | 0 | 0 … 0 | OK (as `FSME_MAG_BEAR_5`) |
-| `FSME_CE_DIST_BULL_5` | `??` | — | — no value on the fixture | OK (as `FSME_CE_DIST_BULL_5`) |
-| `FSME_CE_DIST_BEAR_5` | `??` | — | — no value on the fixture | OK (as `FSME_CE_DIST_BEAR_5`) |
-| `FSME_CE_SCORE_BULL_5` | `??` | — | — no value on the fixture | OK (as `FSME_CE_SCORE_BULL_5`) |
-| `FSME_CE_SCORE_BEAR_5` | `??` | — | — no value on the fixture | OK (as `FSME_CE_SCORE_BEAR_5`) |
+| `FSME_MAG_BULL_5` | `CONST` | 0 | 0 … 0 | no row |
+| `FSME_MAG_BEAR_5` | `CONST` | 0 | 0 … 0 | no row |
+| `FSME_CE_DIST_BULL_5` | `??` | — | — no value on the fixture | no row |
+| `FSME_CE_DIST_BEAR_5` | `??` | — | — no value on the fixture | no row |
+| `FSME_CE_SCORE_BULL_5` | `??` | — | — no value on the fixture | no row |
+| `FSME_CE_SCORE_BEAR_5` | `??` | — | — no value on the fixture | no row |
 
 Per-column one-line descriptions are owed with §1: STUB: not measured — fill from pandas_ta/trend/fvg_sweep_magnet.py
 
@@ -115,8 +115,8 @@ STUB: not measured — fill from tests/test_fvg_sweep_magnet.py
 ## 7. Overlap (Gate E)
 
 **A batch campaign document carries measurements naming this indicator's columns.**
-There is no `../Backtesting/scripts/analysis/measure_fvg_sweep_magnet_overlap_full.py`, because the campaigns gated many
-indicators in one run rather than one harness each:
+No Gate E run (`gate_e_overlap.py run`) exists for this indicator, because the
+campaigns gated many indicators in one run rather than one harness each:
 
 - **CANDLE-1** — per-column Gate A/C/D/E record in [`docs/CandlePatternsMeasured.md`](../CandlePatternsMeasured.md).
 
@@ -127,39 +127,39 @@ will not guess it for you. The ρ values, sample sizes and ship/revert verdicts 
 there; they are deliberately not re-quoted here, because quoting a ρ whose artifact
 you did not open is the exact defect these pages exist to prevent.
 
-Ship line: ρ ≈ 0.9 → revert · 0.76–0.80 → ship with disclosure · below 0.76 → ship.
+Bands (`r3-perframe-0.90`): STRUCK if pooled |ρ| ≥ 0.90 or the per-frame median of any top-5 comparator ≥ 0.90 · DISCLOSE_GAP 0.80–0.90 · DISCLOSE 0.76–0.80 · SHIP below 0.76.
 
 ## 8. Reachability (Gate C)
 
 Per-frame firing counts against `BeamMiner(min_support=30)`
-(`../Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below
+(`../Backtesting/Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below
 `min_support` is a PARTIAL, not a PASS.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_fvg_sweep_magnet_overlap_full.py
+STUB: not measured — no harness yet (the Gate E harness measures Gate E only)
 
 ## 9. BIST specifics
 
 Behaviour on the DI-5 / DI-5b contaminated frames (`MGROS.IS`, `ARCLK.IS`) against clean
 controls, and the SHAPE of any failure — suppression, fabrication, or a pinned value.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_fvg_sweep_magnet_overlap_full.py
+STUB: not measured — no harness yet (the Gate E harness measures Gate E only)
 
 ## 10. Mining track record
 
 Column-name stems (the parameter tail is what a mined rule varies, so the grep drops it):
 
 ```sh
-grep -c 'FSME_CE_DIST_BEAR' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'FSME_CE_DIST_BEAR' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'FSME_CE_DIST_BEAR' ../Backtesting/backtest_results/
-grep -c 'FSME_CE_DIST_BULL' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'FSME_CE_DIST_BULL' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'FSME_CE_DIST_BULL' ../Backtesting/backtest_results/
-grep -c 'FSME_CE_SCORE_BEAR' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'FSME_CE_SCORE_BEAR' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'FSME_CE_SCORE_BEAR' ../Backtesting/backtest_results/
-grep -c 'FSME_CE_SCORE_BULL' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'FSME_CE_SCORE_BULL' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'FSME_CE_SCORE_BULL' ../Backtesting/backtest_results/
-grep -c 'FSME_MAG_BEAR' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'FSME_MAG_BEAR' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'FSME_MAG_BEAR' ../Backtesting/backtest_results/
-grep -c 'FSME_MAG_BULL' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'FSME_MAG_BULL' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'FSME_MAG_BULL' ../Backtesting/backtest_results/
 ```
 
@@ -192,9 +192,9 @@ STUB: not measured — fill from pandas_ta/trend/fvg_sweep_magnet.py
 |---|---|---|
 | A Correctness | STUB: not measured — fill from pandas_ta/trend/fvg_sweep_magnet.py | source not identified yet — see §3 |
 | B Causality | no recorded exception | §5: `LEAK_RULES` does not list this indicator; no mutant test recorded |
-| C Reachability | STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_fvg_sweep_magnet_overlap_full.py | §8 |
+| C Reachability | STUB: not measured — no harness yet (the Gate E harness measures Gate E only) | §8 |
 | D Scale-free | probe tag only, see §2 | `docs/gen_indicator_dictionary.py` ×137 ratio |
-| E Attribution | STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_fvg_sweep_magnet_overlap_full.py | §7 |
+| E Attribution | STUB: not measured — fill from ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.trend.fvg_sweep_magnet --name fvg_sweep_magnet | §7 |
 | F Suites | 97 passed / 0 skipped in `tests/test_fvg_sweep_magnet.py`, recorded full-suite run 2026-09-10 | §12 row above, `docs/indicators/_facts.json` |
 
 ---
@@ -211,7 +211,7 @@ changes, or deletes a number here without saying where it came from.
 | metric | n | @ artifact / provenance class |
 |---|---|---|
 | §6#P — the probe's scale ratio | n=1 | @ docs/gen_indicator_dictionary.py — ×137 probe ratio, live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 |
-| §7#P — overlap ship line | n=4 | @ ../Backtesting/scripts/analysis/measure_fvg_sweep_magnet_overlap_full.py |
+| §7#P — overlap ship line | n=8 | @ ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.trend.fvg_sweep_magnet --name fvg_sweep_magnet |
 
 ⚠ Parsed by `tests/test_indref_pages.py`. Every group holding a number appears above with a
 matching `n=`; adding a table, adding a row, or adding a number to a paragraph without

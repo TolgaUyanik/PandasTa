@@ -27,7 +27,7 @@
 | Params (**declared signature**) | `name='all'`, `scalar=None` |
 | Params (**effective defaults**) | STUB: not measured — fill from pandas_ta/candles/cdl_pattern.py |
 | Warm-up (dictionary probe) | 0 |
-| Engine wiring | **not reached by the engine** — absent from `INDICATOR_SPECS`, the import aliases and the `ta.cdl_pattern(` scan of `indicator_engine.py` / `speedy_indicators.py` (INDREF-2 §5b). Call sites outside those two modules are a separate question: **1 Gate-E/analysis script(s)** under `../Backtesting/scripts/analysis/` do call it |
+| Engine wiring | no literal `ta.cdl_pattern(` call site; a `getattr`/alias dispatch is not visible to this scan |
 | Provenance | STUB: not measured — fill from pandas_ta/candles/cdl_pattern.py |
 | Status | module first appears in this repo's history 2026-03-16 (`git log --diff-filter=A -- pandas_ta/candles/cdl_pattern.py`) |
 
@@ -49,7 +49,7 @@ A wrapper around all candle patterns.
 
 Machine-filled from the live probe in `docs/gen_indicator_dictionary.py` (synthetic 600-bar
 OHLCV frame, computed twice with price ×137). The register verdict is joined on column name
-from `../Backtesting/docs/knowledgebase/IndicatorMLRegister.md` and copied verbatim; "no row"
+from `../Backtesting/Backtesting/docs/IndicatorMLRegister.md` and copied verbatim; "no row"
 means the engine's production config does not emit a column of that name, which is a fact
 about the engine, not about this indicator.
 
@@ -170,162 +170,161 @@ STUB: not measured — fill from tests/test_cdl_pattern.py
 
 ## 7. Overlap (Gate E)
 
-**This generator found no campaign record for this indicator.** There is no
-`../Backtesting/scripts/analysis/measure_cdl_pattern_overlap_full.py`, and none of the batch campaign documents
+**This generator found no campaign record for this indicator.** No Gate E run
+(`gate_e_overlap.py run`) exists for this indicator, and none of the batch campaign documents
 (`docs/AltportPortsMeasured.md`, `docs/CandlePatternsMeasured.md`, `docs/PineAlternatesMeasured.md`, `docs/TalibPortsMeasured.md`) names any of this
 indicator's emitted column names. **That is what the scan tested — column names, not
 prose mentions** — so it is a statement about this scan, not proof that no
-measurement exists. To start
-a campaign, copy any existing `measure_*_overlap_full.py` and grid the shipped
-columns against `IndicatorEngine(include_advanced=True).compute_all()`.
+measurement exists. To measure it, run
+`gate_e_overlap.py run --module pandas_ta.candles.cdl_pattern`.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_cdl_pattern_overlap_full.py
+STUB: not measured — fill from ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.candles.cdl_pattern --name cdl_pattern
 
-Ship line: ρ ≈ 0.9 → revert · 0.76–0.80 → ship with disclosure · below 0.76 → ship.
+Bands (`r3-perframe-0.90`): STRUCK if pooled |ρ| ≥ 0.90 or the per-frame median of any top-5 comparator ≥ 0.90 · DISCLOSE_GAP 0.80–0.90 · DISCLOSE 0.76–0.80 · SHIP below 0.76.
 
 ## 8. Reachability (Gate C)
 
 Per-frame firing counts against `BeamMiner(min_support=30)`
-(`../Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below
+(`../Backtesting/Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below
 `min_support` is a PARTIAL, not a PASS.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_cdl_pattern_overlap_full.py
+STUB: not measured — no harness yet (the Gate E harness measures Gate E only)
 
 ## 9. BIST specifics
 
 Behaviour on the DI-5 / DI-5b contaminated frames (`MGROS.IS`, `ARCLK.IS`) against clean
 controls, and the SHAPE of any failure — suppression, fabrication, or a pinned value.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_cdl_pattern_overlap_full.py
+STUB: not measured — no harness yet (the Gate E harness measures Gate E only)
 
 ## 10. Mining track record
 
 Column-name stems (the parameter tail is what a mined rule varies, so the grep drops it):
 
 ```sh
-grep -c 'CDL_2CROWS' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_2CROWS' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_2CROWS' ../Backtesting/backtest_results/
-grep -c 'CDL_3BLACKCROWS' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_3BLACKCROWS' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_3BLACKCROWS' ../Backtesting/backtest_results/
-grep -c 'CDL_3INSIDE' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_3INSIDE' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_3INSIDE' ../Backtesting/backtest_results/
-grep -c 'CDL_3LINESTRIKE' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_3LINESTRIKE' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_3LINESTRIKE' ../Backtesting/backtest_results/
-grep -c 'CDL_3OUTSIDE' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_3OUTSIDE' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_3OUTSIDE' ../Backtesting/backtest_results/
-grep -c 'CDL_3STARSINSOUTH' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_3STARSINSOUTH' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_3STARSINSOUTH' ../Backtesting/backtest_results/
-grep -c 'CDL_3WHITESOLDIERS' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_3WHITESOLDIERS' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_3WHITESOLDIERS' ../Backtesting/backtest_results/
-grep -c 'CDL_ABANDONEDBABY' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_ABANDONEDBABY' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_ABANDONEDBABY' ../Backtesting/backtest_results/
-grep -c 'CDL_ADVANCEBLOCK' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_ADVANCEBLOCK' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_ADVANCEBLOCK' ../Backtesting/backtest_results/
-grep -c 'CDL_BELTHOLD' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_BELTHOLD' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_BELTHOLD' ../Backtesting/backtest_results/
-grep -c 'CDL_BREAKAWAY' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_BREAKAWAY' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_BREAKAWAY' ../Backtesting/backtest_results/
-grep -c 'CDL_CLOSINGMARUBOZU' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_CLOSINGMARUBOZU' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_CLOSINGMARUBOZU' ../Backtesting/backtest_results/
-grep -c 'CDL_CONCEALBABYSWALL' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_CONCEALBABYSWALL' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_CONCEALBABYSWALL' ../Backtesting/backtest_results/
-grep -c 'CDL_COUNTERATTACK' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_COUNTERATTACK' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_COUNTERATTACK' ../Backtesting/backtest_results/
-grep -c 'CDL_DARKCLOUDCOVER' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_DARKCLOUDCOVER' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_DARKCLOUDCOVER' ../Backtesting/backtest_results/
-grep -c 'CDL_DOJI' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_DOJI' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_DOJI' ../Backtesting/backtest_results/
-grep -c 'CDL_DOJISTAR' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_DOJISTAR' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_DOJISTAR' ../Backtesting/backtest_results/
-grep -c 'CDL_DRAGONFLYDOJI' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_DRAGONFLYDOJI' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_DRAGONFLYDOJI' ../Backtesting/backtest_results/
-grep -c 'CDL_ENGULFING' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_ENGULFING' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_ENGULFING' ../Backtesting/backtest_results/
-grep -c 'CDL_EVENINGDOJISTAR' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_EVENINGDOJISTAR' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_EVENINGDOJISTAR' ../Backtesting/backtest_results/
-grep -c 'CDL_EVENINGSTAR' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_EVENINGSTAR' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_EVENINGSTAR' ../Backtesting/backtest_results/
-grep -c 'CDL_GAPSIDESIDEWHITE' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_GAPSIDESIDEWHITE' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_GAPSIDESIDEWHITE' ../Backtesting/backtest_results/
-grep -c 'CDL_GRAVESTONEDOJI' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_GRAVESTONEDOJI' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_GRAVESTONEDOJI' ../Backtesting/backtest_results/
-grep -c 'CDL_HAMMER' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_HAMMER' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_HAMMER' ../Backtesting/backtest_results/
-grep -c 'CDL_HANGINGMAN' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_HANGINGMAN' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_HANGINGMAN' ../Backtesting/backtest_results/
-grep -c 'CDL_HARAMI' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_HARAMI' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_HARAMI' ../Backtesting/backtest_results/
-grep -c 'CDL_HARAMICROSS' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_HARAMICROSS' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_HARAMICROSS' ../Backtesting/backtest_results/
-grep -c 'CDL_HIGHWAVE' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_HIGHWAVE' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_HIGHWAVE' ../Backtesting/backtest_results/
-grep -c 'CDL_HIKKAKE' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_HIKKAKE' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_HIKKAKE' ../Backtesting/backtest_results/
-grep -c 'CDL_HIKKAKEMOD' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_HIKKAKEMOD' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_HIKKAKEMOD' ../Backtesting/backtest_results/
-grep -c 'CDL_HOMINGPIGEON' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_HOMINGPIGEON' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_HOMINGPIGEON' ../Backtesting/backtest_results/
-grep -c 'CDL_IDENTICAL3CROWS' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_IDENTICAL3CROWS' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_IDENTICAL3CROWS' ../Backtesting/backtest_results/
-grep -c 'CDL_INNECK' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_INNECK' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_INNECK' ../Backtesting/backtest_results/
-grep -c 'CDL_INSIDE' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_INSIDE' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_INSIDE' ../Backtesting/backtest_results/
-grep -c 'CDL_INVERTEDHAMMER' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_INVERTEDHAMMER' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_INVERTEDHAMMER' ../Backtesting/backtest_results/
-grep -c 'CDL_KICKING' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_KICKING' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_KICKING' ../Backtesting/backtest_results/
-grep -c 'CDL_KICKINGBYLENGTH' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_KICKINGBYLENGTH' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_KICKINGBYLENGTH' ../Backtesting/backtest_results/
-grep -c 'CDL_LADDERBOTTOM' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_LADDERBOTTOM' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_LADDERBOTTOM' ../Backtesting/backtest_results/
-grep -c 'CDL_LONGLEGGEDDOJI' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_LONGLEGGEDDOJI' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_LONGLEGGEDDOJI' ../Backtesting/backtest_results/
-grep -c 'CDL_LONGLINE' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_LONGLINE' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_LONGLINE' ../Backtesting/backtest_results/
-grep -c 'CDL_MARUBOZU' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_MARUBOZU' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_MARUBOZU' ../Backtesting/backtest_results/
-grep -c 'CDL_MATCHINGLOW' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_MATCHINGLOW' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_MATCHINGLOW' ../Backtesting/backtest_results/
-grep -c 'CDL_MATHOLD' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_MATHOLD' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_MATHOLD' ../Backtesting/backtest_results/
-grep -c 'CDL_MORNINGDOJISTAR' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_MORNINGDOJISTAR' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_MORNINGDOJISTAR' ../Backtesting/backtest_results/
-grep -c 'CDL_MORNINGSTAR' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_MORNINGSTAR' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_MORNINGSTAR' ../Backtesting/backtest_results/
-grep -c 'CDL_ONNECK' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_ONNECK' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_ONNECK' ../Backtesting/backtest_results/
-grep -c 'CDL_PIERCING' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_PIERCING' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_PIERCING' ../Backtesting/backtest_results/
-grep -c 'CDL_RICKSHAWMAN' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_RICKSHAWMAN' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_RICKSHAWMAN' ../Backtesting/backtest_results/
-grep -c 'CDL_RISEFALL3METHODS' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_RISEFALL3METHODS' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_RISEFALL3METHODS' ../Backtesting/backtest_results/
-grep -c 'CDL_SEPARATINGLINES' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_SEPARATINGLINES' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_SEPARATINGLINES' ../Backtesting/backtest_results/
-grep -c 'CDL_SHOOTINGSTAR' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_SHOOTINGSTAR' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_SHOOTINGSTAR' ../Backtesting/backtest_results/
-grep -c 'CDL_SHORTLINE' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_SHORTLINE' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_SHORTLINE' ../Backtesting/backtest_results/
-grep -c 'CDL_SPINNINGTOP' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_SPINNINGTOP' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_SPINNINGTOP' ../Backtesting/backtest_results/
-grep -c 'CDL_STALLEDPATTERN' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_STALLEDPATTERN' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_STALLEDPATTERN' ../Backtesting/backtest_results/
-grep -c 'CDL_STICKSANDWICH' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_STICKSANDWICH' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_STICKSANDWICH' ../Backtesting/backtest_results/
-grep -c 'CDL_TAKURI' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_TAKURI' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_TAKURI' ../Backtesting/backtest_results/
-grep -c 'CDL_TASUKIGAP' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_TASUKIGAP' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_TASUKIGAP' ../Backtesting/backtest_results/
-grep -c 'CDL_THRUSTING' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_THRUSTING' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_THRUSTING' ../Backtesting/backtest_results/
-grep -c 'CDL_TRISTAR' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_TRISTAR' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_TRISTAR' ../Backtesting/backtest_results/
-grep -c 'CDL_UNIQUE3RIVER' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_UNIQUE3RIVER' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_UNIQUE3RIVER' ../Backtesting/backtest_results/
-grep -c 'CDL_UPSIDEGAP2CROWS' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_UPSIDEGAP2CROWS' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_UPSIDEGAP2CROWS' ../Backtesting/backtest_results/
-grep -c 'CDL_XSIDEGAP3METHODS' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'CDL_XSIDEGAP3METHODS' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'CDL_XSIDEGAP3METHODS' ../Backtesting/backtest_results/
 ```
 
@@ -414,9 +413,9 @@ STUB: not measured — fill from pandas_ta/candles/cdl_pattern.py
 |---|---|---|
 | A Correctness | STUB: not measured — fill from pandas_ta/candles/cdl_pattern.py | source not identified yet — see §3 |
 | B Causality | no recorded exception | §5: `LEAK_RULES` does not list this indicator; no mutant test recorded |
-| C Reachability | STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_cdl_pattern_overlap_full.py | §8 |
+| C Reachability | STUB: not measured — no harness yet (the Gate E harness measures Gate E only) | §8 |
 | D Scale-free | probe tag only, see §2 | `docs/gen_indicator_dictionary.py` ×137 ratio |
-| E Attribution | STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_cdl_pattern_overlap_full.py | §7 |
+| E Attribution | STUB: not measured — fill from ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.candles.cdl_pattern --name cdl_pattern | §7 |
 | F Suites | no dedicated test module; the recorded full-suite run was 2983 passed / 0 failed / 0 error / 23 skipped, pytest exit 0, 2026-09-10 | §12 row above, `docs/indicators/_facts.json` |
 
 ---
@@ -433,7 +432,7 @@ changes, or deletes a number here without saying where it came from.
 | metric | n | @ artifact / provenance class |
 |---|---|---|
 | §6#P — the probe's scale ratio | n=1 | @ docs/gen_indicator_dictionary.py — ×137 probe ratio, live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 |
-| §7#P — overlap ship line | n=4 | @ ../Backtesting/scripts/analysis/measure_cdl_pattern_overlap_full.py |
+| §7#P — overlap ship line | n=8 | @ ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.candles.cdl_pattern --name cdl_pattern |
 
 ⚠ Parsed by `tests/test_indref_pages.py`. Every group holding a number appears above with a
 matching `n=`; adding a table, adding a row, or adding a number to a paragraph without

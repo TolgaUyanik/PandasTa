@@ -39,9 +39,8 @@ definition deliberately drops.
 A page is counted **measured** if ANY of three things is true, and the union is what the
 table below counts:
 
-1. a dedicated overlap harness
-   (`../Backtesting/scripts/analysis/measure_<name>_overlap_full.py`) exists for that
-   indicator name;
+1. a Gate E run exists for the indicator's module (`gate_e_overlap.py run`: a
+   `../Backtesting/backtest_results/{gatee,issue-107-gatee}/*/meta.json` with mode `run`);
 2. one of the batch campaign documents in this directory's parent
    (`docs/AltportPortsMeasured.md`, `docs/CandlePatternsMeasured.md`, `docs/PineAlternatesMeasured.md`, `docs/TalibPortsMeasured.md`) names one of the indicator's emitted column names;
 3. the page is hand-written (`tvstop.md`).
@@ -64,7 +63,7 @@ currently has no ticket.
 
 | | pages |
 |---|---|
-| measured — dedicated harness, campaign-doc match, or hand-written | 40 |
+| measured — Gate E run, campaign-doc match, or hand-written | 40 |
 | §6–§9 stubbed | 202 |
 
 That is **83.5 %** of the pages carrying the stub token in §6–§9 — the number is derived here
@@ -73,9 +72,9 @@ from the two rows above and appears in no artifact.
 Pages in the measured column: [`atr`](atr.md), [`atr2`](atr2.md), [`beta`](beta.md), [`bos`](bos.md), [`bw_mfi`](bw_mfi.md), [`cvi`](cvi.md), [`dema2`](dema2.md), [`dtdb`](dtdb.md), [`ema`](ema.md), [`ema2`](ema2.md), [`equal_highs_lows`](equal_highs_lows.md), [`fvg`](fvg.md), [`fvg_sweep_magnet`](fvg_sweep_magnet.md), [`har_park`](har_park.md), [`head_shoulders`](head_shoulders.md), [`ht_dcperiod`](ht_dcperiod.md), [`ht_dcphase`](ht_dcphase.md), [`ht_phasor`](ht_phasor.md), [`ht_sine`](ht_sine.md), [`ht_trendline`](ht_trendline.md), [`ht_trendmode`](ht_trendmode.md), [`imi`](imi.md), [`liquidity_compression_box`](liquidity_compression_box.md), [`macd_area_divergence`](macd_area_divergence.md), [`mama`](mama.md), [`nadaraya_watson_envelope`](nadaraya_watson_envelope.md), [`pressure_pulse`](pressure_pulse.md), [`range_profile`](range_profile.md), [`rma2`](rma2.md), [`rounding_cup`](rounding_cup.md), [`sarext`](sarext.md), [`smc_sweep`](smc_sweep.md), [`sr_corridor`](sr_corridor.md), [`supertrend2`](supertrend2.md), [`t3`](t3.md), [`t3_tv`](t3_tv.md), [`tema2`](tema2.md), [`triangle_wedge`](triangle_wedge.md), [`triple_top_bottom`](triple_top_bottom.md), [`tvstop`](tvstop.md).
 
 **Every page's Gate A, C and E rows are stubs unless that page says otherwise.**
-`ls ../Backtesting/scripts/analysis/measure_*overlap*.py` returns **16** harnesses (counted by
-this generator on 2026-09-10) against 242 pages, and most of those harnesses are batch harnesses
-covering a single recent port campaign. The gates were run for recent ports, not for the
+**14** indicators have a Gate E run (`backtest_results/gatee/*/meta.json`, mode `run`;
+counted by this generator; fact cache 2026-09-10) against 242 pages.
+The gates were run for recent ports, not for the
 upstream body of the package, and the pages say so rather than leaving an inviting blank.
 
 ## 3. What is machine-filled

@@ -1,5 +1,10 @@
 # Completed work — PandasTa fork
 
+> **Note (2026-10-24, Backtesting #107):** the `measure_*` scripts this record cites were never
+> committed. The rebuilt Gate E harness is `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py`,
+> and its comparator set differs: 329 + 358 columns today vs the 485/492-column engine of 2026-09,
+> which no longer exists. The text below is left as it was run.
+
 Everything here is **finished**. It was moved out of `TODO.md` on 2026-09-12 so that file could go
 back to being a list of what is left, which by then was one item.
 

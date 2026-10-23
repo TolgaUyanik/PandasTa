@@ -224,7 +224,7 @@ had been driven by tick rounding: a zone was evicted on the bar that created it,
 survived only when the close tied the bar's extreme. They now fire at **22.17% / 19.85%**
 over 89 BIST_100 frames and 408,253 daily bars, with Gates C/D/E cleared (max |ρ| 0.6390 /
 0.5962, under the 0.76 ship line). Evidence:
-`../Backtesting/scripts/analysis/measure_fvg_overlap_full.py` and its four CSVs.
+`../Backtesting/scripts/analysis/measure_fvg_overlap_full.py` (never committed, Backtesting #107; rebuilt harness: `gate_e_overlap.py`) and its four CSVs.
 
 ⚠ The **live trading container** still runs an unrepaired private copy of the same loop
 (`FVGENG-2`, tracked in the Backtesting repo), so research and live currently compute different `IN_FVG_*`

@@ -185,7 +185,7 @@ on the INTERNAL overlap:
     CUP_R2    x CUP_SYM    spearman rho = 0.9986    n = 88,747
 
 measured on 50 BIST tickers / 91,197 daily bars
-(`../Backtesting/scripts/analysis/measure_candle1_overlap_full.py`). All three
+(`../Backtesting/scripts/analysis/measure_candle1_overlap_full.py` (never committed, Backtesting #107; rebuilt harness: `gate_e_overlap.py`)). All three
 magnitudes are nonzero on the same ~718 bars and 0.0 on the other ~88,000, and
 that shared support pins the rank correlation near 1 whatever they measure.
 

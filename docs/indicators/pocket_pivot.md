@@ -27,7 +27,7 @@
 | Params (**declared signature**) | `length=None`, `max_offset_pct=None`, `lookback=None` |
 | Params (**effective defaults**) | STUB: not measured — fill from pandas_ta/volume/pocket_pivot.py |
 | Warm-up (dictionary probe) | 10 |
-| Engine wiring | **called by the parent engine** — imported alias |
+| Engine wiring | no literal `ta.pocket_pivot(` call site; a `getattr`/alias dispatch is not visible to this scan |
 | Provenance | STUB: not measured — fill from pandas_ta/volume/pocket_pivot.py |
 | Status | module first appears in this repo's history 2026-08-04 (`git log --diff-filter=A -- pandas_ta/volume/pocket_pivot.py`) |
 
@@ -49,15 +49,15 @@ A "pocket pivot" (from "Trade Like an O'Neil Disciple" by Kacher & Morales): tod
 
 Machine-filled from the live probe in `docs/gen_indicator_dictionary.py` (synthetic 600-bar
 OHLCV frame, computed twice with price ×137). The register verdict is joined on column name
-from `../Backtesting/docs/knowledgebase/IndicatorMLRegister.md` and copied verbatim; "no row"
+from `../Backtesting/Backtesting/docs/IndicatorMLRegister.md` and copied verbatim; "no row"
 means the engine's production config does not emit a column of that name, which is a fact
 about the engine, not about this indicator.
 
 | Column | Dictionary ML form | warm-up | observed range on the probe fixture | Register verdict |
 |---|---|---|---|---|
-| `PPIVOT_10_10` | `BIN` | 0 | 0 … 1 | OK (as `PPIVOT_10_10`) |
-| `PPIVOT_VOLRATIO_10_10` | `SF` | 10 | 0 … 2.97179 | OK (as `PPIVOT_VOLRATIO_10_10`) |
-| `PPIVOT_MAOFFSET_10_10` | `SF` | 9 | 0.00383625 … 6.91225 | OK (as `PPIVOT_MAOFFSET_10_10`) |
+| `PPIVOT_10_10` | `BIN` | 0 | 0 … 1 | no row |
+| `PPIVOT_VOLRATIO_10_10` | `SF` | 10 | 0 … 2.97179 | no row |
+| `PPIVOT_MAOFFSET_10_10` | `SF` | 9 | 0.00383625 … 6.91225 | no row |
 
 Per-column one-line descriptions are owed with §1: STUB: not measured — fill from pandas_ta/volume/pocket_pivot.py
 
@@ -111,44 +111,43 @@ STUB: not measured — fill from tests/test_pocket_pivot.py
 
 ## 7. Overlap (Gate E)
 
-**This generator found no campaign record for this indicator.** There is no
-`../Backtesting/scripts/analysis/measure_pocket_pivot_overlap_full.py`, and none of the batch campaign documents
+**This generator found no campaign record for this indicator.** No Gate E run
+(`gate_e_overlap.py run`) exists for this indicator, and none of the batch campaign documents
 (`docs/AltportPortsMeasured.md`, `docs/CandlePatternsMeasured.md`, `docs/PineAlternatesMeasured.md`, `docs/TalibPortsMeasured.md`) names any of this
 indicator's emitted column names. **That is what the scan tested — column names, not
 prose mentions** — so it is a statement about this scan, not proof that no
-measurement exists. To start
-a campaign, copy any existing `measure_*_overlap_full.py` and grid the shipped
-columns against `IndicatorEngine(include_advanced=True).compute_all()`.
+measurement exists. To measure it, run
+`gate_e_overlap.py run --module pandas_ta.volume.pocket_pivot`.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_pocket_pivot_overlap_full.py
+STUB: not measured — fill from ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.volume.pocket_pivot --name pocket_pivot
 
-Ship line: ρ ≈ 0.9 → revert · 0.76–0.80 → ship with disclosure · below 0.76 → ship.
+Bands (`r3-perframe-0.90`): STRUCK if pooled |ρ| ≥ 0.90 or the per-frame median of any top-5 comparator ≥ 0.90 · DISCLOSE_GAP 0.80–0.90 · DISCLOSE 0.76–0.80 · SHIP below 0.76.
 
 ## 8. Reachability (Gate C)
 
 Per-frame firing counts against `BeamMiner(min_support=30)`
-(`../Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below
+(`../Backtesting/Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below
 `min_support` is a PARTIAL, not a PASS.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_pocket_pivot_overlap_full.py
+STUB: not measured — no harness yet (the Gate E harness measures Gate E only)
 
 ## 9. BIST specifics
 
 Behaviour on the DI-5 / DI-5b contaminated frames (`MGROS.IS`, `ARCLK.IS`) against clean
 controls, and the SHAPE of any failure — suppression, fabrication, or a pinned value.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_pocket_pivot_overlap_full.py
+STUB: not measured — no harness yet (the Gate E harness measures Gate E only)
 
 ## 10. Mining track record
 
 Column-name stems (the parameter tail is what a mined rule varies, so the grep drops it):
 
 ```sh
-grep -c 'PPIVOT' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'PPIVOT' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'PPIVOT' ../Backtesting/backtest_results/
-grep -c 'PPIVOT_MAOFFSET' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'PPIVOT_MAOFFSET' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'PPIVOT_MAOFFSET' ../Backtesting/backtest_results/
-grep -c 'PPIVOT_VOLRATIO' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'PPIVOT_VOLRATIO' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'PPIVOT_VOLRATIO' ../Backtesting/backtest_results/
 ```
 
@@ -178,9 +177,9 @@ STUB: not measured — fill from pandas_ta/volume/pocket_pivot.py
 |---|---|---|
 | A Correctness | STUB: not measured — fill from pandas_ta/volume/pocket_pivot.py | source not identified yet — see §3 |
 | B Causality | no recorded exception | §5: `LEAK_RULES` does not list this indicator; no mutant test recorded |
-| C Reachability | STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_pocket_pivot_overlap_full.py | §8 |
+| C Reachability | STUB: not measured — no harness yet (the Gate E harness measures Gate E only) | §8 |
 | D Scale-free | probe tag only, see §2 | `docs/gen_indicator_dictionary.py` ×137 ratio |
-| E Attribution | STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_pocket_pivot_overlap_full.py | §7 |
+| E Attribution | STUB: not measured — fill from ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.volume.pocket_pivot --name pocket_pivot | §7 |
 | F Suites | 5 passed / 0 skipped in `tests/test_pocket_pivot.py`, recorded full-suite run 2026-09-10 | §12 row above, `docs/indicators/_facts.json` |
 
 ---
@@ -196,9 +195,9 @@ changes, or deletes a number here without saying where it came from.
 
 | metric | n | @ artifact / provenance class |
 |---|---|---|
-| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=3 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/docs/knowledgebase/IndicatorMLRegister.md |
+| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=3 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/Backtesting/docs/IndicatorMLRegister.md |
 | §6#P — the probe's scale ratio | n=1 | @ docs/gen_indicator_dictionary.py — ×137 probe ratio, live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 |
-| §7#P — overlap ship line | n=4 | @ ../Backtesting/scripts/analysis/measure_pocket_pivot_overlap_full.py |
+| §7#P — overlap ship line | n=8 | @ ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.volume.pocket_pivot --name pocket_pivot |
 
 ⚠ Parsed by `tests/test_indref_pages.py`. Every group holding a number appears above with a
 matching `n=`; adding a table, adding a row, or adding a number to a paragraph without

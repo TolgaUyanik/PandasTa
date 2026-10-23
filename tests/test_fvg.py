@@ -42,7 +42,7 @@ What these tests pin, in order of how much it would hurt to lose:
 * **`max_zones` is honoured** (`test_max_zones_caps_the_live_zone_set`), which
   it could not be while the zone list was always empty.
 
-Gate numbers from `Backtesting/scripts/analysis/measure_fvg_overlap_full.py`
+Gate numbers from `Backtesting/scripts/analysis/measure_fvg_overlap_full.py` (never committed, Backtesting #107; rebuilt harness: `gate_e_overlap.py`)
 over 89 BIST_100 frames / 408,253 bars: Gate C 90,506 / 81,021 fires, 89/89
 frames, 0 saturated; Gate D 0 differing cells of 1,633,012 on dyadic scales;
 Gate E max |rho| 0.6390 (IN_FVG_BULL x FSME_CE_DIST_BULL_5, n=30,667) and
