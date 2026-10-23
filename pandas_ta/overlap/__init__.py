@@ -14,6 +14,7 @@ from .hma import hma
 from .ht_trendline import ht_trendline
 from .hwma import hwma
 from .jma import jma
+from .kalman_trend import kalman_trend
 from .kama import kama
 from .ichimoku import ichimoku
 from .ichimoku_ml import ichimoku_ml
