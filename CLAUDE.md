@@ -82,7 +82,12 @@ live package and lists every column's observed form.
   range(0, m)`, so at `i = 0` it read `ssf.iloc[-1]` — Python negative indexing, the LAST bar of
   the series — and the recursion propagated that forward. Perturbing only bars ≥ 300 of a 400-bar
   frame moved **bar 0** by 31.4. Fixed and pinned by `tests/test_ssf_causality.py`.
-  **Do not trust this list as a substitute for measuring.** It was found by a per-parent
+  🔴 **`bos` is a fourth, and it is still OPEN** — all four columns. It flags swings with
+  `rolling(swing_length, center=True)`, so it reads exactly `(swing_length - 1) // 2` bars ahead
+  (measured: 1 / 2 / 3 / 4 at `swing_length` 4 / 5 / 7 / 9). A bug, not a design choice; fixing it
+  changes column values, so **owner's call**. `swing_equilibrium` is the causal model for a fix.
+  Pinned by `tests/test_bos_lookahead.py`, which fails if the reach changes in either direction.
+  **Do not trust this list as a substitute for measuring.** `ssf` was found by a per-parent
   perturbation probe in MLCOL-1's companion screen, not by reading it; a hand-maintained list
   contains only the cases someone already thought of.
 - **Scale-free.** A column that scales with price (`SMA_10`, `MACD_12_26_9`) is not a feature; a tree
@@ -122,7 +127,22 @@ hurt to lose, with the measured numbers. Match that when adding one — see `tes
 
 ## Known breaks
 
-None outstanding. Two indicators (`up_and_down_volume`, `volume_delta`) are **not probed** —
+🔴 **One test fails on a clean checkout, and it is not flaky.**
+`tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` asserts that every
+`<path>:<n>` citation in `docs/pine_builtin_coverage.csv`'s audit evidence resolves to a real
+file. It does not: the first failing row is `supertrend`, citing `RA2vGpkA-ta.pine`. **The cause
+is `8d8f705`, which untracked the 2,211-file `docs/pine/` corpus for licensing reasons** — 912 of
+those files are MPL-2.0 under a root MIT `LICENSE`. The citations were never updated, so the
+guard now demands files this repo deliberately does not carry, and it will fail for every person
+who clones it.
+
+Full suite as of 2026-09-12: **1 failed, 3197 passed, 24 skipped**.
+
+Neither fix is small, which is why this is recorded rather than patched: re-adding the corpus
+reverses a licensing decision, and rewriting the guard to accept unresolvable citations removes
+the only thing standing between "audited" and "asserted". **Owner's call.**
+
+Separately, two indicators (`up_and_down_volume`, `volume_delta`) are **not probed** —
 they need a lower-timeframe frame the single-frame harness cannot synthesise — and the generated
 *Known breaks* section says so rather than counting them either way. Verify with
 `python docs/gen_indicator_dictionary.py`, whose *Known breaks* section is generated from a live
@@ -145,7 +165,7 @@ close exactly at an extreme — so the columns fired at 4.63% / 3.51%, driven by
 than by structure. Gates C/D/E cleared (Gate E max |ρ| 0.6390 / 0.5962, under the 0.76 ship line);
 evidence in `../Backtesting/scripts/analysis/measure_fvg_overlap_full.py` and its four CSVs.
 
-What is still open is **FVGENG** in `TODO.md`: the engine kept three private copies of the same
+What is still open is **FVGENG**, tracked in the Backtesting repo since 2026-09-07: the engine kept three private copies of the same
 loop. Two are now delegating to `pandas_ta.fvg` (`indicator_engine._calculate_fvg`,
 `speedy_indicators`), and the third — `deploy/app/paper_trading/paper_trading.py:~804`, inside the
 live container — is unchanged behind the TRADING FREEZE. **Do not add a fourth copy: import the
@@ -179,6 +199,13 @@ Four things worth knowing before touching any of it:
   `SAREXT` ship as percent distances; the levels are behind `raw=True` and are registered
   nowhere. `BETA` needs a benchmark series, so it is out of `Category` AND in
   `strategy`'s exclusion list.
+
+## Open work
+
+Local tracker: `docs/issues/` — **gitignored, so it exists only on the owner's machine**; a clone
+does not have it. One file per issue, index and status conventions in `docs/issues/README.md`. `TODO.md` was removed 2026-10-20 after its open sections were copied into
+issues; finished work is in `docs/CompletedWork.md`, which is also where the PINEBI verdict-count
+table now lives (`tests/test_pine_coverage_csv.py` asserts it there).
 
 ## Commit conventions
 

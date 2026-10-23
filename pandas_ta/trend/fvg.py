@@ -34,7 +34,7 @@ def fvg(high, low, close, max_zones=None, offset=None, **kwargs):
     # (bull) / `close >= zone_low` (bear) -- conditions that read `close[i] <=
     # low[i]` and `close[i] >= high[i]`, true only on an exact tie. Every zone
     # was therefore evicted on the bar that created it and IN_FVG_* could never
-    # fire: 0 in 12,000 probe bars. See FVGDEAD in TODO.md.
+    # fire: 0 in 12,000 probe bars. See FVGDEAD in CLAUDE.md (closed 2026-09-07).
     bull_zones = []
     bear_zones = []
 

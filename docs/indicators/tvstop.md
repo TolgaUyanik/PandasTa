@@ -493,8 +493,8 @@ grep -rl --no-ignore-files 'TVS_' ../Backtesting/backtest_results/     ->  0 fil
 **No mined rule references any `TVS_*` column, and no row in `StrategyMaster.csv` names `tvstop`.**
 This is *expected*, not a negative result: the columns shipped 2026-08-27 and **no mining run has
 been executed since**. Nothing on this page is a claim of edge. **INDREF-2** — the engine-side
-results write-up that this page's series feeds, tracked in this repo's `TODO.md` — is where a
-selected / never-selected verdict becomes meaningful.
+results write-up that this page's series feeds, done 2026-09-11 and recorded in
+`docs/CompletedWork.md` — is where a selected / never-selected verdict becomes meaningful.
 
 ⚠ The parent repo's default `grep` is a ugrep wrapper that honours `.gitignore`, and
 `backtest_results/tvpta6/` is ignored at `.gitignore:14`. Always sweep with `--no-ignore-files`, as

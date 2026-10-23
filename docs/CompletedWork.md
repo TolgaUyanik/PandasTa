@@ -7,7 +7,8 @@ back to being a list of what is left, which by then was one item.
 behind every shipped and every DELETED column — the ρ values, the sample sizes, the reverts, and
 the traps that cost a review round to find. Several of them are the only written record of why a
 thing is *not* there, which is exactly the knowledge a future session destroys by re-doing the
-work. `TODO.md` keeps a one-line index and points here.
+work. What is still open lives in `docs/issues/`, a local tracker that is gitignored (`TODO.md` was
+removed 2026-10-20).
 
 Read `docs/IndicatorDictionary.md` for what currently ships, and the per-campaign measurement
 docs (`TalibPortsMeasured.md`, `CandlePatternsMeasured.md`, `AltportPortsMeasured.md`,
@@ -22,6 +23,23 @@ the per-column numbers.
 
 > **Goal (user):** *"We will review each pine scripts to implement to repo from PandasTa/docs/pine/
 > folder. We can start with TradingView basic indicators."*
+
+**Verdict split, generated — this is the table the -1b…-1e scopes are cut from.**
+Produced by `docs/gen_pine_builtin_coverage.py` (PINEBI-0, done 2026-09-07).
+
+| verdict | n |
+|---|---|
+| `have` | 73 |
+| `port - primitive` (→ -1a) | 18 |
+| `n/a - measured and reverted on Gate E` | 7 |
+| `n/a - not a Pine built-in` | 4 |
+| `n/a - not worth a primitive` | 2 |
+| `port - blocked on data` (→ -1d) | 2 |
+| `n/a - never called live in the corpus` | 1 |
+
+⚠ These counts are **asserted**, not retyped: `test_the_docs_quote_the_csvs_actual_split` reads this
+table and fails if any number disagrees with the CSV. Four review rounds went by with a stale split
+standing in three documents; that is now a test failure rather than a reading exercise.
 
 **"Built-in" is three populations, not one (measured 2026-09-06).** Only two are portable:
 
@@ -56,9 +74,9 @@ core namespace):
   `correlation` (29), `percentrank` (27), `highestbars` (23), `lowestbars` (22),
   `percentile_nearest_rank` (7), `percentile_linear_interpolation` (6), `pivot_point_levels` (1).
 
-**Verdict split:** deliberately NOT reproduced here. `TODO.md` is its single declared
-home and `test_no_other_document_retypes_the_split` fails the moment a second document
-carries it — which this archive did on its first draft, because the block was copied
+**Verdict split:** lives once, in the generated table at the top of this section (moved here
+from `TODO.md` on 2026-10-20). `test_no_other_document_retypes_the_split` fails the moment a
+second document carries it — which this archive did on its first draft, because the block was copied
 verbatim. Four review rounds once went by with a stale split standing in three
 documents; the guard is why that cannot recur.
 
@@ -99,8 +117,8 @@ independent Pine v6 reference; the remaining 25 each state a reason — silence 
 
 Two findings worth carrying forward:
 - **`pandas_ta.rma` is not Wilder's smoothing.** It is `ewm(alpha=1/length, adjust=True)` and differs
-  from Pine on 189/287 bars. **`atr` inherits it.** A real fork defect, not a reference bug — it has
-  no task yet.
+  from Pine on 189/287 bars. **`atr` inherits it.** A real fork defect, not a reference bug — tracked
+  locally as `docs/issues/011` since 2026-10-21.
 - The receipts cite line numbers *into* `docs/audit_pine_have_rows.py`, so editing that file reddens
   `test_audited_rows_carry_their_evidence` until the audit and then the generator are re-run. That is
   the guard working; the script's docstring says so.
@@ -914,6 +932,9 @@ a non-stationary series sits at its own window extreme constantly. Ranking the D
 `ml_state` now **enforces that by measurement rather than by column name** — there is no PX registry
 to check a name against, and a name check passes every renamed column. Pass
 `allow_nonstationary=True` to override deliberately.
+
+> ⚠ **MLCOL-1 below is still OPEN** — the only `[~]` item in this file. Its status is tracked
+> locally in `docs/issues/002`; this block is the committed record of the work done so far.
 
 - [~] **MLCOL-1 — Roll the contract out, PX columns first. 🔶 MEASURED IN FULL AND 5 SHIPPED 2026-09-12; the stated Done-when CANNOT be met honestly — see below.** Order the work
   by the dictionary's *"Needs a transform before modelling"* table — those indicators are unusable as

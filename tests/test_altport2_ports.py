@@ -161,7 +161,7 @@ REGISTERED = {
 #: reverted 7 of the 16 (see docs/PineBuiltinsMeasured.md). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
-CATEGORY_TOTAL = 233
+CATEGORY_TOTAL = 234
 CATEGORY_BUCKETS = {"trend": 58, "volatility": 19, "volume": 23}
 
 #: Gate E, re-measured on the SHIPPED columns over 89 BIST_100 daily frames /

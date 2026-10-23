@@ -1088,6 +1088,11 @@ class AnalysisIndicators(BasePandasObject):
         result = mom(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def pfe(self, length=None, smooth=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = pfe(close=close, length=length, smooth=smooth, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def pgo(self, length=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
