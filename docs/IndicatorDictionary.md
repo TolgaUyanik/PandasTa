@@ -26,9 +26,13 @@ window per ticker before concatenating tickers.
 `*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is
 invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
-**236 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
+**237 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
 The `pfe` row was patched in by hand on 2026-10-22 from a pandas 3.0.6 probe; regenerate on
 pandas 2.x to replace it.
+The `kalman_trend` row was patched in by hand on 2026-10-23, copied verbatim from
+`.venv-pd2/bin/python docs/gen_indicator_dictionary.py` (pandas 2.3.3, no TA-Lib, so a full
+regeneration there empties `cdl_pattern` and was discarded). That same run emitted the `pfe`
+row unchanged. Regenerate with TA-Lib installed to replace both notes.
 
 ### How many indicators is that, exactly
 
@@ -36,8 +40,8 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | surface | n | what it means |
 |---|---|---|
-| registered in `Category` | **234** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **242** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| registered in `Category` | **235** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **243** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
@@ -127,7 +131,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `willr` | H/L/C | `length=None` | `WILLR_14` SF | 13 | William's Percent R is a momentum oscillator similar to the RSI that attempts to identify overbought and oversold conditions. |
 | `wpo` | H/C | `length=None` | `WPO_14` SF | 13 | Reads an implied cycle period off how far the previous close sat inside the current bar's high, via `2*pi / asin(close[1] / high)`, then signs it by… |
 
-## overlap (49)
+## overlap (50)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -148,6 +152,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `ichimoku` | H/L/C | `tenkan=None`, `kijun=None`, `senkou=None` | `ISA_9` PX<br>`ISB_26` PX<br>`ITS_9` PX<br>`IKS_26` PX<br>`ICS_26` PX **LEAK** | 77 | Developed Pre WWII as a forecasting model for financial markets. |
 | `ichimoku_ml` | H/L/C | `tenkan=9`, `kijun=26`, `senkou=52` | `ICHI_PRICE_VS_CLOUD` SF<br>`ICHI_PRICE_VS_KIJUN` SF<br>`ICHI_TK_DIST` SF<br>`ICHI_TK_CROSS_AGE` SF<br>`ICHI_CLOUD_COLOR` BIN<br>`ICHI_CLOUD_THICK` SF<br>`ICHI_FUTURE_CLOUD_COLOR` BIN<br>`ICHI_CHIKOU_VS_CLOUD` SF | 77 | 8 normalized, CAUSAL relational features derived from the Ichimoku lines — the ML-proper form of Ichimoku (the raw lines are absolute price levels a… |
 | `jma` | C | `length=None`, `phase=None` | `JMA_7_0` PX | 6 | Mark Jurik's Moving Average (JMA) attempts to eliminate noise to see the "true" underlying activity. It has extremely low lag, is very smooth and is… |
+| `kalman_trend` | C | `q_level=None`, `q_slope=None` | `KFT_DIST_0.01_0.0001` SF<br>`KFT_VEL_0.01_0.0001` SF | 213 | A two-state (level, velocity) Kalman filter on log price, emitting the close's percent distance from the filtered level and the filtered velocity per… |
 | `kama` | C | `length=None`, `fast=None`, `slow=None`, `drift=None` | `KAMA_10_2_30` PX | 9 | Developed by Perry Kaufman, Kaufman's Adaptive Moving Average (KAMA) is a moving average designed to account for market noise or volatility. KAMA… |
 | `linreg` | C | `length=None` | `LR_14` PX | 13 | Linear Regression Moving Average (LINREG). This is a simplified version of a Standard Linear Regression. LINREG is a rolling regression of one… |
 | `linreg_channel` | C | `length=None` | `LINREG_SLOPE` SF<br>`LINREG_VALUE` PX<br>`LINREG_DEV` PX<br>`LINREG_UPPER_1` PX<br>`LINREG_LOWER_1` PX<br>`LINREG_UPPER_2` PX<br>`LINREG_LOWER_2` PX<br>`LINREG_LOWER_2_DIST_PCT` SF | 19 | Computes a rolling linear regression over `length` bars and returns the fitted value at the last bar together with ±1 and ±2 standard-deviation… |
@@ -327,7 +332,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation needed.
 
-`cdl_doji` `cdl_inside` `cdl_z` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `cti` `er` `fisher` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `ma_disparity` `log_return` `percent_return` `trend_return` `covariance` `entropy` `kurtosis` `normalize` `skew` `zscore` `adx` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `cvi` `har_park` `massi` `natr` `range_profile` `rvi` `ui` `ad` `adosc` `aobv` `avwap_z` `bw_mfi` `cmf` `kvo` `mfi` `nvi` `obv` `pocket_pivot` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `vzo`
+`cdl_doji` `cdl_inside` `cdl_z` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `cti` `er` `fisher` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `kalman_trend` `ma_disparity` `log_return` `percent_return` `trend_return` `covariance` `entropy` `kurtosis` `normalize` `skew` `zscore` `adx` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `cvi` `har_park` `massi` `natr` `range_profile` `rvi` `ui` `ad` `adosc` `aobv` `avwap_z` `bw_mfi` `cmf` `kvo` `mfi` `nvi` `obv` `pocket_pivot` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `vzo`
 
 ## Never fires on the probe
 

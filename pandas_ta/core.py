@@ -1391,6 +1391,11 @@ class AnalysisIndicators(BasePandasObject):
         result = jma(close=close, length=length, phase=phase, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def kalman_trend(self, q_level=None, q_slope=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = kalman_trend(close=close, q_level=q_level, q_slope=q_slope, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def kama(self, length=None, fast=None, slow=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = kama(close=close, length=length, fast=fast, slow=slow, offset=offset, **kwargs)
