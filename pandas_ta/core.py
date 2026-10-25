@@ -1288,11 +1288,6 @@ class AnalysisIndicators(BasePandasObject):
         result = dema2(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
-    def dickson_ma(self, length=None, hull_length=None, offset=None, **kwargs):
-        close = self._get_column(kwargs.pop("close", "close"))
-        result = dickson_ma(close=close, length=length, hull_length=hull_length, offset=offset, **kwargs)
-        return self._post_process(result, **kwargs)
-
     def ema(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = ema(close=close, length=length, offset=offset, **kwargs)

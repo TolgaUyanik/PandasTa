@@ -3,7 +3,6 @@ from .alma import alma
 from .bpress import bpress
 from .dema import dema
 from .dema2 import dema2
-from .dickson_ma import dickson_ma
 from .ema import ema
 from .ema2 import ema2
 from .ema_align import ema_align
