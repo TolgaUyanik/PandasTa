@@ -59,7 +59,7 @@ Category = {
     ],
     # Overlap
     "overlap": [
-        "alma", "bpress", "dema", "dema2", "ema", "ema2", "ema_align", "fwma", "hilo", "hl2", "hlc3", "hma", "iama", "ichimoku", "ichimoku_ml",
+        "alma", "bpress", "dema", "dema2", "dickson_ma", "ema", "ema2", "ema_align", "fwma", "hilo", "hl2", "hlc3", "hma", "iama", "ichimoku", "ichimoku_ml",
         "jma", "kalman_trend", "kama", "linreg", "linreg_channel", "ma_disparity", "mcgd", "midpoint", "midprice", "mmar",
         "nadaraya_watson_envelope", "ohlc4", "pwma", "rainbow", "rma", "rma2", "sinwma", "sma", "ssf", "supertrend",
         "supertrend2",
