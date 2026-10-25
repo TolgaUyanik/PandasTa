@@ -80,11 +80,11 @@ warm-up mask is a literal table, not the module's `_warmup`):
 
 | check | measured |
 |---|---|
-| EC, bit-identical bars, lengths 10 / 30 / 50 (3 walks × 899 valid bars, one NaN bar each) | 2,697 / 2,697 at each length |
+| EC, bit-identical bars, lengths 10 / 30 / 50 (3 walks × 899 valid bars, *derived*: 900 bars minus one NaN bar each) | 2,697 / 2,697 at each length |
 | distance vs oracle at (30, 7) / (10, 4) / (50, 16), 1,200-bar walk with one NaN bar | max \|diff\| 0 / 0 / 4.4e-14; NaN masks equal; n 915 / 1,103 / 720 |
 | hand check, closes (10, 11), length 30: the best gain wants 1/alpha − alpha = 15.4 > 5 (*derived*), so it clamps at +5 and EC[1] = 10 + alpha² + 5·alpha | module 10.326742976066598, formula 10.326742976066598 |
 | constant close 37.5, 600 bars | max \|distance\| 2.2e-14 |
-| a one-bar drop held flat for 20 bars after 400 closes at 100: smallest drop on a 0.001 grid from 0.500 to 0.999 that makes DMA ≤ 0 | 0.999, and every larger grid drop also does; the test's 99.999% drop gives DMA ≤ 0 on 1 bar |
+| a one-bar drop held flat for 20 bars after 400 closes at 100: which drops make DMA ≤ 0 (grids 0.500–0.998 step 0.001, 499 points; 0.99800–0.99999 step 1e-5, 200 points) | none on the coarse grid; on the fine grid the first hit is 0.99806 (0.99805 misses) and every point above it hits; the test's 99.999% drop gives DMA ≤ 0 on 1 bar |
 | the round-4 prototype `bt_dma_dist` × 100, past the warm-up (σ 0.005 / 0.02 / 0.05) | max \|diff\| 4.4e-14 over 2,723 bars each |
 
 The last row is a cross-check, not Gate A: the prototype lives in the gitignored
@@ -106,9 +106,10 @@ Oracle BestGain over 3,000-bar walks (seed 1, length 30, 2,999 searched bars eac
 | 0.05 | 97.1% | 1.3% | 1.5% |
 
 On a clamped bar, EC = alpha·EMA + 5·alpha·Close + (1 − 6·alpha)·EC[1] (algebra from L8 at
-g = 5), a fixed fast smoother with pole 1 − 12/31 = 0.613 (*derived*) at length 30. So the
-"error-correcting" part mostly reduces to a constant gain, and the distance behaves like a
-short-horizon return: on the proxy below its closest comparator is `ROC_1`.
+g = 5). That is a fixed two-pole filter of the close at length 30 (*derived*): pole
+1 − 12/31 = 0.613 from EC's own recursion and 29/31 = 0.935 from the EMA it is fed, which
+carries 1/6 of the DC gain (alpha / 6·alpha). So the "error-correcting" part mostly reduces
+to a constant gain. On the proxy below the distance's closest comparator is `ROC_1`.
 
 ## Warm-up (the head, not only the tail)
 
@@ -134,11 +135,11 @@ where HMA(7) exists):
 |---|---|
 | worst \|diff\| at bar 7 | 1.980 |
 | first bar from which it stays under 1e-3, vs `ceil(ln(1e-3 / 1.980) / ln(29/31))` | bar 7 + 135, vs 7 + 114 predicted |
-| first bar from which it stays under 1e-6, vs the same prediction at 1e-6 | bar 7 + 226 = 233, vs 7 + 218 predicted |
-| emitting from W // 2 = 138 instead (seed 3, s = 500), \|diff\| at the first emitted bar | 4.7e-5 |
+| first bar from which it stays under 1e-6, vs the same prediction at 1e-6 | bar 7 + 226 = 233 (*derived* sum), vs 7 + 218 predicted |
+| emitting from W // 2 = 138 (*derived*) instead (seed 3, s = 500), \|diff\| at the first emitted bar | 4.7e-5 |
 
 Decay runs a little slower than (1 − alpha) predicts, as it did for `kalman_trend`. The
-277-bar mask leaves 44 bars of margin over the measured 233 (*derived*). The last row is
+277-bar mask leaves 44 bars of margin (*derived*) over the 233 derived from the printed 226. The last row is
 the Hilbert lesson in CLAUDE.md: half the warm-up passes a tail-only check and still emits a
 start-dependent value 47 times the head test's bound (*derived*: 4.7e-5 / 1e-6).
 
@@ -147,11 +148,11 @@ start-dependent value 47 times the head test's bound (*derived*: 4.7e-5 / 1e-6).
 | gate | status |
 |---|---|
 | A Correctness | **cleared against a recalled transcription only**: the module equals the listing as recalled (numbers in *Gate A* above). Checking that listing against the published one is owed, *To close* step 0 |
-| B Causality | future-perturbation over 32 offsets (290 to 1,189, step 29), all past the warm-up, bars < j compared bit-for-bit with NaN masks first. Two perturbations of bars ≥ j: another walk's closes, and each missing-bar value (NaN, 0, −1). Real module: 0 leaks under all four. Six mutants (`importlib` source read, `exec`'d in memory), each proved live: EC write back-dated, distance back-dated (`shift(-1)`), HMA fed tomorrow's close, EMA fed tomorrow's close — each caught at 32 of 32 under the walk perturbation; the gain search scored against tomorrow's close — caught at 19 of 32 (it reads tomorrow's close only inside the `argmin`, so it can leak only at offsets where the new close changes bar j−1's best gain; read in the code, why 19 was not measured further); the missing-bar mask reading tomorrow's validity — caught at 32 of 32 under each missing-bar value, and at 0 under the walk perturbation, which is why the second perturbation exists. All counts are pinned |
+| B Causality | future-perturbation over 32 offsets (290 to 1,189, step 29), all past the warm-up, bars < j compared bit-for-bit with NaN masks first. Two perturbations of bars ≥ j: another walk's closes, and each missing-bar value (NaN, 0, −1). Real module: 0 leaks under all four. Six mutants (`importlib` source read, `exec`'d in memory), each proved live: EC write back-dated, distance back-dated (`shift(-1)`), HMA fed tomorrow's close, EMA fed tomorrow's close — each caught at 32 of 32 under the walk perturbation; the gain search scored against tomorrow's close — caught at 19 of 32 (it reads tomorrow's close only inside the `argmin`, so it can leak only at offsets where the new close changes bar j−1's best gain; read in the code; which 19 offsets flip that gain was not measured); the missing-bar mask reading tomorrow's validity — caught at 32 of 32 under each missing-bar value, and at 0 under the walk perturbation, which is why the second perturbation exists. All counts are pinned |
 | C Reachability | **synthetic only**: 1,200-bar walk, seed 11, tick 0.05: 923 finite, 923 non-zero, 484 positive / 439 negative, 923 distinct values. Real-data counts owed, *To close* step 2 |
 | D Scale-free | ×8 and ×64: max \|diff\| 0, `Series.equals` true, NaN masks equal. ×10 and ×3.7: max \|diff\| 6.7e-14 / 4.4e-14 (test bound 1e-9), NaN masks equal. 0 < 484 positive < 923 finite, with 923 distinct values (synthetic; the real-data form is step 2) |
 | E Attribution | Gate E: pending, run by issue-solver after this session |
-| F Suites | this repo, run in three chunks (`tests/test_[a-h]*.py`, `[i-r]`, `[s-z]`) on commit 0411194: 2 failed / 3,194 passed / 83 skipped. Neither failure touches this port: `test_pine_coverage_csv::test_audited_rows_carry_their_evidence` is the CLAUDE.md known break, and `test_altrepo_talib_csv::test_regenerating_reproduces_the_committed_rows` stops with `pandas-ta-classic not found at D:\AwakenAnalytics\PandasTaWork\AlternativeRepos\pandas-ta-classic`, a directory outside this repo. Neither was re-run with the port removed. After the round-1 review fixes, `tests/test_dickson_ma.py` alone: 39 passed. Parent repo: run by the launcher |
+| F Suites | this repo, run in three chunks (`tests/test_[a-h]*.py`, `[i-r]`, `[s-z]`) on the final code (after both review rounds): 2 failed / 3,201 passed / 83 skipped, with all 39 `test_dickson_ma` tests passing. Neither failure touches this port: `test_pine_coverage_csv::test_audited_rows_carry_their_evidence` is the CLAUDE.md known break, and `test_altrepo_talib_csv::test_regenerating_reproduces_the_committed_rows` stops with `pandas-ta-classic not found at D:\AwakenAnalytics\PandasTaWork\AlternativeRepos\pandas-ta-classic`, a directory outside this repo. Neither was re-run with the port removed. The same two failed, and only they, on commit 0411194 (2 failed / 3,194 passed / 83 skipped, 32 port tests then). Parent repo: run by the launcher |
 
 ## The prior from the prototype (*quoted* from issue #147, NOT measured here)
 
@@ -196,8 +197,10 @@ The maximum is `ROC_1` at every σ tried and moves by at most 0.0014 (*derived*)
 0.8957 / 0.8956 / 0.8943 for σ = 0.005 / 0.01 / 0.02 / 0.05. This agrees in direction with
 the screen, whose next comparators on real data were the one-day returns (0.8599, *quoted*).
 
-Runtime: 0.28 s and 1.58 s for 5,000 bars in two runs of the script on the same machine (one
-Python-level loop over bars, 101 gains vectorised per bar); the spread is machine load.
+Runtime for 5,000 bars, `timeit.repeat` with 5 runs: min 0.76 s, median 0.88 s (one
+Python-level loop over bars, 101 gains vectorised per bar). Two earlier single-call timings,
+from the first two runs of the script, read 0.28 s and 1.58 s; the cause of that spread
+was not measured.
 
 ## Docs touched by the wiring
 
@@ -205,8 +208,11 @@ Python-level loop over bars, 101 gains vectorised per bar); the spread is machin
 patched by hand. Its diff against the committed file is the probe date, the counts, the
 `overlap (51)` header, the `dickson_ma` row (`DICKSON_DIST_30_7` SF, warm-up 277), its entry
 in the feed-ready list, and the removal of the two hand-patch notes for `pfe` and
-`kalman_trend`, whose rows came out identical. `docs/MLCompanionContract.md`'s counts moved
-568 → 569 tagged columns and 215 → 216 `SF`.
+`kalman_trend`, whose rows came out identical. The deleted `kalman_trend` note warned that a
+regeneration without TA-Lib empties `cdl_pattern`; this regeneration left `cdl_pattern`'s
+rows unchanged (read in the diff). `docs/MLCompanionContract.md`'s counts moved 568 → 569
+tagged columns and 215 → 216 `SF`, and its provenance sentence now says the dictionary was
+regenerated in full.
 
 ## To close
 
@@ -226,7 +232,11 @@ in the feed-ready list, and the removal of the two hand-patch notes for `pfe` an
    `pandas_ta/overlap/__init__.py`, the `Category` entry, the accessor in
    `pandas_ta/core.py`, `tests/test_dickson_ma.py` and `docs/measure_dickson_ma.py`; revert
    `CATEGORY_TOTAL` in `tests/test_altport2_ports.py`; revert every hunk of 0411194 in
-   `README.md` and `docs/MLCompanionContract.md`, and regenerate `docs/IndicatorDictionary.md`
-   (or revert its hunks). Keep this file. A revert closes #147 as well as a ship.
-4. DISCLOSE_GAP or DISCLOSE → ship, and state the measured ρ and comparator in the module
-   docstring and here.
+   `README.md`. In `docs/MLCompanionContract.md`, delete only the `(568 -> 569 / 215 -> 216
+   ...)` parenthetical and set 569 / 216 back to 568 / 215, keeping the "regenerated in full"
+   wording. For `docs/IndicatorDictionary.md`, either regenerate it with TA-Lib installed
+   and confirm the diff is only the `dickson_ma` row, the counts, the `overlap` header and
+   the feed-ready entry, or revert only those hunks. Keep this file. A revert closes #147 as
+   well as a ship.
+4. DISCLOSE_GAP, DISCLOSE or SHIP → ship; state the measured ρ, its comparator and the band
+   in the module docstring and here.

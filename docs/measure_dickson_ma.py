@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Print every number in docs/DicksonMaMeasured.md: warm-up, head transient,
-Gate A against the literal EasyLanguage transcription, where the gain search
-lands, scale tolerance, Gate C (synthetic) and a proxy overlap.
+"""Print the measured numbers in docs/DicksonMaMeasured.md (the doc marks the
+exceptions): warm-up, head transient, Gate A against the literal EasyLanguage
+transcription, where the gain search lands, scale tolerance, Gate C
+(synthetic) and a proxy overlap.
 
     python docs/measure_dickson_ma.py
 
@@ -10,7 +11,7 @@ Synthetic GBM walks with fixed seeds -- a PROXY, not Gate E, which runs on the
 tests/test_dickson_ma.py so the script and the test check the same thing.
 """
 import sys
-import time
+import timeit
 import types
 from pathlib import Path
 
@@ -144,12 +145,14 @@ def main():
         c = pd.Series(np.r_[np.full(400, 100.0), np.full(20, 100.0 * (1 - f))])
         return int(((dm._ec(c.to_numpy(), 30) + literal_hma(c, 7)) / 2 <= 0).sum())
 
-    grid = np.round(np.arange(0.5, 1.0, 0.001), 3)
-    hits = np.array([n_nonpos(f) for f in grid])
-    first = grid[np.argmax(hits > 0)]
-    print(f"  smallest drop on a 0.001 grid (0.500-0.999) with DMA <= 0: {first:.3f};"
-          f" every larger grid drop too: {bool((hits[grid >= first] > 0).all())};"
-          f" the test's 99.999% drop: {n_nonpos(0.99999)} bars <= 0")
+    for lo, hi, step, fmt in ((0.5, 0.998, 0.001, ".3f"), (0.998, 0.99999, 1e-5, ".5f")):
+        grid = np.round(np.arange(lo, hi + step / 2, step), 5)
+        hits = np.array([n_nonpos(f) for f in grid]) > 0
+        k = int(np.argmax(hits)) if hits.any() else None
+        where = (f"first hit {grid[k]:{fmt}}" + (f" (previous point {grid[k - 1]:{fmt}} misses)" if k else "")
+                 + f", every point above hits: {bool(hits[k:].all())}") if k is not None else "no hit"
+        print(f"  drops {grid[0]:{fmt}}-{grid[-1]:{fmt}} step {step:g} ({len(grid)} points): {where}")
+    print(f"  the test's 99.999% drop: {n_nonpos(0.99999)} bars <= 0")
 
     print("== Gate D: max |diff| vs x1 (1200 bars, seed 11, tick 0.05)")
     c = walk(1200, seed=11, tick=0.05)
@@ -178,9 +181,8 @@ def main():
         print(f"  {s_}: {r[b]} {b}")
 
     c = walk(5000)
-    t0 = time.perf_counter()
-    ta.dickson_ma(c)
-    print(f"== runtime, 5000 bars: {time.perf_counter() - t0:.2f} s")
+    runs = timeit.repeat(lambda: ta.dickson_ma(c), number=1, repeat=5)
+    print(f"== runtime, 5000 bars, 5 runs: min {min(runs):.2f} s, median {np.median(runs):.2f} s")
 
     if (SCREEN / "ind_screen_r4.py").exists():  # the round-4 prototype, owner's machine only
         sys.path.insert(0, str(SCREEN))

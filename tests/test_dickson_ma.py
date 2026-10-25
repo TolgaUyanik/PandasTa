@@ -2,8 +2,9 @@
 """Tests for `pandas_ta.overlap.dickson_ma` -- the close's percent distance
 from the Dickson Moving Average, (EC(30) + HMA(7)) / 2, where EC is Ehlers &
 Way's error-correcting EMA.  Issue #147 (BT-DMA-DIST).  Measurements are in
-`docs/DicksonMaMeasured.md`; every number quoted here is printed by
-`docs/measure_dickson_ma.py`.
+`docs/DicksonMaMeasured.md`; the measured numbers quoted here are printed
+by `docs/measure_dickson_ma.py`.  101 (gains), 15.4, 8 (bars) and 200
+(valid closes) are read from the code or derived by arithmetic.
 
 ⚠ READ THIS FIRST.  EC is NOT an EMA with a fixed gain: every bar it tries
 101 gains (-5.0 .. +5.0) and keeps the one whose EC lands closest to the
@@ -30,7 +31,8 @@ What these tests pin, in order of how much it would hurt to lose them:
   tomorrow's close at 32 of 32; the gain search scored against tomorrow's
   close at 19 of 32 (it reads tomorrow's close only inside the argmin, so
   it can leak only at offsets where the new close changes bar j-1's best
-  gain -- read in the code; why 19 was not measured further); the mask
+  gain -- read in the code; which 19 offsets flip that gain was not
+  measured); the mask
   reading tomorrow's validity at 32 of 32 under each missing-bar value, and
   at 0 under the walk perturbation (pinned: it is why the fills exist).
   NaN masks are compared before values, because a bare `!=` on NaN passes
@@ -269,8 +271,8 @@ FILLS = [np.nan, 0.0, -1.0]     # missing-bar values written over bars >= j
 #: Offsets at which each mutant leaks under the walk perturbation, of 32.
 #: `search_target` reads tomorrow's close only inside the argmin, so it can
 #: leak only where the new close changes bar j-1's best gain (read in the
-#: code; why 19 was not measured further). Pinned, so a change in either
-#: direction fails.
+#: code; which 19 offsets flip that gain was not measured). Pinned, so a
+#: change in either direction fails.
 CAUGHT = {tag: len(OFFSETS) for tag in MUTANTS}
 CAUGHT["search_target"] = 19
 

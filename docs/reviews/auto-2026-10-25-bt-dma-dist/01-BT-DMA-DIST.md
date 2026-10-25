@@ -123,4 +123,69 @@ SUMMARY: The mathematics holds. Every number in the doc matches the run you past
   dictionary, plus the module, export, `Category`, accessor, tests, script, `CATEGORY_TOTAL`.
 - Re-measured with `python docs/measure_dickson_ma.py` (all earlier numbers reproduced;
   runtime 1.58 s for 5,000 bars this time vs 0.28 s before, so the doc gives both).
-  `tests/test_dickson_ma.py`: 39 passed.
+  `tests/test_dickson_ma.py`: 39 passed. Committed 65314c0.
+
+## Review round 2
+```
+VERDICT: PASS
+FINDINGS:
+  - severity: MINOR
+    location: tests/test_dickson_ma.py:5-6 (also :9, :174, :199, :221); docs/measure_dickson_ma.py:2
+    problem:  Round 1 removed the false "every number is printed" sentence from the doc. The same sentence is still in the two files that feed the doc. The test module says "every number quoted here is printed by docs/measure_dickson_ma.py", but the script never prints "101 gains" (:9), "15.4" (:174), "spans the hole for 8 bars" (:199) or "200 valid closes" (:221). The script's own docstring says "Print every number in docs/DicksonMaMeasured.md". That cannot be true: the doc (:18-22) now lists exceptions (pytest, the dictionary generator, *quoted*, *derived*) that no script could print.
+    fix:      Make the test docstring read "measured numbers quoted here are printed by docs/measure_dickson_ma.py; 101, 15.4, 8 and 200 are read from the code or derived". Make the script docstring read "Print the measured numbers in docs/DicksonMaMeasured.md (the doc marks the exceptions)".
+  - severity: MINOR
+    location: docs/DicksonMaMeasured.md:87; docs/measure_dickson_ma.py:147-152; pandas_ta/overlap/dickson_ma.py:109-110
+    problem:  "0.999, and every larger grid drop also does" proves nothing. `np.arange(0.5, 1.0, 0.001)` stops at 0.999, so the first hit is the last grid point. The set of "larger grid drops" is {0.999} itself, and the printed `True` is automatic. The run shows only that the threshold lies in (0.998, 0.999]. It says nothing about drops beyond 0.999, apart from the one 99.999% case. The shipped docstring's "first gets there at 99.9%" also drops the grid qualifier. My own hand algebra puts the threshold near 99.8%: with the gain pinned at +5, DMA is affine in the post-drop close. Treat that as a reason to measure it, not as a measurement.
+    fix:      Bisect on [0.998, 0.999], or extend the grid past it (for example 0.9980 to 0.99999 in steps of 1e-5). Print the bracket and whether every grid point above it hits. Quote that line. Otherwise delete "every larger grid drop also does". Change the docstring to "first gets there between 99.8% and 99.9% (0.001 grid)".
+  - severity: MINOR
+    location: docs/DicksonMaMeasured.md:199-200
+    problem:  "the spread is machine load" is a causal claim nobody measured. Two single `perf_counter` timings of one call differ 5.6× (0.28 s vs 1.58 s), and the doc names a cause without testing it. This is the repo's exact defect: the explanation was written and the measurement never ran.
+    fix:      Time the call with `timeit.repeat(..., number=1, repeat=5)` in the script, print the minimum and the median, and quote those. Otherwise replace the clause with "cause not measured".
+  - severity: MINOR
+    location: docs/DicksonMaMeasured.md:108-111
+    problem:  "a fixed fast smoother with pole 1 − 12/31 = 0.613 (*derived*)" leaves out half the derivation. The clamped recursion is fed the EMA, which has pole 29/31 = 0.935. The filter from close to EC therefore has two poles. By the same algebra, the EMA branch carries α/(6α) = 1/6 of the DC gain, and that share settles at the slow rate (time constant about 15 bars), not the fast one. The doc marks a single-pole result *derived* when the derivation does not give it.
+    fix:      "a fixed two-pole filter: 0.613 from EC's own recursion and 0.935 from the EMA it is fed, which carries 1/6 of the DC gain (*derived*)". Or delete "with pole 0.613" and keep the measured ROC_1 result as the evidence.
+  - severity: MINOR
+    location: docs/DicksonMaMeasured.md:225-230 (To close, step 3) vs docs/MLCompanionContract.md:27
+    problem:  The STRUCK recipe contradicts itself. Reverting "every hunk of 0411194 in docs/MLCompanionContract.md" brings back "(generated, with the `pfe` and `kalman_trend` rows hand-patched; see its header)". If the dictionary is regenerated, as the same step allows, its header has no such notes, so the contract ends up stating something false. The step also never says the regeneration needs TA-Lib. The note this port deleted from the dictionary said that a run without TA-Lib empties `cdl_pattern`, and that warning now exists nowhere.
+    fix:      Step 3 should revert only the `(568 -> 569 / 215 -> 216 ...)` parenthetical in the contract and set 569/216 back to 568/215, keeping the "regenerated in full" wording. Then either "regenerate the dictionary with TA-Lib installed and confirm the diff is only the `dickson_ma` row, counts, header and feed-ready entry", or "revert only those dictionary hunks".
+  - severity: NIT
+    location: docs/DicksonMaMeasured.md:231-232 (To close, step 4)
+    problem:  The decision list covers STRUCK and DISCLOSE_GAP/DISCLOSE. It has no step for the SHIP band (|ρ| < 0.76) that CLAUDE.md:113 defines.
+    fix:      "4. DISCLOSE_GAP, DISCLOSE or SHIP → ship; state the measured ρ, its comparator and the band in the module docstring and here."
+  - severity: NIT
+    location: tests/test_dickson_ma.py:32-33, :271-272; docs/DicksonMaMeasured.md:150
+    problem:  "(read in the code; why 19 was not measured further)" is not a sentence, and it appears three times.
+    fix:      "(read in the code; which 19 offsets flip bar j−1's gain was not measured)".
+  - severity: NIT
+    location: docs/DicksonMaMeasured.md:83, :137, :138, :141
+    problem:  Some numbers obtained by arithmetic are still unmarked: "899" (900 − 1), "7 + 226 = 233", "W // 2 = 138". At :141 the derived 233 is even called "the measured 233".
+    fix:      Mark each one *derived*. At :141 write "over the 233 derived from the printed 226".
+SUMMARY: Round 1's fix list is true. I checked all thirteen claims against `git show 65314c0`, not against the round-1 log. The Gate A label now says it was checked only against a recalled listing, and step 0 makes the source check a condition for shipping. The warm-ups are literal values (92 / 277 / 461), and the oracle no longer borrows `_warmup`. The bounds are checked after `int()`. Gate B now sets future bars to NaN / 0 / −1, and the mask mutant is live: it is caught at 32 of 32 under each fill and at 0 under the walk perturbation, all of it pinned. I re-ran `python -m pytest -q tests/test_dickson_ma.py`: 39 passed in 224 s. By hand I re-derived the counts 915 / 1,103 / 720, 2,697, 923 and 2,723, and the predictions 114 and 218. I also worked through a 99.9% drop step by step and found DMA dips just below zero at bar 3, so the script's DMA ≤ 0 result holds. The wiring matches the precedent, and every changed file is on the allowed list. The defect class is the same as round 1, only smaller. "Every number is printed" was fixed in the doc but survives in the test and script docstrings. A grid check that ends on its own last point reports "every larger drop also does" as if it meant something. A 5.6× runtime spread gets a cause nobody measured. A derived "single pole" leaves out the EMA's pole. The STRUCK recipe would leave a false sentence in MLCompanionContract. Fix those five, mark the leftover arithmetic, and stop writing "every" and "is" before the run exists. That was acceptable. Barely.
+```
+
+### Fixes applied after the round-2 PASS (not re-reviewed; MINOR/NIT do not block)
+- "every number is printed" → test docstring now says the measured numbers are printed by
+  the script and names 101, 15.4, 8 and 200 as read from the code or derived; the script
+  docstring says it prints the measured numbers and that the doc marks the exceptions.
+- DMA ≤ 0 grid → two grids: 0.500–0.998 step 0.001 (499 points): no hit; 0.99800–0.99999
+  step 1e-5 (200 points): first hit 0.99806, 0.99805 misses, every point above hits. Module
+  docstring now says "only above 99.805%" with both grids named; doc row rewritten.
+- runtime → `timeit.repeat(number=1, repeat=5)`: min 0.76 s, median 0.88 s; the two earlier
+  single timings kept with "cause not measured".
+- single pole → "fixed two-pole filter: 0.613 from EC's recursion and 0.935 from the EMA,
+  which carries 1/6 of the DC gain (*derived*)".
+- STRUCK recipe → contract: delete only the parenthetical and restore 568 / 215, keep the
+  "regenerated in full" wording; dictionary: regenerate with TA-Lib and check the diff, or
+  revert only the port's hunks. The TA-Lib warning is recorded in the doc's wiring section.
+- SHIP band added to step 4.
+- "why 19 was not measured further" → "which 19 offsets flip that gain was not measured"
+  (three places).
+- 899, 7 + 226 = 233, W // 2 = 138 marked *derived*; "the measured 233" reworded.
+- Re-ran `python docs/measure_dickson_ma.py` (every other line identical) and the full suite
+  in three chunks on the final code: 2 failed / 3,201 passed / 83 skipped, the same two
+  failures as on 0411194, both outside the port; all 39 port tests pass.
+
+## Outcome
+PASS (round 2). Gate E and the source check of Gate A (*To close* step 0 in
+`docs/DicksonMaMeasured.md`) remain owed by later sessions.

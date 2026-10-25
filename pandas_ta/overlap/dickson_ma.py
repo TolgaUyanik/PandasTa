@@ -107,7 +107,8 @@ seed error needs to shrink 1e8-fold, ceil(ln 1e-8 / ln(1 - alpha)) (277 at
 length=30). Valid means finite and > 0; other closes are missing bars: EC
 holds its state, HMA is NaN while one is in its window, and the output is
 NaN. A non-positive DMA also emits NaN; measured at the defaults, after 400
-flat closes a one-bar drop held flat first gets there at 99.9%.
+flat closes a one-bar drop held flat gets there only above 99.805% (grids:
+0.001 from 50%, 1e-5 from 99.8%).
 
 Calculation:
     Default Inputs:
