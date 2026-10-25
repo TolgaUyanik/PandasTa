@@ -35,8 +35,8 @@ def _warmup(length):
 def dickson_ma(close, length=None, hull_length=None, offset=None, **kwargs):
     """Indicator: Dickson Moving Average distance (DICKSON_DIST)"""
     # Validate arguments
-    length = int(length) if length and length > 0 else 30
-    hull_length = int(hull_length) if hull_length and hull_length > 1 else 7
+    length = int(length) if length and int(length) > 0 else 30
+    hull_length = int(hull_length) if hull_length and int(hull_length) > 1 else 7
     warmup = _warmup(length)
     close = verify_series(close, max(warmup, hull_length) + 1)
     offset = get_offset(offset)
@@ -81,7 +81,9 @@ Sources:
     Nathan Dickson, "Dickson Moving Average", r/algotrading (2016), as
     named by backtrader's `DicksonMovingAverage` (GPL-3.0); the library
     shows the indicator exists, the code here is written from the
-    published definitions below, never from backtrader.
+    definitions below as recalled, never from backtrader. No copy of
+    either publication was consulted when it was written; checking the
+    EC listing against the paper is owed (docs/DicksonMaMeasured.md).
     J. F. Ehlers and R. Way, "Zero Lag (Well, Almost)", Technical Analysis
     of Stocks & Commodities, Nov 2010 (EC, EasyLanguage listing).
     A. Hull, https://alanhull.com/hull-moving-average (HMA; the fork's
@@ -104,7 +106,8 @@ Warm-up: output starts at the (w+1)-th valid close, w = the closes the EMA's
 seed error needs to shrink 1e8-fold, ceil(ln 1e-8 / ln(1 - alpha)) (277 at
 length=30). Valid means finite and > 0; other closes are missing bars: EC
 holds its state, HMA is NaN while one is in its window, and the output is
-NaN. A non-positive DMA (only after a near-total crash) also emits NaN.
+NaN. A non-positive DMA also emits NaN; measured at the defaults, after 400
+flat closes a one-bar drop held flat first gets there at 99.9%.
 
 Calculation:
     Default Inputs:

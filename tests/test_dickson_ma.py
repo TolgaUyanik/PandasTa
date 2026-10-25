@@ -10,21 +10,29 @@ Way's error-correcting EMA.  Issue #147 (BT-DMA-DIST).  Measurements are in
 close.  That search is a discontinuous function of the state, so a test
 that only compares tails, or only compares against the module's own
 vectorised form, can miss a broken search.  The oracle below is a scalar,
-line-for-line transcription of the published EasyLanguage listing, and the
-comparison is BIT-FOR-BIT on EC, on data where the search lands both on the
-clamp and strictly inside it (so the comparison is not vacuous).  The clamp
-dominates: +5 on ~97% of bars at every sigma measured, so EC behaves mostly
-like a fixed fast smoother.
+line-for-line transcription of the EasyLanguage listing AS RECALLED (no copy
+of the paper was consulted; checking it is owed, docs/DicksonMaMeasured.md),
+and the comparison is BIT-FOR-BIT on EC, on data where the search lands both
+on the clamp and strictly inside it (so the comparison is not vacuous).  The
+oracle shares the recall with the module, so it cannot catch a misremembered
+constant.  The clamp dominates: +5 on 97.1-97.4% of bars at the three sigmas
+measured, so EC behaves mostly like a fixed fast smoother.
 
 What these tests pin, in order of how much it would hurt to lose them:
 
 * CAUSALITY by future-perturbation: rewrite every bar from `j` onward,
-  demand bars `[0:j]` bit-identical, over 32 offsets past the warm-up.
-  Five look-ahead mutants (`importlib` source read, `exec`'d in memory) are
-  each proved live, then caught: the EC write back-dated, the distance
-  back-dated, the HMA fed tomorrow's close and the EMA fed tomorrow's close
-  at 32 of 32; the gain search scored against tomorrow's close at 19 of 32,
-  because it leaks only where tomorrow's close moves the gain off its clamp.
+  demand bars `[0:j]` bit-identical, over 32 offsets past the warm-up --
+  once with another walk's closes, and once with each missing-bar value
+  (NaN, 0, -1), so a look-ahead through the missing-bar mask is visible
+  too.  Six look-ahead mutants (`importlib` source read, `exec`'d in
+  memory) are each proved live, then caught: the EC write back-dated, the
+  distance back-dated, the HMA fed tomorrow's close and the EMA fed
+  tomorrow's close at 32 of 32; the gain search scored against tomorrow's
+  close at 19 of 32 (it reads tomorrow's close only inside the argmin, so
+  it can leak only at offsets where the new close changes bar j-1's best
+  gain -- read in the code; why 19 was not measured further); the mask
+  reading tomorrow's validity at 32 of 32 under each missing-bar value, and
+  at 0 under the walk perturbation (pinned: it is why the fills exist).
   NaN masks are compared before values, because a bare `!=` on NaN passes
   a null mutant.
 * CORRECTNESS against the oracle: EC bit-identical at lengths 10 / 30 / 50
@@ -34,9 +42,9 @@ What these tests pin, in order of how much it would hurt to lose them:
 * The HEAD, not only the tail (the Hilbert lesson in CLAUDE.md): starting
   at bar s instead of bar 0 must agree with the full run to 1e-6 from the
   FIRST emitted bar on (measured worst 5.5e-8 / 5.1e-8 / 4.1e-7), over 90
-  runs at lengths 30 / 10 / 50 (warm-ups 277 / 92 / 461).  And the warm-up
-  is not padding: emitting from half of it leaves a start-dependent error
-  of 4.7e-5.
+  runs at lengths 30 / 10 / 50 (warm-ups 277 / 92 / 461, pinned as
+  literals, not read back from the module).  And the warm-up is not
+  padding: emitting from half of it leaves a start-dependent error of 4.7e-5.
 * The warm-up counts VALID closes, not bars.
 * SCALE-FREE: bit-identical under x8 and x64, within 1e-9 (measured
   6.7e-14 / 4.4e-14) under x10 and x3.7 with matching NaN masks, and
@@ -57,7 +65,10 @@ from pandas import DataFrame, Series
 from .context import pandas_ta as ta
 from pandas_ta.overlap.dickson_ma import dickson_ma, _ec, _warmup
 
-W = 277  # warm-up at length=30, printed by docs/measure_dickson_ma.py
+#: Warm-ups printed by docs/measure_dickson_ma.py, as literals so the oracle and
+#: the head test do not borrow the module's own `_warmup`.
+WARMUPS = {10: 92, 30: 277, 50: 461}
+W = WARMUPS[30]
 
 
 def _walk(n=1200, seed=11, sigma=0.02, tick=None):
@@ -72,7 +83,8 @@ def _walk(n=1200, seed=11, sigma=0.02, tick=None):
 
 
 def literal_ec(close, length=30, gain_limit=50):
-    """Ehlers & Way (S&C, Nov 2010), the EasyLanguage listing line for line,
+    """Ehlers & Way (S&C, Nov 2010), the EasyLanguage listing line for line
+    AS RECALLED (no copy consulted; see docs/DicksonMaMeasured.md, Sources),
     as a scalar loop.  Returns (EC, BestGain) per bar.  Departures, both
     also in the module: EMA and EC are seeded on the first finite close (the
     listing starts both at 0), and LeastError starts at +inf (the listing:
@@ -119,7 +131,7 @@ def literal_dist(close, length=30, hull_length=7):
     c = np.asarray(close, dtype=float)
     dma = (literal_ec(c, length)[0] + literal_hma(c, hull_length)) / 2
     out = 100 * (c / dma - 1)
-    out[:np.flatnonzero(np.isfinite(c))[_warmup(length)]] = np.nan
+    out[:np.flatnonzero(np.isfinite(c))[WARMUPS[length]]] = np.nan
     return out
 
 
@@ -127,7 +139,7 @@ def literal_dist(close, length=30, hull_length=7):
 
 
 def test_warmup_at_defaults():
-    assert _warmup(30) == W
+    assert {n: _warmup(n) for n in WARMUPS} == WARMUPS
     out = dickson_ma(_walk())
     assert out.iloc[:W].isna().all()
     assert out.iloc[W:].notna().all()
@@ -211,13 +223,13 @@ def test_too_few_valid_closes_returns_none():
 
 
 def test_a_non_positive_dma_emits_nan():
-    """A 99.999% crash drives HMA(7) negative for a few bars; the distance
-    to a non-positive average is undefined, not a sign flip."""
+    """A 99.999% one-bar crash held flat drives DMA <= 0 on 1 bar; the
+    distance to a non-positive average is undefined, not a sign flip."""
     close = Series(np.r_[np.full(400, 100.0), np.full(20, 0.001)])
     out = dickson_ma(close)
     dma = (_ec(close.to_numpy(), 30) + literal_hma(close, 7)) / 2
     neg = np.flatnonzero(dma <= 0)
-    assert len(neg) > 0
+    assert len(neg) == 1
     assert out.iloc[neg].isna().all()
     assert out.iloc[W:400].notna().all()
 
@@ -247,25 +259,32 @@ MUTANTS = {
     "search_target": [("argmin(npabs(x[t] - cand))", "argmin(npabs(x[min(t + 1, len(x) - 1)] - cand))")],
 }
 
-OFFSETS = range(290, 1200, 29)  # 32 offsets, all past the warm-up
+#: Reads tomorrow's validity. A perturbation that keeps every close valid
+#: cannot see it, so it is tried against the missing-bar FILLS instead.
+MASK_MUTANT = [("& (close > 0))", "& (close > 0) & (close.shift(-1) > 0))")]
 
-#: Offsets at which each mutant leaks, of 32. `search_target` leaks only where
-#: tomorrow's close moves the best gain: the search sits on its +5 clamp on
-#: ~97% of bars (docs/DicksonMaMeasured.md), so a perturbation that leaves the
-#: gain clamped cannot see it. Pinned, so a change in either direction fails.
+OFFSETS = range(290, 1200, 29)  # 32 offsets, all past the warm-up
+FILLS = [np.nan, 0.0, -1.0]     # missing-bar values written over bars >= j
+
+#: Offsets at which each mutant leaks under the walk perturbation, of 32.
+#: `search_target` reads tomorrow's close only inside the argmin, so it can
+#: leak only where the new close changes bar j-1's best gain (read in the
+#: code; why 19 was not measured further). Pinned, so a change in either
+#: direction fails.
 CAUGHT = {tag: len(OFFSETS) for tag in MUTANTS}
 CAUGHT["search_target"] = 19
 
 
-def _leaks(fn):
-    """Count offsets `j` at which rewriting bars >= j moves any bar < j."""
+def _leaks(fn, fill=None):
+    """Count offsets `j` at which rewriting bars >= j moves any bar < j.
+    Bars >= j become another walk's closes, or `fill` if one is given."""
     close = _walk()
     base = fn(close)
     other = _walk(seed=99)
     hits = 0
     for j in OFFSETS:
         pert = close.copy()
-        pert.iloc[j:] = other.iloc[j:].values
+        pert.iloc[j:] = other.iloc[j:].values if fill is None else fill
         out = fn(pert)
         a, b = base.iloc[:j], out.iloc[:j]
         if not (a.isna() == b.isna()).all():
@@ -276,9 +295,10 @@ def _leaks(fn):
     return hits
 
 
-def test_real_module_never_reads_the_future():
+@pytest.mark.parametrize("fill", [None] + FILLS)
+def test_real_module_never_reads_the_future(fill):
     assert len(OFFSETS) == 32
-    assert _leaks(dickson_ma) == 0
+    assert _leaks(dickson_ma, fill) == 0
 
 
 @pytest.mark.parametrize("tag", sorted(MUTANTS))
@@ -289,14 +309,27 @@ def test_mutant_is_caught(tag):
     assert _leaks(mod.dickson_ma) == CAUGHT[tag]                # caught
 
 
+@pytest.mark.parametrize("fill", FILLS)
+def test_mask_mutant_is_caught(fill):
+    mod = _load_mutant(MASK_MUTANT, "mask")
+    close = _walk()
+    assert not mod.dickson_ma(close).equals(dickson_ma(close))  # live
+    assert _leaks(mod.dickson_ma, fill) == len(OFFSETS)         # caught, 32 of 32
+
+
+def test_mask_mutant_is_invisible_to_the_walk_perturbation():
+    """Why FILLS exist: swapping in another all-valid walk never moves the mask."""
+    assert _leaks(_load_mutant(MASK_MUTANT, "mask").dickson_ma) == 0
+
+
 # ------------------------------------------------------- head transient
 
-LENGTHS = [30, 10, 50]  # warm-ups 277 / 92 / 461
+LENGTHS = [30, 10, 50]
 
 
 @pytest.mark.parametrize("length", LENGTHS)
 def test_head_agrees_with_a_longer_run_from_the_first_emitted_bar(length):
-    w = _warmup(length)
+    w = WARMUPS[length]
     worst = 0.0
     for seed in range(10):
         for sigma in (0.005, 0.02, 0.05):
@@ -311,8 +344,8 @@ def test_head_agrees_with_a_longer_run_from_the_first_emitted_bar(length):
 
 
 def test_the_warmup_is_not_padding():
-    """Emitting from W // 2 would carry a visible transient: a warm-up
-    chosen to pass a tail check would not catch this."""
+    """Emitting from W // 2 would carry a visible transient that a
+    tail-only check would not catch."""
     close = _walk(1500, seed=3)
     full = dickson_ma(close)
     mod = _load_mutant([("dist.iloc[:valid[warmup]]", "dist.iloc[:valid[warmup // 2]]")], "half")

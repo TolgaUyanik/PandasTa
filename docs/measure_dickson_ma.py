@@ -20,7 +20,8 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 import pandas_ta as ta
-from tests.test_dickson_ma import MUTANTS, OFFSETS, _leaks, _load_mutant, literal_dist, literal_ec
+from tests.test_dickson_ma import (FILLS, MASK_MUTANT, MUTANTS, OFFSETS, _leaks, _load_mutant,
+                                   literal_dist, literal_ec, literal_hma)
 dm = sys.modules["pandas_ta.overlap.dickson_ma"]  # `import ... as` binds the function, not the module
 
 SCREEN = ROOT / "docs" / "issues" / "screen"  # owner's machine only (gitignored)
@@ -96,7 +97,7 @@ def main():
               f" / ln(29/31)): {int(np.ceil(np.log(tol / worst[0]) / np.log(a1)))}")
     half = variant("dist.iloc[:valid[warmup]]", "dist.iloc[:valid[warmup // 2]]")
     c = walk(1500, seed=3)
-    i = 500 + 277 // 2
+    i = 500 + dm._warmup(30) // 2
     print(f"  half warm-up (seed 3, s=500, bar {i}): |diff| {abs(half(c.iloc[500:]).loc[i] - ta.dickson_ma(c).loc[i]):.1e}")
 
     print("== Gate A: module vs the literal EasyLanguage transcription")
@@ -132,6 +133,23 @@ def main():
     print(f"  real module: {_leaks(ta.dickson_ma)}")
     for tag in sorted(MUTANTS):
         print(f"  mutant {tag}: {_leaks(_load_mutant(MUTANTS[tag], tag).dickson_ma)}")
+    mask = _load_mutant(MASK_MUTANT, "mask").dickson_ma
+    for fill in FILLS:
+        print(f"  bars >= j set to {fill}: real module {_leaks(ta.dickson_ma, fill)},"
+              f" mask mutant {_leaks(mask, fill)}, mask mutant under the walk perturbation {_leaks(mask)}")
+
+    print("== non-positive DMA at the defaults: 400 closes at 100, then a one-bar drop held for 20 bars")
+
+    def n_nonpos(f):
+        c = pd.Series(np.r_[np.full(400, 100.0), np.full(20, 100.0 * (1 - f))])
+        return int(((dm._ec(c.to_numpy(), 30) + literal_hma(c, 7)) / 2 <= 0).sum())
+
+    grid = np.round(np.arange(0.5, 1.0, 0.001), 3)
+    hits = np.array([n_nonpos(f) for f in grid])
+    first = grid[np.argmax(hits > 0)]
+    print(f"  smallest drop on a 0.001 grid (0.500-0.999) with DMA <= 0: {first:.3f};"
+          f" every larger grid drop too: {bool((hits[grid >= first] > 0).all())};"
+          f" the test's 99.999% drop: {n_nonpos(0.99999)} bars <= 0")
 
     print("== Gate D: max |diff| vs x1 (1200 bars, seed 11, tick 0.05)")
     c = walk(1200, seed=11, tick=0.05)
