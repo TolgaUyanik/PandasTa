@@ -24,9 +24,9 @@
 | Accessor | yes — `df.ta.dpo()` |
 | Tests | no `tests/test_dpo.py`; covered only by the suite-wide guards (`tests/test_wiring_accessors.py`, the category suites) |
 | Inputs | C |
-| Params (**declared signature**) | `length=None`, `centered=True` |
+| Params (**declared signature**) | `length=None`, `centered=False` |
 | Params (**effective defaults**) | STUB: not measured — fill from pandas_ta/trend/dpo.py |
-| Warm-up (dictionary probe) | 8 |
+| Warm-up (dictionary probe) | 30 |
 | Engine wiring | no literal `ta.dpo(` call site; a `getattr`/alias dispatch is not visible to this scan |
 | Provenance | STUB: not measured — fill from pandas_ta/trend/dpo.py |
 | Status | module first appears in this repo's history 2026-03-16 (`git log --diff-filter=A -- pandas_ta/trend/dpo.py`) |
@@ -55,7 +55,7 @@ about the engine, not about this indicator.
 
 | Column | Dictionary ML form | warm-up | observed range on the probe fixture | Register verdict |
 |---|---|---|---|---|
-| `DPO_20` | `PX` | 8 | -2.3535 … 3.96934 | no row |
+| `DPO_20` | `PX` | 30 | -13.9861 … 8.36029 | no row |
 
 Per-column one-line descriptions are owed with §1: STUB: not measured — fill from pandas_ta/trend/dpo.py
 
@@ -71,7 +71,7 @@ and were alive on real prices (`CLAUDE.md`, FVGDEAD).
 | | |
 |---|---|
 | Source | STUB: not measured — fill from pandas_ta/trend/dpo.py |
-| Module length | 73 newline-terminated lines, 2097 bytes (`grep -c '' pandas_ta/trend/dpo.py`) |
+| Module length | 81 newline-terminated lines, 2540 bytes (`grep -c '' pandas_ta/trend/dpo.py`) |
 | Version / licence | STUB: not measured — fill from pandas_ta/trend/dpo.py |
 | TA-Lib equivalent | STUB: not measured — fill from docs/TalibPortsMeasured.md |
 | Gate A anchor | STUB: not measured — fill from pandas_ta/trend/dpo.py |
@@ -90,12 +90,13 @@ cannot be read off a probe. The module body is the only record until someone wri
 
 ## 5. Causality (Gate B)
 
-**A documented leak.** `LEAK_RULES` in `docs/gen_indicator_dictionary.py` records this
-indicator as not causal at default parameters, for `DPO_20`:
-
-> Default `centered=True` shifts the future into the present. Pass `centered=False`.
-
-This is the probe's own output, re-read this run, not a quotation.
+`LEAK_RULES` in `docs/gen_indicator_dictionary.py` records **no** causality exception for
+this indicator, and the dictionary's *Leak watchlist* therefore does not list it. That is a
+positive statement about a real probe output, so it is not a stub — but it is also not
+Gate B: `LEAK_RULES` is a hand-maintained list of KNOWN leaks, and only a mutant test
+(`importlib`-read the module, shift a write index earlier, `exec` it, show the real module
+clean and the mutant caught) proves the absence of back-dating. No such test is recorded
+for this indicator unless §12 says otherwise.
 
 ## 6. ML-suitability (Gate D)
 
@@ -171,7 +172,7 @@ STUB: not measured — fill from pandas_ta/trend/dpo.py
 | Gate | Verdict | Where the evidence is |
 |---|---|---|
 | A Correctness | STUB: not measured — fill from pandas_ta/trend/dpo.py | source not identified yet — see §3 |
-| B Causality | documented leak | §5: `LEAK_RULES` lists this indicator; no mutant test recorded |
+| B Causality | no recorded exception | §5: `LEAK_RULES` does not list this indicator; no mutant test recorded |
 | C Reachability | STUB: not measured — no harness yet (the Gate E harness measures Gate E only) | §8 |
 | D Scale-free | probe tag only, see §2 | `docs/gen_indicator_dictionary.py` ×137 ratio |
 | E Attribution | STUB: not measured — fill from ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.trend.dpo --name dpo | §7 |
