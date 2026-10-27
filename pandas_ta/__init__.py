@@ -93,7 +93,7 @@ Category = {
     # Volatility
     "volatility": [
         "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "cvi", "donchian", "har_park", "hwc", "kc",
-        "massi", "natr", "pdist", "range_profile", "rvi", "thermo", "true_range", "ui"
+        "massi", "natr", "pdist", "range_compress_run", "range_profile", "rvi", "thermo", "true_range", "ui"
     ],
 
     # Volume, "vp" or "Volume Profile" is unique
