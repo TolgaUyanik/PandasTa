@@ -35,6 +35,10 @@ frames), so a green run does **not** mean the upstream category suites ran.
 `Makefile` targets (`make test_ta`, `make test_ext`, …) are upstream leftovers driving `unittest` and
 `make init` references a `requirements.txt` that does not exist. Use pytest.
 
+**CI** (`.github/workflows/ci.yml`, job `tests`) runs the full suite on every PR and push to `dev`
+and `main`, pinned to pandas 2.3.3 / numpy 1.26.4, with the two known breaks deselected by name.
+Branch protection on both branches requires it.
+
 ## Architecture
 
 **One indicator, one module.** `pandas_ta/<category>/<name>.py` defines a single function named after
@@ -124,6 +128,15 @@ source is not in the stamp**: after editing a function the engine or `ml_feature
 `build --rebuild`. The old `measure_<name>_overlap_full.py` scripts were never committed; only
 their outputs survive under `../Backtesting/backtest_results/` (`talib1/`, `altport1/`, `tvpta6/`),
 measured against a 492-column engine that no longer exists.
+
+**Gate E ledger — what CI checks instead (2026-10-28).** CI cannot run Gate E (private engine,
+827 MB BIST cache, public repo), so each run is recorded in `docs/gate_e_ledger.csv`:
+`python docs/gate_e_ledger.py record <run dir> [--waiver "#N"]`. Run the harness with
+`PYTHONPATH` set to the tree you will record into; `record` refuses a run whose module sha1 is not
+that tree's file, or one not taken at the defaults. `tests/test_gate_e_ledger.py` fails when a
+`Category` indicator outside the 233 frozen in `docs/gate_e_grandfathered.txt` has no row, when its
+module changed after the run, or when a STRUCK row lacks one of `ALLOWED_WAIVERS` (today only
+`pfe` #23 and `kalman_trend`'s `KFT_VEL` #22, owner 2026-10-28).
 
 The dominant historical defect is **a claim written before it was measured** — 17 of 18 candidates
 failed first review, almost none on the mathematics. Every sentence containing *only, never, always,
