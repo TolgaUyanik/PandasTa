@@ -118,7 +118,10 @@ def test_the_incumbents_did_not_move():
     assert (natr - (100 * ema_atr / close)).abs().max() < 1e-15
     golden = [2.180799154194836, 2.164590623923742, 2.133112875957642,
               2.098673258704286, 2.089573427600442]
-    assert [float(v) for v in natr.dropna().iloc[:5]] == golden, (
+    # Golden values captured on Windows. CI's Linux runner (2026-10-28) differs by up
+    # to 3 ulps (rel 6.2e-16), so compare at rel 1e-12: 1000x that platform noise,
+    # and far below the 0.149 shift this pin exists to catch. Values unchanged.
+    assert [float(v) for v in natr.dropna().iloc[:5]] == pytest.approx(golden, rel=1e-12, abs=0), (
         f"natr moved: {[float(v) for v in natr.dropna().iloc[:5]]}"
     )
 
