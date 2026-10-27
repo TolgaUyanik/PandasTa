@@ -35,9 +35,15 @@ frames), so a green run does **not** mean the upstream category suites ran.
 `Makefile` targets (`make test_ta`, `make test_ext`, …) are upstream leftovers driving `unittest` and
 `make init` references a `requirements.txt` that does not exist. Use pytest.
 
-**CI** (`.github/workflows/ci.yml`, job `tests`) runs the full suite on every PR and push to `dev`
-and `main`, pinned to pandas 2.3.3 / numpy 1.26.4, with the two known breaks deselected by name.
-Branch protection on both branches requires it.
+**CI.** `.github/workflows/ci.yml` (job `tests`) runs the full suite on every PR and push to `dev`
+and `main`, direct dependencies pinned (pandas 2.3.3 / numpy 1.26.4), with two tests deselected by
+name: the one known break (#8) and `test_regenerating_reproduces_the_committed_rows`, which needs
+the sibling `../AlternativeRepos` checkout. `.github/workflows/gate-e-guard.yml` (job `guard`, on
+`pull_request_target`) runs the BASE branch's copy of `tests/test_gate_e_ledger.py` against the PR,
+so a PR cannot loosen the ledger check it needs loosened. Branch protection on `dev` and `main`
+requires the checks, **admins included**, with the branch up to date with its base: a direct push
+to either branch is refused, so every change goes through a PR. `guard` can be required on a branch
+only once the workflow file is on it, because `pull_request_target` reads the workflow from the base.
 
 ## Architecture
 
@@ -131,12 +137,16 @@ measured against a 492-column engine that no longer exists.
 
 **Gate E ledger — what CI checks instead (2026-10-28).** CI cannot run Gate E (private engine,
 827 MB BIST cache, public repo), so each run is recorded in `docs/gate_e_ledger.csv`:
-`python docs/gate_e_ledger.py record <run dir> [--waiver "#N"]`. Run the harness with
-`PYTHONPATH` set to the tree you will record into; `record` refuses a run whose module sha1 is not
-that tree's file, or one not taken at the defaults. `tests/test_gate_e_ledger.py` fails when a
-`Category` indicator outside the 233 frozen in `docs/gate_e_grandfathered.txt` has no row, when its
-module changed after the run, or when a STRUCK row lacks one of `ALLOWED_WAIVERS` (today only
-`pfe` #23 and `kalman_trend`'s `KFT_VEL` #22, owner 2026-10-28).
+`python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD [--waiver "#N"]`. The harness
+must import a `pandas_ta` tree byte-identical to the one you record into: `record` compares the run's
+`pandas_ta_src_sha1` with this tree, and refuses non-default parameters, a universe other than the
+89 frames, a comparator set other than 687, or a canary that is not bit-equal.
+`tests/test_gate_e_ledger.py` fails when a `Category` indicator needs a row and has none (anything
+outside the 233 frozen with their columns in `docs/gate_e_grandfathered.json`, or a frozen one
+whose columns grew), when a row's module sha1 or output fingerprint moved after the run, when a new
+indicator has no `tests/test_<name>.py` with a `mutant` and a `scale` test, or when a STRUCK row
+lacks its waiver. A waiver in `ALLOWED_WAIVERS` names the exact measurement (issue, module sha1,
+output fingerprint); today only `pfe` #23 and `kalman_trend`'s `KFT_VEL` #22 (owner, 2026-10-28).
 
 The dominant historical defect is **a claim written before it was measured** — 17 of 18 candidates
 failed first review, almost none on the mathematics. Every sentence containing *only, never, always,

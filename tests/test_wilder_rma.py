@@ -3,7 +3,9 @@
 
 Pinned here, in order of how much it would hurt to lose:
 
-1. **`rma`, `atr` and `natr` are byte-identical to what they were.** This is the
+1. **`rma` and `atr` are bit-identical to their formulas, and `natr` is within
+   8 ulps of golden values captured on Windows** (CI's Linux runner differs by
+   3; an implementation change moves them far more). This is the
    whole reason the correction ships as a new callable instead of a fix in
    place. `natr` feeds a live paper-trading threshold (`ML_Position: natr >
    3.11`) under the 2026-07-27 trading freeze, and mined strategy rules in the
@@ -118,12 +120,11 @@ def test_the_incumbents_did_not_move():
     assert (natr - (100 * ema_atr / close)).abs().max() < 1e-15
     golden = [2.180799154194836, 2.164590623923742, 2.133112875957642,
               2.098673258704286, 2.089573427600442]
-    # Golden values captured on Windows. CI's Linux runner (2026-10-28) differs by up
-    # to 3 ulps (rel 6.2e-16), so compare at rel 1e-12: 1000x that platform noise,
-    # and far below the 0.149 shift this pin exists to catch. Values unchanged.
-    assert [float(v) for v in natr.dropna().iloc[:5]] == pytest.approx(golden, rel=1e-12, abs=0), (
-        f"natr moved: {[float(v) for v in natr.dropna().iloc[:5]]}"
-    )
+    # Golden values captured on Windows, unchanged. CI's Linux runner (2026-10-28)
+    # differs from them by up to 3 ulps, so allow 8; any implementation change
+    # moves them far more than that.
+    actual = np.array([float(v) for v in natr.dropna().iloc[:5]])
+    np.testing.assert_array_max_ulp(actual, np.array(golden), maxulp=8)
 
     assert (ta.ma("rma", close, length=LENGTH)
             - ta.rma(close, length=LENGTH)).abs().max() == 0.0
