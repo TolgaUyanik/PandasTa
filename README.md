@@ -73,13 +73,14 @@ Fork rules. Read before feeding any column to a model.
 ### 1. Causality is the contract
 
 Indicators added in this fork are **causal**: the value at bar `T` uses only data at `<= T`.
-Two upstream columns are not, and they are the whole exception list —
-[docs/IndicatorDictionary.md](docs/IndicatorDictionary.md#leak-watchlist) tracks them:
+One upstream column is not at default parameters —
+[docs/IndicatorDictionary.md](docs/IndicatorDictionary.md#leak-watchlist) tracks it — and one
+upstream option reads the future when you turn it on:
 
 | Column | Problem | What to do |
 |---|---|---|
 | `ichimoku` → `ICS_26` | Chikou span is `close.shift(-kijun)` — the future | drop the column, or use `ichimoku_ml` |
-| `dpo` → `DPO_20` | `centered=True` by default | pass `centered=False` |
+| `dpo` → `DPO_20` | `centered=True` reads `length // 2 + 1` bars ahead. The default here is `False` (upstream's is `True`) | leave `centered` at its default |
 
 Non-repainting is enforced elsewhere: `nadaraya_watson_envelope`, for example, weights a
 trailing window only. Ported price-action indicators state causality in their module

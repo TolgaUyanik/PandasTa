@@ -33,6 +33,9 @@ The `kalman_trend` row was patched in by hand on 2026-10-23, copied verbatim fro
 `.venv-pd2/bin/python docs/gen_indicator_dictionary.py` (pandas 2.3.3, no TA-Lib, so a full
 regeneration there empties `cdl_pattern` and was discarded). That same run emitted the `pfe`
 row unchanged. The `range_compress_run` row was patched in the same way on 2026-10-26.
+The `dpo` row and its *Leak watchlist* entry were patched by hand on 2026-10-26 (issue #5,
+`centered` now defaults to `False`), copied verbatim from a pandas 3.0.0 / no-TA-Lib run of the
+generator, whose full output was discarded for the same reason.
 Regenerate with TA-Lib installed to replace these notes.
 
 ### How many indicators is that, exactly
@@ -229,7 +232,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `cksp` | H/L/C | `p=None`, `x=None`, `q=None`, `tvmode=None` | `CKSPl_10_3_20` PX<br>`CKSPs_10_3_20` PX | 29 | The Tushar Chande and Stanley Kroll in their book “The New Technical Trader”. It is a trend-following indicator, identifying your stop by calculating… |
 | `decay` | C | `kind=None`, `length=None`, `mode=None` | `LDECAY_5` PX | 0 | Creates a decay moving forward from prior signals like crosses. The default is "linear". Exponential is optional as "exponential" or "exp". |
 | `decreasing` | C | `length=None`, `strict=None`, `asint=None` | `DEC_1` BIN | 0 | Returns True if the series is decreasing over a period, False otherwise. If the kwarg 'strict' is True, it returns True if it is continuously… |
-| `dpo` | C | `length=None`, `centered=True` | `DPO_20` PX **LEAK** | 8 | Is an indicator designed to remove trend from price and make it easier to identify cycles. |
+| `dpo` | C | `length=None`, `centered=False` | `DPO_20` PX | 30 | Is an indicator designed to remove trend from price and make it easier to identify cycles. |
 | `dtdb` | H/L/C | `pivots=None`, `tol_atr=None`, `buf_atr=None`, `void_atr=None`, `max_wait=None`, `track_bars=None`, `max_keep=None`, `atr_length=None`, `mode=None`, `dbl_mode=None` | `DTDB_CONF_BEAR_8_0.5_0.15` BIN<br>`DTDB_CONF_BULL_8_0.5_0.15` BIN<br>`DTDB_TGT_PCT_8_0.5_0.15` ??<br>`DTDB_PEND_8_0.5_0.15` ORD<br>`DTDB_RES_8_0.5_0.15` BIN | 16 | The first CHART-PATTERN SHAPE MATCHER in this fork. A confirmed pivot zigzag is matched against the two-peak / two-trough template, and the resulting… |
 | `equal_highs_lows` | H/L/C | `left=None`, `right=None`, `tol_mode=None`, `atr_length=None`, `atr_mult=None`, `pct_tol=None`, `lookback_pivots=None` | `EQH_5_5` BIN<br>`EQL_5_5` BIN<br>`EQH_DIST_5_5` ??<br>`EQL_DIST_5_5` SF<br>`EQH_BROKEN_5_5` BIN<br>`EQL_BROKEN_5_5` BIN | 292 | Detects "equal highs"/"equal lows" -- a widely-used SMC/ICT liquidity-pool concept: a confirmed swing pivot that lands within a small tolerance… |
 | `flag_breakout` | H/L/C | `staff_min_atr=None`, `staff_min_bars=None`, `staff_max_bars=None`, `staff_max_opposite=None`, `staff_min_r2=None`, `edge_min_bars=None`, `edge_max_bars=None`, `edge_max_width_pct=None`, `max_edge_slope_ratio=None`, `min_slope_atr=None`, `breakout_atr_mult=None`, `atr_length=None`, `width_mode=None`, `emit_pole=False` | `FLAG_CONF_BULL_12_0.85_0.15` CONST<br>`FLAG_CONF_BEAR_12_0.85_0.15` CONST<br>`FLAG_PEND_12_0.85_0.15` BIN | 14 | A port of TradingView `tMHhzI6j` "Flag Pattern Breakout [Dots3Red]" (MPL-2.0, (c) Dots3Red). It detects the classic flag: a steep, straight IMPULSE… |
@@ -464,7 +467,6 @@ written to read only bars `<= T`; these are the documented exceptions.
 | indicator | column | why |
 |---|---|---|
 | `ichimoku` | `ICS_26` | Chikou span = `close.shift(-kijun)`: it reports the future. Drop this column, or use `ichimoku_ml`, which reconstructs the same idea causally. |
-| `dpo` | `DPO_20` | Default `centered=True` shifts the future into the present. Pass `centered=False`. |
 
 ## Known breaks
 
