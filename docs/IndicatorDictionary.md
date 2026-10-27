@@ -26,16 +26,17 @@ window per ticker before concatenating tickers.
 `*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is
 invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
-**237 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
+**238 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
 The `pfe` row was patched in by hand on 2026-10-22 from a pandas 3.0.6 probe; regenerate on
 pandas 2.x to replace it.
 The `kalman_trend` row was patched in by hand on 2026-10-23, copied verbatim from
 `.venv-pd2/bin/python docs/gen_indicator_dictionary.py` (pandas 2.3.3, no TA-Lib, so a full
 regeneration there empties `cdl_pattern` and was discarded). That same run emitted the `pfe`
-row unchanged. Regenerate with TA-Lib installed to replace both notes.
+row unchanged. The `range_compress_run` row was patched in the same way on 2026-10-26.
 The `dpo` row and its *Leak watchlist* entry were patched by hand on 2026-10-26 (issue #5,
 `centered` now defaults to `False`), copied verbatim from a pandas 3.0.0 / no-TA-Lib run of the
 generator, whose full output was discarded for the same reason.
+Regenerate with TA-Lib installed to replace these notes.
 
 ### How many indicators is that, exactly
 
@@ -43,8 +44,8 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | surface | n | what it means |
 |---|---|---|
-| registered in `Category` | **235** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **243** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| registered in `Category` | **236** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **244** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
@@ -278,7 +279,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `zigzag` | C | `pct_threshold=None` | `ZIGZAG_5` ?? | 0 | Marks pivot highs and lows where the price has reversed by at least `pct_threshold` from the last pivot. Non-pivot bars are NaN. |
 | `zigzag_fib` | H/L/C | `length=None` | `ZZFIB_50_5` SF<br>`ZZFIB_618_5` SF | 13 | Scale-free % distance from close to the 0.5 and 0.618 (golden ratio) Fibonacci retracement levels of the CURRENT zigzag leg -- the alternating… |
 
-## volatility (19)
+## volatility (20)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -296,6 +297,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `massi` | H/L | `fast=None`, `slow=None` | `MASSI_9_25` SF | 32 | The Mass Index is a non-directional volatility indicator that utilitizes the High-Low Range to identify trend reversals based on range expansions. |
 | `natr` | H/L/C | `length=None`, `mamode=None`, `scalar=None`, `drift=None` | `NATR_14` SF | 13 | Normalized Average True Range attempt to normalize the average true range. |
 | `pdist` | O/H/L/C | `drift=None` | `PDIST` PX | 1 | Measures the "distance" covered by price movements. |
+| `range_compress_run` | H/L | `cap=None` | `RCR_100` ORD | 1 | How many consecutive bars, ending at this one, have had a high-low range strictly below the previous bar's range. 0 on a bar whose range is equal to… |
 | `range_profile` | H/L/C | `lookback=None`, `ob_os_level=None`, `bins=None`, `min_range_pct=None`, `require_coherent_bars=True`, `min_coherent_bars=None`, `emit_osc=False` | `RPO_VA_WIDTH_PCT_110_80` SF<br>`RPO_BREAK_UP_110_80` BIN<br>`RPO_BREAK_DN_110_80` BIN | 111 | Ports the calculation half of the TradingView indicator `atvJpWjW` ("Range Profile Oscillator", (c) Uncle_the_shooter, MPL-2.0). Over a rolling… |
 | `rvi` | H/L/C | `length=None`, `scalar=None`, `refined=None`, `thirds=None`, `mamode=None`, `drift=None` | `RVI_14` SF | 13 | The Relative Volatility Index (RVI) was created in 1993 and revised in 1995. Instead of adding up price changes like RSI based on price direction,… |
 | `thermo` | H/L/C | `length=None`, `long=None`, `short=None`, `mamode=None`, `drift=None` | `THERMO_20_2_0.5` PX<br>`THERMO_20_2_0.5_RATIO_PCT` SF<br>`THERMOma_20_2_0.5` PX<br>`THERMOl_20_2_0.5` BIN<br>`THERMOs_20_2_0.5` BIN | 19 | Elder's Thermometer measures price volatility. |
