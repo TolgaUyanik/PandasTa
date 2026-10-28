@@ -93,13 +93,14 @@ A draft also
 guarded against float residue in the rolling sum. The "residue" it found was the NaN sum at bar
 39 (`NaN != 0`), not residue, so the guard was dropped.
 
-## Follow-up (not done here)
+## Follow-up
 
 * `docs/MLCompanionContract.md` quoted 568 tagged columns / 49 `ORD`, but the dictionary's Counter
   says 570 / 50. This port corrected the sentence. The guard,
   `test_ml_companions.py::test_the_contract_quotes_the_dictionarys_actual_ml_form_counts`, checks
-  only `PX`/`SF`/`BIN`/`PX2`, which is how the `ORD` and total drift got through. Extending it is
-  that module's change and was left alone.
+  only `PX`/`SF`/`BIN`/`PX2`, which is how the `ORD` and total drift got through. **Done in a
+  follow-up commit on this branch:** the guard now also asserts `ORD`, `CONST` and the total
+  (counting `??`), and a planted `49 ORD` / `569` total each fail it.
 
 ## Departures from the instructions
 
