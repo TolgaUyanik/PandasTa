@@ -8,6 +8,7 @@ from .cmf import cmf
 from .efi import efi
 from .eom import eom
 from .kvo import kvo
+from .maxvol_adv import maxvol_adv
 from .mfi import mfi
 from .nvi import nvi
 from .obv import obv

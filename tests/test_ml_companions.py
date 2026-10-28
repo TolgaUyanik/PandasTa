@@ -168,7 +168,9 @@ def test_the_contract_quotes_the_dictionarys_actual_ml_form_counts():
     """The contract said "Measured: 128 PX, 172 SF, 92 BIN, 3 PX2". The
     dictionary it cites says 126/169/90/2 — all four wrong, with the word
     "Measured" attached, in the opening paragraph of the document the rollout is
-    templated on. Asserted now, not retyped."""
+    templated on. Asserted now, not retyped. ORD, CONST, ?? and the total were
+    added 2026-10-28: unchecked, they had drifted to 49 / 568 against a
+    dictionary that said 50 / 570."""
     import os
     import re
     from collections import Counter
@@ -177,13 +179,17 @@ def test_the_contract_quotes_the_dictionarys_actual_ml_form_counts():
     doc = open(os.path.join(here, "docs", "IndicatorDictionary.md"),
                encoding="utf8").read()
     body = doc[doc.index("## candles"):]
-    tags = Counter(re.findall(r"`[^`]+`\s+(PX2|PX|SF|BIN|ORD|CONST)\b", body))
+    tags = Counter(re.findall(r"`[^`]+`\s+(PX2|PX|SF|BIN|ORD|CONST|\?\?)(?!\w)", body))
 
     contract = open(os.path.join(here, "docs", "MLCompanionContract.md"),
                     encoding="utf8").read()
     wrong = []
-    for tag in ("PX", "SF", "BIN", "PX2"):
-        match = re.search(rf"\*\*(\d+) `{tag}`\*\*|(\d+) `{tag}`", contract)
+    total = re.search(r"(\d+) tagged columns", contract)
+    if not total or int(total.group(1)) != sum(tags.values()):
+        wrong.append(("total", total and int(total.group(1)), sum(tags.values())))
+    for tag in ("PX", "SF", "BIN", "PX2", "ORD", "CONST", "??"):
+        t = re.escape(tag)
+        match = re.search(rf"\*\*(\d+) `{t}`\*\*|(\d+) `{t}`", contract)
         if not match:
             wrong.append((tag, None, tags[tag]))
             continue

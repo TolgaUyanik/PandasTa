@@ -2517,6 +2517,11 @@ class AnalysisIndicators(BasePandasObject):
         result = kvo(high=high, low=low, close=close, volume=volume, fast=fast, slow=slow, signal=signal, mamode=mamode, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def maxvol_adv(self, short=None, long=None, offset=None, **kwargs):
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = maxvol_adv(volume=volume, short=short, long=long, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def mfi(self, length=None, drift=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
