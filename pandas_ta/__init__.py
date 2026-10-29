@@ -98,7 +98,7 @@ Category = {
 
     # Volume, "vp" or "Volume Profile" is unique
     "volume": [
-        "ad", "adosc", "aobv", "avwap_z", "bw_mfi", "cmf", "efi", "eom", "kvo", "mfi", "nvi", "obv", "pocket_pivot", "pvi",
+        "ad", "adosc", "aobv", "avwap_z", "bw_mfi", "cmf", "efi", "eom", "kvo", "maxvol_adv", "mfi", "nvi", "obv", "pocket_pivot", "pvi",
         "pvol", "pvr", "pvt", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "weis_wave",
         "vzo", 
         # `up_and_down_volume` and `volume_delta` are deliberately NOT here.
