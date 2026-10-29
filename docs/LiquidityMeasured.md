@@ -6,8 +6,11 @@ alone: Corwin-Schultz (2012) spread, Roll (1984) spread, Amihud (2002) illiquidi
 
 **Status: Gates A, B, D cleared; Gate C synthetic only (real-data counts owed); Gate E
 PENDING, run by issue-solver after this session. Do not merge to `main` before Gate E**:
-all three are in `Category`, so any `df.ta.strategy()` sweep in the parent repo picks
-them up.
+`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` enforces
+exactly this (CLAUDE.md "Gate E ledger"), so all three ship as `df.ta.<name>()`
+accessors ONLY — held OUT of `Category` on purpose, meaning `df.ta.strategy()` in the
+parent repo does NOT pick them up yet. The receipt session that records the Gate E
+ledger rows is what adds them to `Category`.
 
 Shipped as **three modules** (see "Decisions" below), each one column:
 
@@ -81,7 +84,7 @@ pandas 2.3.3, numpy 1.26.4, Python 3.11.2. Measured 2026-10-30.
 | C Reachability | synthetic only | 1,200-bar fixture (seed 11/12/13, tick 0.01): **CS** fires 1,199/1,200, 172 distinct, 1,028 clipped to 0. **ROLL** fires 575/1,200 (604 of 1,179 post-warm-up bars NaN from `cov >= 0`), 575 distinct. **AMIHUD** fires 1,179/1,200, 1,175 distinct. **Real-data counts owed to Gate E.** |
 | D Scale-free | pass | **CS**/**ROLL** (price-only): ×8/×64 bit-identical (`max|diff| = 0.0`, NaN masks matching); ×10/×3.7 within `6.65e-16`/`8.85e-16` (CS) and `7.15e-13`/`4.19e-13` (ROLL). **AMIHUD** (price AND volume axes, independently — the issue's own flagged risk): ×8/×64 bit-identical on BOTH axes; ×10/×3.7 within `7.11e-15`/`6.66e-15` (price) and `8.88e-16`/`6.66e-16` (volume). `0 < fires < n` plus > 100 distinct values, all three. |
 | E Attribution | **PENDING**, run by issue-solver after this session | `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.volatility.corwin_schultz` / `.roll_spread` / `pandas_ta.volume.amihud`, against `compute_all` ∪ the `ml_features` manifest `1d`, 89 ALTPORT-1 frames, bands `r3-perframe-0.90`. |
-| F Suites | this repo only | `python -m pytest -q`: **3 failed / 3,297 passed / 83 skipped** (2026-10-30). None of the three failures names any of `corwin_schultz` / `roll_spread` / `amihud`: `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` (pre-existing — needs the sibling `../AlternativeRepos` checkout, deselected by name in CI), `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (the documented pre-existing break, CLAUDE.md "Known breaks"), and `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` naming exactly `['amihud', 'corwin_schultz', 'roll_spread']` — the expected state while Gate E is owed, same as `pfe`/`kalman_trend`/`range_compress_run`/`maxvol_adv` before their ledger rows were recorded. Parent repo's suite not run (not available in this worktree). |
+| F Suites | this repo only | `python -m pytest -q`: **2 failed / 3,295 passed / 83 skipped** (2026-10-30, after holding the three out of `Category`). Neither failure names any of `corwin_schultz` / `roll_spread` / `amihud`: `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` (pre-existing — needs the sibling `../AlternativeRepos` checkout, deselected by name in CI) and `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (the documented pre-existing break, CLAUDE.md "Known breaks"). `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` passes because the three are accessor-only, not in `Category`, so the ledger does not owe them a row yet. Parent repo's suite not run (not available in this worktree). |
 
 ## Proxy overlap (NOT Gate E)
 
@@ -108,9 +111,12 @@ structure of the walk; this fixture does not test that directly.
 ## To close
 
 1. Launcher runs Gate E (`gate_e_overlap.py run --module pandas_ta.volatility.corwin_schultz`,
-   `.roll_spread`, `pandas_ta.volume.amihud`) and records the ledger rows
-   (`python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`), which also
-   resolves `test_every_indicator_that_needs_a_row_has_one` above.
+   `.roll_spread`, `pandas_ta.volume.amihud`) and a receipt session records the ledger rows
+   (`python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`), then adds the
+   three to `Category` (`pandas_ta/__init__.py`) and reinstates the `in ta.Category[...]`
+   assertions in `tests/test_amihud.py` / `test_corwin_schultz.py` / `test_roll_spread.py`
+   and the counts in `README.md`, `docs/IndicatorDictionary.md`, `docs/MLCompanionContract.md`
+   and `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL`/`CATEGORY_BUCKETS`.
 2. If any column bands STRUCK (`r3-perframe-0.90`): revert that module, its wiring and
    its test file, keep this document as the receipt (a measured revert closes #10 as
    fully as a ship), and update the "Status" line and the table above.

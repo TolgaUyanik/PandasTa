@@ -22,7 +22,8 @@ What these pin, in order of how much it would hurt to lose:
   expanding median of itself is exactly 1.0 -- not a bug, a known
   degenerate case of a history-relative ratio with no history yet.
 * Gate C (synthetic): fires on 1179 of 1200 bars (98.25%).
-* Wiring: `Category`, the accessor, and the column name `AMIHUD_21`.
+* Wiring: the accessor and the column name `AMIHUD_21`; held OUT of
+  `Category` on purpose until Gate E is measured (`docs/LiquidityMeasured.md`).
 """
 import importlib
 import types
@@ -193,7 +194,7 @@ def test_name_registration_and_accessor():
     close, volume = _walk(200)
     df = pd.DataFrame({"open": close, "high": close, "low": close,
                        "close": close, "volume": volume})
-    assert "amihud" in ta.Category["volume"]
+    assert "amihud" not in ta.Category["volume"]  # Gate E owed; accessor-only until measured
     out = df.ta.amihud()
     assert out.name == "AMIHUD_21"
     pd.testing.assert_series_equal(out, amihud(close, volume))
