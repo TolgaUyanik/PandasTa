@@ -20,9 +20,11 @@ choices of the screen prototype: candidate `b2_maxvol14_adv50`,
 `docs/issues/screen/ind_screen_r8.py:116-118`, on the owner's machine only (`docs/issues/` is
 gitignored). It reads `sdiv(v.rolling(14).max(), mean(v, 50))`. Its helpers, at
 `ind_screen.py:41-47`, define `mean` as `x.rolling(n).mean()` and `sdiv` as `a / b` with only
-±inf mapped to NaN. Read on 2026-10-29, after the port was written, the prototype differs from the
-port in one case only: a negative ADV gives a finite ratio there and NaN here. Volume is never
-negative, so real data cannot reach that case. A zero ADV gives NaN in both. Same post as
+±inf mapped to NaN. Read on 2026-10-29, after the port was written, the prototype's values differ from the
+port's in one case only: a negative ADV gives a finite ratio there and NaN here. Volume is never
+negative, so real data cannot reach that case. A zero ADV gives NaN in both. One API difference
+remains: a frame shorter than max(short, long) = 50 bars returns `None` here and an all-NaN
+series there. Same post as
 `range_compress_run`.
 
 ## Is it already shipped? (checked before porting, 2026-10-28)
@@ -49,7 +51,9 @@ inspected before porting; Gate E on the port settled it (below). The top two com
 
 ## Gates
 
-Environment: `.venv-pd2` (pandas 2.3.3) and `.venv` (pandas 3.0.6), Python 3.12. The synthetic
+Environment for Gates A, B and D (the author's machine): `.venv-pd2` (pandas 2.3.3) and `.venv`
+(pandas 3.0.6), Python 3.12. Gates C, E and F ran on the owner's machine: Python 3.11.9,
+pandas 2.3.3, numpy 1.26.4. The synthetic
 numbers come from `tests/test_maxvol_adv.py`: 1,200 bars of rounded lognormal(10, 0.6) volume,
 seed 11.
 
@@ -80,7 +84,11 @@ on the failing node IDs matching, not on a zero.
   4 errors with this branch's `pandas_ta`, and exactly the same with `dev`'s (`d7fd91d`, whose
   `pandas_ta/` matches `6df7539`). The 20 failing node-id lists are identical:
   `test_build_strategy_master.py` 8, `test_strategy_loader.py` 6, `test_spmine_golden.py` 5,
-  `test_exit_no_drift.py` 1. All 20 fail on `dev`'s code too.
+  `test_exit_no_drift.py` 1. All 20 fail on `dev`'s code too. Each run printed the tree it
+  imported. The dev run imported `D:\AwakenAnalytics\PandasTa\pandas_ta` (tree sha1 `efca0690`,
+  the value on the other ledger rows). The branch run imported
+  `...\PandasTa-197-maxvol-adv\pandas_ta` (tree sha1 `8a2d3e46`, the value in the Gate E r2 run's
+  `meta.json`).
 
 The earlier measurement (2026-10-28, base `d7fd91d`, the author's machine) also found no
 regressions in this repo. On `.venv` (pandas 3.0.6) it had 42 failed / 3161 passed with the change

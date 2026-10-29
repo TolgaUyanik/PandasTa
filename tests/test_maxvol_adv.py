@@ -91,6 +91,7 @@ def test_edge_cases():
     # short > long: the peak window is the longer one, so it sets the gap.
     gap80 = maxvol_adv(vn, short=80, long=50)
     assert gap80[500:580].isna().all() and gap80[580:].notna().all()
+    assert int(gap80.isna().sum()) == 79 + 80
     pd.testing.assert_series_equal(maxvol_adv(v, offset=1), base.shift(1))
     assert maxvol_adv(v, fillna=0).isna().sum() == 0
 
