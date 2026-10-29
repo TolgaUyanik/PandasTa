@@ -46,15 +46,17 @@ poster's claim (a top-3 feature of an XGBoost classifier, AUC 0.723, for
 gives only the feature name: it fixes neither the peak window nor what ADV
 is. The 14-bar peak and ADV = SMA(volume, 50) over a window that excludes
 nothing are the choices of the 2026-10-26 screen prototype (candidate
-b2_maxvol14_adv50), known here only from the issue text; the prototype file
-was not read. Same post as `range_compress_run`.
+b2_maxvol14_adv50, docs/issues/screen/ind_screen_r8.py:116-118, local to
+the owner's machine). It computes the same ratio; the one difference is a
+negative ADV, finite there and NaN here, which real volume cannot reach.
+Same post as `range_compress_run`.
 
 Volume only, so no price rescaling can change it. A volume rescaling
 cancels up to float rounding: bit-identical for power-of-two factors (x8,
 x64), within 4e-16 relative otherwise (x10, x3.7 measured).
 
-Both windows need every bar, so one NaN volume bar blanks the next `long`
-bars of output.
+Both windows need every bar, so one NaN volume bar blanks its own output
+and the next max(short, long) - 1 bars (50 bars in all at the defaults).
 
 Calculation:
     Default Inputs:
