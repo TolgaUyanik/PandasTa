@@ -1,10 +1,9 @@
 # maxvol_adv — measured
 
 > **Status: NOT DONE. Do not merge to `main`.** The issue is done when the port has
-> passed Gates A–F, or has been measured and reverted. Gates A, B and D pass. Gate C (real data)
-> and Gate E (on the port) are owed, and Gate F is not met. All three need the machine that
-> has `../Backtesting`. The column is in `Category` on this branch only, so that Gate E can
-> run on it. If Gate E strikes it, revert the port and keep this file as the receipt.
+> passed Gates A–F, or has been measured and reverted. Gates A, B and D pass. Gate E was run
+> on the port on 2026-10-29 and is SHIP; the same run gives Gate C its real-data counts. Gate F
+> is not met: the Backtesting suite was not run.
 
 `MAXVOLADV_14_50 = max(volume, last 14 bars) / SMA(volume, 50)`. Both windows end at, and include,
 the current bar. The value is NaN where the ADV is ≤ 0. Module `pandas_ta/volume/maxvol_adv.py`,
@@ -53,9 +52,9 @@ seed 11.
 |---|---|
 | A | No source formula exists to check against. The post names the feature, and the windows and the ADV come second-hand from the prototype (see Source). The port was checked against that definition: a hand-computed 5-bar sequence, an independent loop (rtol 1e-12), `short > long` (exact 4 / 3.5), the 49-bar warm-up, a zero or negative ADV giving NaN rather than inf, one NaN volume bar blanking exactly the next 50 output bars, `offset` and `fillna`. |
 | B | Future perturbation at 31 offsets, using two futures (another walk, and the same walk ×1000). The real module leaks at 0 of 31. Two one-bar look-ahead mutants (`volume.shift(-1)` feeding the peak, and the same feeding the ADV) are each shown to change the output, then caught at 31 of 31. |
-| C | Synthetic only: 1,151 non-NaN bars, 1,151 distinct values, range 1.129 to 7.358. **Not measured on real data**, because the BIST frames are in the Backtesting repo. Report the fire and NaN counts there; one NaN volume bar costs 50 bars. |
+| C | Real data, from the Gate E run below (89 ALTPORT-1 BIST frames, 398,849 bars): 394,488 non-NaN, 394,466 non-zero. The 4,361 NaN bars equal 89 × 49, the warm-up, so no NaN-volume blanking occurred. Synthetic: 1,151 non-NaN bars, 1,151 distinct values, range 1.129 to 7.358. |
 | D | The column reads no price. Volume ×8 and ×64 are bit-identical. ×10 and ×3.7 differ by at most 2.2e-16 and 3.9e-16 relative (max \|Δ\| / \|base\|). NaN masks match in all four. The column is continuous, so `0 < fires < n` is replaced by nunique = 1,151 of 1,151 non-NaN bars (see C). |
-| E | **Owed.** The prototype measured max \|ρ\| 0.7003 vs `pvo_PVOs_12_26_9` (n = 394,488), with a top-5 per-frame median of 0.7451, which is in the SHIP band. To re-run, from `../Backtesting/Backtesting`: `python scripts/analysis/gate_e_overlap.py run --module pandas_ta.volume.maxvol_adv --name maxvol_adv`. |
+| E | **SHIP** (measured on the port 2026-10-29, run `gatecheck-20261029-maxvol_adv`, 687 comparators, canary bit-equal): max \|ρ\| 0.7003 vs `pvo_PVOs_12_26_9` (n = 394,488), top-5 per-frame median 0.7451 vs the same column. Same numbers as the prototype. Recorded in `docs/gate_e_ledger.csv`. To re-run, from `../Backtesting/Backtesting`: `python scripts/analysis/gate_e_overlap.py run --module pandas_ta.volume.maxvol_adv --name maxvol_adv`. |
 | F | **Not met.** See below. |
 
 ### Gate F, this repo (measured 2026-10-28, base `d7fd91d`)
