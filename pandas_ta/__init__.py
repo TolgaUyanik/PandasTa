@@ -73,7 +73,7 @@ Category = {
     "statistics": [
         "entropy", "kpss", "kurtosis", "mad", "median", "median_ad_hl2", "quantile", "skew", "stdev",
         "tf_centroid_20", "variance", "zscore",
-        "rolling_sum", "normalize", "covariance"
+        "rolling_sum", "normalize", "covariance", "cusum"
     ],
     # Trend
     "trend": [
