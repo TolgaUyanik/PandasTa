@@ -4,9 +4,9 @@ Technical analysis indicators as a pandas extension. Fork of
 [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, extended with
 price-action / SMC indicators and oriented toward **machine-learning feature generation**.
 
-**238 indicators** registered in `Category`, across 9 categories — that is the number
+**245 indicators** registered in `Category`, across 9 categories — that is the number
 that matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two other
-counts are true of the same package and are easy to confuse with it: **246** are callable
+counts are true of the same package and are easy to confuse with it: **254** are callable
 as `df.ta.<name>()` (`Category` plus `beta`, `hwma` and `vp`), and `drawdown` and `ma` are
 importable as `ta.<name>()` without being either. All of them are in the dictionary; the
 three counts are emitted by its generator, and `tests/test_readme_counts.py` fails if this
@@ -149,13 +149,13 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 
 **performance (3)** — `log_return` `percent_return` `trend_return` (`cumulative=True` for cumulative)
 
-**statistics (13)** — `covariance` `cusum` `entropy` `kurtosis` `mad` `median` `normalize` `quantile` `rolling_sum` `skew` `stdev` `variance` `zscore`
+**statistics (16)** — `covariance` `cusum` `entropy` `kpss` `kurtosis` `mad` `median` `median_ad_hl2` `normalize` `quantile` `rolling_sum` `skew` `stdev` `tf_centroid_20` `variance` `zscore`
 
-**trend (58)** — `adx` `amat` `aroon` `atr_push` `band_cross_retest` `bdi4kewl` `bos` `choch` `chop` `cksp` `decay` `decreasing` `dpo` `dtdb` `equal_highs_lows` `flag_breakout` `fvg` `fvg_sweep_magnet` `halftrend` `head_shoulders` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `pmax` `priorday_fib` `priormonth_range` `psar` `qstick` `rejection_blocks` `renko_trend` `ribbon_concordance` `rounding_cup` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `triple_top_bottom` `tsignals` `ttm_trend` `tvstop` `vhf` `volume_sr_zones` `vortex` `vstop` `vstop2` `xsignals` `zigzag` `zigzag_fib`
+**trend (59)** — `adx` `adxr` `amat` `aroon` `atr_push` `band_cross_retest` `bdi4kewl` `bos` `choch` `chop` `cksp` `decay` `decreasing` `dpo` `dtdb` `equal_highs_lows` `flag_breakout` `fvg` `fvg_sweep_magnet` `halftrend` `head_shoulders` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `pmax` `priorday_fib` `priormonth_range` `psar` `qstick` `rejection_blocks` `renko_trend` `ribbon_concordance` `rounding_cup` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `triple_top_bottom` `tsignals` `ttm_trend` `tvstop` `vhf` `volume_sr_zones` `vortex` `vstop` `vstop2` `xsignals` `zigzag` `zigzag_fib`
 
-**volatility (20)** — `aberration` `accbands` `atr` `atr2` `atr_ma_multiple` `bbands` `cvi` `donchian` `har_park` `hwc` `kc` `massi` `natr` `pdist` `range_compress_run` `range_profile` `rvi` `thermo` `true_range` `ui`
+**volatility (22)** — `aberration` `accbands` `atr` `atr2` `atr_ma_multiple` `bbands` `corwin_schultz` `cvi` `donchian` `har_park` `hwc` `kc` `massi` `natr` `pdist` `range_compress_run` `range_profile` `roll_spread` `rvi` `thermo` `true_range` `ui`
 
-**volume (24)** — `ad` `adosc` `aobv` `avwap_z` `bw_mfi` `cmf` `efi` `eom` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `pocket_pivot` `pvi` `pvol` `pvr` `pvt` `tod_profile` `tri_dir_pressure` `vfi` `vol_delta` `vzo` `weis_wave`
+**volume (25)** — `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `efi` `eom` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `pocket_pivot` `pvi` `pvol` `pvr` `pvt` `tod_profile` `tri_dir_pressure` `vfi` `vol_delta` `vzo` `weis_wave`
 
 Present but outside `Category`, so skipped by `df.ta.strategy()`: `beta`, `drawdown`,
 `hwma`, `vp`, `ma` (moving-average selector — `help(ta.ma)`), and the two lower-timeframe
@@ -165,6 +165,11 @@ functions `up_and_down_volume` / `volume_delta`, and the four TA-Lib ports
 `ma` only as `ta.drawdown()` / `ta.ma()`. `beta` is a TALIB-1 port and needs a BENCHMARK
 series a single-frame sweep cannot supply, which is the same reason as the two volume
 functions below; it is absent from the dictionary for the same reason they are.
+`tf_median_absdiff_20` (issue #118) is reachable as `df.ta.tf_median_absdiff_20()` but
+withheld from `Category` on purpose: its Gate E ledger row
+(`tests/test_gate_e_ledger.py`, `docs/gate_e_ledger.csv`) is not recorded yet, so a
+strategy sweep must not pick it up until that measurement lands — see
+`docs/TfMedianAbsdiff20Measured.md`.
 
 `ht_trendline`, `mama` and `sarext` return TA-Lib's raw PRICE LEVELS, and their
 scale-free distance forms were measured into the Gate E revert band against columns
