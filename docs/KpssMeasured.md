@@ -1,6 +1,6 @@
 # kpss — measured
 
-> **Status: Gates A, B and D pass; C and E are owed (issue [#157](https://github.com/TolgaUyanik/PandasTa/issues/157)).**
+> **Status: Gates A, B, D and E pass; C is owed (issue [#157](https://github.com/TolgaUyanik/PandasTa/issues/157)).**
 > Gate E and Gate C's real-data counts need the private Backtesting engine and the BIST cache,
 > which the author's machine does not have. Until a Gate E run is recorded in
 > `docs/gate_e_ledger.csv`, `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
@@ -61,9 +61,7 @@ with pandas 3.0.0 and numpy 2.4.2, without statsmodels. The synthetic numbers co
 | B | Future perturbation at 31 offsets, with two futures (another walk, and the same walk ×1000). The real module leaks at 0 of 31. Two one-bar look-ahead mutants (`importlib` source read, `exec`'d in memory) are each shown to change the output, then caught at 31 of 31: the output written one bar early (`values[length - 2:-1]`), and the window read one bar ahead. There is no recursive stage, so the taint reach is exactly the 100-bar window. |
 | C | **Owed.** Real-data firing counts come from the Gate E run. Synthetic: 1,101 non-NaN bars, 1,101 distinct values, none zero, range 0.0865 to 1.0744. |
 | D | Close ×8 and ×64 are bit-identical. ×10 and ×3.7 differ by at most 1.08e-14 and 8.54e-15 relative (max \|Δ\| / \|base\|); the test asserts ≤ 1e-13 so that other numpy builds pass. NaN masks match in all four. The column is continuous, so `0 < fires < n` is replaced by nunique = 1,101 of 1,101 non-NaN bars (see C). |
-| E | **Owed.** To run, from `../Backtesting/Backtesting`: `python scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.kpss --name <run name>`, then record it with `python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`. The harness must import
-`pandas_ta` from this branch's tree (`record` checks the run's `pandas_ta_src_sha1` against it),
-so check out `issue-157-kpss` as the PandasTa sibling before running. The prototype's number (max \|ρ\| 0.2256, SHIP) is not a measurement of this port. |
+| E | **SHIP.** `KPSS_100` max \|ρ\| 0.2256 vs `ICHI_TK_CROSS_AGE` (`compute_all`, n = 390,038; per-frame median 0.2239), 89 frames / 398,849 bars / 687 comparators. Run `is157-kpss-fca23805` on 2026-10-31 against the merged tree; row in `docs/gate_e_ledger.csv`. |
 | F | **No regressions in this repo** (below). Backtesting not run. |
 
 ### Gate F (2026-10-30, the author's machine, `.venv-pd2`)
