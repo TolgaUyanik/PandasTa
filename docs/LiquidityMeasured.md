@@ -6,14 +6,12 @@ alone: Corwin-Schultz (2012) spread, Roll (1984) spread, Amihud (2002) illiquidi
 
 **Status: Gates A-D cleared (A/B/D as in the first session; C now has real-data counts
 too); Gate E measured 2026-10-30 by the launcher's harness — all three columns verdict
-`SHIP` under `r3-perframe-0.90` (none `STRUCK`, none `DISCLOSE`/`DISCLOSE_GAP`).** They
-still ship as `df.ta.<name>()` accessors ONLY — held OUT of `Category` — because adding a
-`Category` row requires a `docs/gate_e_ledger.csv` row
-(`python docs/gate_e_ledger.py record <run dir> --measured 2026-10-30`), and that file is
-outside this receipt session's allowed-to-modify set (see the issue-solver header). The
-next session that has ledger access records the three rows and flips them into
-`Category`; `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-is what would catch a `Category` entry made without that row.
+`SHIP` under `r3-perframe-0.90` (none `STRUCK`, none `DISCLOSE`/`DISCLOSE_GAP`).** All three
+are in `Category` (`corwin_schultz` and `roll_spread` under volatility, `amihud` under volume),
+with their rows recorded in `docs/gate_e_ledger.csv` from a Gate E re-run on the wired tree
+(`pandas_ta_src_sha1 b2c48765dd9e28a04648eec21d19ec6c4a10e724`); the numbers equal the first
+run to every printed digit. An earlier session held them out of `Category` only because the
+ledger file was outside its allowed set (`efc5499`, reverted).
 
 Shipped as **three modules** (see "Decisions" below), each one column:
 
@@ -88,8 +86,8 @@ pandas 2.3.3, numpy 1.26.4, Python 3.11.2. Measured 2026-10-30.
 | B Causality | pass, by measurement | Future-perturbation sweep (31 offsets, real module leaks at 0/31 for all three) plus one `importlib`-read, `exec`'d-in-memory look-ahead mutant per module. **CS** and **ROLL**'s mutants have a reach of exactly one bar below the perturbation boundary, so a boundary bar where both the real and mutant value are masked (CS's alpha clips to 0 on 85.7% of bars; ROLL's cov is non-negative on 51.2%) hides the leak there — measured catch: **CS 9/31, ROLL 18/31**. This is the `smc_sweep`/CANDLE-1 lesson applied directly: a test that checked only one offset would have had a 71% (CS) / 42% (ROLL) chance of missing the bug. **AMIHUD**'s mutant (low NaN rate, 1.8%) is caught at **31/31**. |
 | C Reachability | synthetic + real | Synthetic, 1,200-bar fixture (seed 11/12/13, tick 0.01): **CS** fires 1,199/1,200, 172 distinct, 1,028 clipped to 0. **ROLL** fires 575/1,200 (604 of 1,179 post-warm-up bars NaN from `cov >= 0`), 575 distinct. **AMIHUD** fires 1,179/1,200, 1,175 distinct. Real data — 89 ALTPORT-1 BIST frames, 398,849 pooled bars, from the same Gate E run's `overlap_max.csv` (`non_nan`/`non_zero` columns): **CS\_1** non-NaN on 398,598/398,849 bars (99.94%, NaN 0.06%); of those, **reads exactly 0 on 183,398 (46.01%)** and fires non-zero on 215,200 (53.99%) — this is the issue's own question ("count how often it happens on real data") and the answer is roughly half, well under the synthetic fixture's 85.7%, so the synthetic rate overstated the real one. **ROLL\_20** non-NaN (finite) on 225,954/398,849 (56.65%; NaN 43.35% from `cov >= 0`, also "common" on real data), and every finite value is non-zero (225,954/225,954). **AMIHUD\_21** non-NaN on 387,045/398,849 (97.04%; NaN 2.96%), every finite value non-zero. |
 | D Scale-free | pass | **CS**/**ROLL** (price-only): ×8/×64 bit-identical (`max|diff| = 0.0`, NaN masks matching); ×10/×3.7 within `6.65e-16`/`8.85e-16` (CS) and `7.15e-13`/`4.19e-13` (ROLL). **AMIHUD** (price AND volume axes, independently — the issue's own flagged risk): ×8/×64 bit-identical on BOTH axes; ×10/×3.7 within `7.11e-15`/`6.66e-15` (price) and `8.88e-16`/`6.66e-16` (volume). `0 < fires < n` plus > 100 distinct values, all three. |
-| E Attribution | **measured 2026-10-30**, launcher's harness (`gate_e_overlap.py run --module pandas_ta.volatility.corwin_schultz` / `.roll_spread` / `pandas_ta.volume.amihud`), bands `r3-perframe-0.90`, 89 ALTPORT-1 frames, 687 comparators (329 `compute_all` + 358 manifest `1d`) | **CS\_1**: pooled max\|ρ\| `0.5671` vs `THERMO_pct_Pctl` (manifest, n=393,406); per-frame max median\|ρ\| `0.5656` vs the same comparator, 0/89 frames ≥0.90. Verdict **SHIP**. **ROLL\_20**: pooled max\|ρ\| `0.5375` vs `natr` (compute_all, n=225,954); per-frame max median\|ρ\| `0.5093` vs `natr`, 0/89 frames ≥0.90. Verdict **SHIP**. **AMIHUD\_21**: pooled max\|ρ\| `0.6431` vs `pvi` (compute_all, n=387,045); per-frame max median\|ρ\| `0.7979` vs `ZIGZAG` (89 frames, 3/89 = 3.37% of frames ≥0.90). Verdict **SHIP** — `expected_verdict` (`docs/gate_e_ledger.py`) bands DISCLOSE/DISCLOSE_GAP/SHIP off the pooled max only (`0.6431 < 0.76`), and STRUCK needs pooled **or** per-frame-median ≥ 0.90, which neither hits. **No column STRUCK; nothing to revert.** Run facts (`meta.json`, all three): `pandas_ta_src_sha1 65bad80a99b94ab97145d275cf405f3c15916432`, canary `AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`, `n_frames=89`, `pooled_bars=398849`. Full outputs: `is10-corwin_schultz-270316bb`, `is10-roll_spread-270316bb`, `is10-amihud-270316bb` (launcher run `20261030-003934-10`). |
-| F Suites | this repo only | `python -m pytest -q` (2026-10-30, this receipt session, doc-only change): **2 failed / 3,295 passed / 83 skipped** — unchanged from the prior session, same two pre-existing failures (`test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`, `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`, both CLAUDE.md "Known breaks"), neither naming `corwin_schultz`/`roll_spread`/`amihud`. `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` passes because the three are still accessor-only, not in `Category`. Parent repo's suite run by the launcher, not here. |
+| E Attribution | **measured 2026-10-30**, launcher's harness (`gate_e_overlap.py run --module pandas_ta.volatility.corwin_schultz` / `.roll_spread` / `pandas_ta.volume.amihud`), bands `r3-perframe-0.90`, 89 ALTPORT-1 frames, 687 comparators (329 `compute_all` + 358 manifest `1d`) | **CS\_1**: pooled max\|ρ\| `0.5671` vs `THERMO_pct_Pctl` (manifest, n=393,406); per-frame max median\|ρ\| `0.5656` vs the same comparator, 0/89 frames ≥0.90. Verdict **SHIP**. **ROLL\_20**: pooled max\|ρ\| `0.5375` vs `natr` (compute_all, n=225,954); per-frame max median\|ρ\| `0.5093` vs `natr`, 0/89 frames ≥0.90. Verdict **SHIP**. **AMIHUD\_21**: pooled max\|ρ\| `0.6431` vs `pvi` (compute_all, n=387,045); per-frame max median\|ρ\| `0.7979` vs `ZIGZAG` (89 frames, 3/89 = 3.37% of frames ≥0.90). Verdict **SHIP** — `expected_verdict` (`docs/gate_e_ledger.py`) bands DISCLOSE/DISCLOSE_GAP/SHIP off the pooled max only (`0.6431 < 0.76`), and STRUCK needs pooled **or** per-frame-median ≥ 0.90, which neither hits. **No column STRUCK; nothing to revert.** Run facts (`meta.json`, all three): first run `pandas_ta_src_sha1 65bad80a99b94ab97145d275cf405f3c15916432` (accessor-only tree; outputs `is10-corwin_schultz-270316bb`, `is10-roll_spread-270316bb`, `is10-amihud-270316bb`, launcher run `20261030-003934-10`); re-run on the `Category`-wired tree `b2c48765dd9e28a04648eec21d19ec6c4a10e724` (outputs `is10-corwin_schultz-wired`, `is10-roll_spread-wired`, `is10-amihud-wired`), which is what the ledger rows record. Canary `AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`, `n_frames=89`, `pooled_bars=398849`. |
+| F Suites | this repo only | `python -m pytest -q` (2026-10-30, `Category`-wired tree with the three ledger rows): **2 failed / 3,319 passed / 83 skipped** — the two pre-existing failures only (`test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`, `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`, both CLAUDE.md "Known breaks"), neither naming `corwin_schultz`/`roll_spread`/`amihud`; `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` passes on the recorded rows. Parent repo's suite run by the launcher, not here. |
 
 ## Proxy overlap (NOT Gate E)
 
@@ -115,17 +113,6 @@ structure of the walk; this fixture does not test that directly.
 
 ## To close
 
-Gate E is measured (above): all three `SHIP`, none `STRUCK` — **nothing to revert**.
-What is left is pure wiring, blocked only by this receipt session's file permissions,
-not by any gate result:
-
-1. A session with write access to `docs/gate_e_ledger.csv` records the three rows
-   (`python docs/gate_e_ledger.py record <run dir> --measured 2026-10-30`, once per
-   module, from the launcher's three run directories), then adds the three to
-   `Category` (`pandas_ta/__init__.py`) and reinstates the `in ta.Category[...]`
-   assertions in `tests/test_amihud.py` / `test_corwin_schultz.py` / `test_roll_spread.py`
-   and the counts in `README.md`, `docs/IndicatorDictionary.md`, `docs/MLCompanionContract.md`
-   and `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL`/`CATEGORY_BUCKETS` — the same
-   follow-through `efc5499` reverted, now in the other direction.
-2. Both repos' suites green: this repo's `python -m pytest -q` result for this session
-   is in the Gate F row above; parent repo run by the launcher.
+Nothing is owed. Gates A-E are cleared and recorded, all three columns are `SHIP` and in
+`Category` with their `docs/gate_e_ledger.csv` rows, and this repo's suite shows only the two
+known breaks (Gate F row).

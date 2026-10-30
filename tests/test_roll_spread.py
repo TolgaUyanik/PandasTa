@@ -22,8 +22,7 @@ What these pin, in order of how much it would hurt to lose:
 * Gate C (synthetic): fires on 575 of 1200 bars; the autocovariance is
   non-negative (undefined) on 604 of 1179 post-warm-up bars (51.2%) --
   "common", as the issue says. Real-data counts are owed to Gate E.
-* Wiring: the accessor and the column name `ROLL_20`; held OUT of `Category`
-  on purpose until Gate E is measured (`docs/LiquidityMeasured.md`).
+* Wiring: `Category`, the accessor, and the column name `ROLL_20`.
 """
 import importlib
 import types
@@ -188,7 +187,7 @@ def test_name_registration_and_accessor():
     close = _walk(200)
     df = pd.DataFrame({"open": close, "high": close, "low": close,
                        "close": close, "volume": 1.0})
-    assert "roll_spread" not in ta.Category["volatility"]  # Gate E owed; accessor-only until measured
+    assert "roll_spread" in ta.Category["volatility"]
     out = df.ta.roll_spread()
     assert out.name == "ROLL_20"
     pd.testing.assert_series_equal(out, roll_spread(close))

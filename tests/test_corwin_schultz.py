@@ -29,8 +29,7 @@ What these pin, in order of how much it would hurt to lose:
   behaviour whenever a window's 2-day range is not much wider than its two
   single-day ranges, tick-rounded or not. Real-data BIST counts are owed to
   Gate E.
-* Wiring: the accessor and the column name `CS_1`; held OUT of `Category`
-  on purpose until Gate E is measured (`docs/LiquidityMeasured.md`).
+* Wiring: `Category`, the accessor, and the column name `CS_1`.
 """
 import importlib
 import types
@@ -227,7 +226,7 @@ def test_clip_engages_on_most_bars_measured():
 def test_name_registration_and_accessor():
     high, low = _ohlc(200)
     df = pd.DataFrame({"open": high, "high": high, "low": low, "close": (high + low) / 2, "volume": 1.0})
-    assert "corwin_schultz" not in ta.Category["volatility"]  # Gate E owed; accessor-only until measured
+    assert "corwin_schultz" in ta.Category["volatility"]
     out = df.ta.corwin_schultz()
     assert out.name == "CS_1"
     pd.testing.assert_series_equal(out, corwin_schultz(high, low))
