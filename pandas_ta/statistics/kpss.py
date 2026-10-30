@@ -8,7 +8,8 @@ from pandas_ta.utils import get_offset, verify_series
 def kpss(close, length=None, offset=None, **kwargs):
     """Indicator: KPSS trend-stationarity statistic (KPSS)"""
     # Validate Arguments
-    length = int(length) if length and length > 2 else 100
+    # Two OLS parameters: a 3-bar window is the constant 1/3, so require 4+
+    length = int(length) if length and int(length) > 3 else 100
     close = verify_series(close, length)
     offset = get_offset(offset)
 
@@ -64,8 +65,9 @@ straight line; large values mean it drifted away from one the way a random
 walk does. 0.146 is the 5% critical value of the "ct" test, 0.216 the 1%.
 
 Source: Kats tsfeatures (Meta, MIT), `get_unitroot_kpss`:
-`statsmodels.tsa.stattools.kpss(x, regression="ct", nlags=1)[0]`, after
-Kwiatkowski et al. (1992), J. Econometrics 54, eqs. 10-11. Kats applies it
+`statsmodels.tsa.stattools.kpss(x, regression="ct", nlags=1)[0]` (checked
+against statsmodels 0.15.0), after Kwiatkowski et al. (1992), J.
+Econometrics 54. Kats applies it
 to a whole series; the 100-bar window and log close as the input are the
 choices of the 2026-10-25 screen prototype (candidate kats_kpss_100,
 docs/issues/screen/ind_screen_r5.py, local to the owner's machine).
@@ -75,6 +77,10 @@ Causal: bar T reads bars T - length + 1 .. T. Scale-free: log price enters
 relative to the window's first bar, so a constant price factor cancels;
 bit-identical under x8 and x64. A window with a NaN, zero or negative close
 is NaN, and so is a flat window (zero residual variance).
+
+Memory: every window is held at once, about 8 * n * length bytes per
+intermediate array (80 MB at n = 20,000 bars, length = 100). To bound it on
+a long history, call it on chunks that each start length - 1 bars early.
 
 Calculation:
     Default Inputs:
@@ -88,7 +94,7 @@ Calculation:
 
 Args:
     close (pd.Series): Series of 'close's
-    length (int): Window. Default: 100
+    length (int): Window, at least 4. Default: 100
     offset (int): How many periods to offset the result. Default: 0
 
 Kwargs:

@@ -10,8 +10,7 @@ What these tests pin, in order of how much it would hurt to lose them:
   regression="ct", nlags=1)` -- the exact call Kats makes -- on every window
   of an 800-bar walk: max relative difference 2.2e-12 at length 100, 1.0e-12
   at length 30. statsmodels is not a CI dependency, so that test skips
-  there; an independent `lstsq` loop written from the paper's equations 10-11
-  runs everywhere, and so does a hand-computed window whose arithmetic is
+  there; an independent `lstsq` loop of the same formula runs everywhere, and so does a hand-computed window whose arithmetic is
   shown (`[0, 1, 0, 2]` -> 0.25).
 * CAUSALITY by future-perturbation: rewrite every close from `j` onward
   (another walk, a x1000 future), demand bars `[0:j]` bit-identical with
@@ -20,7 +19,8 @@ What these tests pin, in order of how much it would hurt to lose them:
   early, and the window read one bar ahead -- are each proved live, then
   caught at 31 of 31.
 * SCALE-FREE: on the seed-11 walk, close x8 and x64 are bit-identical, x10
-  and x3.7 differ by at most 1.1e-14 and 8.6e-15 relative, NaN masks match.
+  and x3.7 differ by at most 1.08e-14 and 8.54e-15 relative (asserted
+  <= 1e-13), NaN masks match.
   Not constant: 1,101 distinct values over the 1,101 non-warm-up bars, range
   0.0865 to 1.0744, none zero.
 * WHAT IT MEASURES: over 200 synthetic 100-bar windows each, a random walk
@@ -30,7 +30,8 @@ What these tests pin, in order of how much it would hurt to lose them:
   autocorrelation, a property of the source formula, not of this port.
 * EDGES: a flat window and a non-positive close are NaN, never inf; a NaN
   close blanks its own bar and the next `length - 1` (100 bars at the
-  default); the 99-bar warm-up; `offset`, `fillna`.
+  default); the 99-bar warm-up; `offset`, `fillna`; `length` below 4
+  (including 3.5, which truncates to 3) falls back to 100.
 * Wiring: `Category`, the accessor, the column name `KPSS_100`.
 """
 import importlib
@@ -52,7 +53,7 @@ def _walk(n=1200, seed=11):
 
 
 def _reference(close, length):
-    """Kwiatkowski et al. (1992) eqs. 10-11 with one lag, by `lstsq` per window."""
+    """The statsmodels `kpss(regression="ct", nlags=1)` formula, by `lstsq` per window."""
     lc = np.log(np.asarray(close, dtype=float))
     out = np.full(len(lc), np.nan)
     design = np.column_stack([np.ones(length), np.arange(1, length + 1)])
@@ -96,7 +97,7 @@ def test_matches_statsmodels_the_source_call(length):
     np.testing.assert_allclose(out.values[length - 1:], ref, rtol=1e-10)
 
 
-@pytest.mark.parametrize("length", [100, 30, 3])
+@pytest.mark.parametrize("length", [100, 30, 5])
 def test_matches_an_independent_loop(length):
     close = _walk(400)
     out = kpss(close, length=length)
@@ -145,7 +146,10 @@ def test_edge_cases():
     gap = kpss(cn)
     assert gap[500:600].isna().all() and gap[600:].notna().all()
     assert int(gap.isna().sum()) == 99 + 100
-    assert kpss(close, length=2).name == "KPSS_100"  # length must exceed 2
+    # length must be 4+: a 3-bar window is the constant 1/3; 3.5 truncates to 3
+    for bad in (2, 3, 3.5):
+        assert kpss(close, length=bad).name == "KPSS_100"
+    assert kpss(close, length=4.9).name == "KPSS_4"
     pd.testing.assert_series_equal(kpss(close, offset=1), base.shift(1))
     assert kpss(close, fillna=0).isna().sum() == 0
     assert kpss(close.iloc[:50]) is None  # shorter than the window
@@ -223,14 +227,16 @@ def test_price_scale_is_bit_identical(k):
     assert (base[m] == scaled[m]).all()
 
 
-@pytest.mark.parametrize("k, bound", [(10.0, 1.1e-14), (3.7, 8.6e-15)])
-def test_price_scale_within_tolerance(k, bound):
+@pytest.mark.parametrize("k", [10.0, 3.7])
+def test_price_scale_within_tolerance(k):
     close = _walk()
     base, scaled = kpss(close), kpss(close * k)
     assert (base.isna() == scaled.isna()).all()
     m = base.notna()
-    # the bounds the docstring and KpssMeasured.md quote (measured 1.08e-14 / 8.54e-15)
-    assert ((scaled[m] - base[m]).abs() / base[m].abs()).max() <= bound
+    # measured 1.08e-14 (x10) and 8.54e-15 (x3.7) on numpy 2.5.4; the bound
+    # leaves ~10x headroom for other numpy/BLAS builds (CI runs 1.26.4) while
+    # still failing on anything coarser than float rounding of the ratio
+    assert ((scaled[m] - base[m]).abs() / base[m].abs()).max() <= 1e-13
 
 
 def test_column_is_not_constant():
