@@ -1,10 +1,7 @@
 # cusum — measured
 
-> **Status: Gates A, B and D pass; C and E are owed (issue [#16](https://github.com/TolgaUyanik/PandasTa/issues/16)).**
-> Gate E and Gate C's real-data counts need the private Backtesting engine and the BIST cache,
-> which the author's machine does not have. Until a Gate E run is recorded in
-> `docs/gate_e_ledger.csv`, `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-> fails on this branch, and that is the one failure (see Gate F). Merging is the owner's call.
+> **Status: Gates A, B and D pass; Gate E is DISCLOSE (0.7767 vs `dist_low_60`); C is owed (issue [#16](https://github.com/TolgaUyanik/PandasTa/issues/16)).**
+> Gate E was run on 2026-10-31 and is recorded in `docs/gate_e_ledger.csv`. Merging is the owner's call.
 
 `CUSUM_100` is the Chu-Stinchcombe-White CUSUM statistic on log close, with the supremum taken over
 the last 100 reference bars. For each reference bar `n`, the log change from `n` to the current bar
@@ -53,14 +50,14 @@ shipped. Shipped columns that this one may overlap on real data, because without
 `sqrt(t - n)` weights the supremum over `n` of `y_t - y_n` would be the log distance above the
 window's low: position-in-range oscillators (`stoch`,
 `willr`), `zscore`, and the trend-persistence columns `cti` and `er`. How much it overlaps any of
-them is what Gate E measures; nothing was measured here. Issue #16 found no overlap in the fork or
+them is what Gate E measures (see E). Issue #16 found no overlap in the fork or
 the manifest; that was a search, not a correlation.
 
 ⚠ **Ties.** Issue #16 says CUSUM is persistence-adjacent: #4 (HLIFE) blocks `hurst`,
 `variance_ratio` and a rolling ADF until HLIFE-3 reports, CUSUM is not on that list, but it should
 also be measured against HLIFE's survivor once one exists. HLIFE has no survivor yet (#4 is
-waiting on its own Gate E), so that comparison is owed. `kpss` (#157, PR #209, not merged) is in
-the same family; whichever of the two merges second should be measured against the other.
+waiting on its own Gate E), so that comparison is owed. `kpss` (#157, PR #209, merged first) is in
+the same family, so this port should be measured against it; that comparison is still owed (`kpss` is not among Gate E's 687 comparators).
 
 ## Gates
 
@@ -75,7 +72,7 @@ numpy 2.4.2. `tests/test_cusum.py` passes in both: 17 of 17. The synthetic numbe
 | B | Future perturbation at 31 offsets, with two futures (another walk, and the same walk ×1000). The real module leaks at 0 of 31. Two one-bar look-ahead mutants (`importlib` source read, `exec`'d in memory) are each shown to change the output, then caught at 31 of 31: the output written one bar early (`values[length - 1:-1]`), and the window read one bar ahead. There is no recursive stage, so the taint reach is exactly the `length + 1`-close window. |
 | C | **Owed.** Real-data counts come from the Gate E run. Synthetic: 1,100 non-NaN bars, 1,100 distinct values, none zero, 27 negative, range -0.737 to 3.771. |
 | D | Close ×8 and ×64 are bit-identical. ×10 and ×3.7 differ by at most 1.6e-14 and 1.7e-14 absolute; the test asserts ≤ 1e-12. Absolute, not relative, because the column crosses zero. NaN masks match in all four. The column is continuous, so `0 < fires < n` is replaced by nunique = 1,100 of 1,100 non-NaN bars (see C). |
-| E | **Owed.** From `../Backtesting/Backtesting`, with `issue-16-cusum` checked out as the PandasTa sibling (`record` checks the run's `pandas_ta_src_sha1` against this tree): `python scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.cusum --name <run name>`, then `python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`. No prototype measurement exists for this candidate. |
+| E | **DISCLOSE** (0.76 ≤ ρ < 0.80). `CUSUM_100` max \|ρ\| 0.7767 vs `dist_low_60` (`compute_all`, n = 389,949; per-frame median 0.7874), 89 frames / 398,849 bars / 687 comparators. Run `is16-cusum-abf8a36` on 2026-10-31 against this branch merged with `dev`; row in `docs/gate_e_ledger.csv`. |
 | F | **No regressions in this repo** (below). Backtesting not run. |
 
 ### Gate F (2026-10-30, the author's machine, `.venv-pd2`)
@@ -86,7 +83,7 @@ Run with CI's two `--deselect`s:
 * this branch: 1 failed, 3275 passed, 83 skipped. The +17 passes are `tests/test_cusum.py`.
 
 The one failure is `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, for
-`cusum`, and it clears when the Gate E row lands.
+`cusum`; it cleared when the Gate E row landed (2026-10-31).
 
 ## Dictionary row provenance
 
