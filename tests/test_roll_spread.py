@@ -21,7 +21,7 @@ What these pin, in order of how much it would hurt to lose:
   4.2e-13).
 * Gate C (synthetic): fires on 575 of 1200 bars; the autocovariance is
   non-negative (undefined) on 604 of 1179 post-warm-up bars (51.2%) --
-  "common", as the issue says. Real-data counts are owed to Gate E.
+  "common", as the issue says. Real-data counts: docs/LiquidityMeasured.md, Gate C.
 * Wiring: `Category`, the accessor, and the column name `ROLL_20`.
 """
 import importlib

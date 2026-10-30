@@ -27,8 +27,8 @@ What these pin, in order of how much it would hurt to lose:
   1027 of 1199 (85.6%), effectively unchanged. On this fixture the clip is
   NOT primarily a tick-rounding artifact; it is Corwin-Schultz's own
   behaviour whenever a window's 2-day range is not much wider than its two
-  single-day ranges, tick-rounded or not. Real-data BIST counts are owed to
-  Gate E.
+  single-day ranges, tick-rounded or not. Real-data BIST counts:
+  docs/LiquidityMeasured.md, Gate C.
 * Wiring: `Category`, the accessor, and the column name `CS_1`.
 """
 import importlib

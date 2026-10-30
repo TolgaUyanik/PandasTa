@@ -6,8 +6,8 @@ existing columns.
     python docs/measure_liq_proxy.py
 
 Synthetic walks with fixed seeds -- a PROXY, not Gate E, which needs the
-parent repo's production column set and the 89 real BIST frames (owed,
-pending the issue-solver launcher).
+parent repo's production column set and the 89 real BIST frames (measured:
+docs/LiquidityMeasured.md, Gate E).
 """
 import sys
 from pathlib import Path
