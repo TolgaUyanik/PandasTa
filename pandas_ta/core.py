@@ -1686,6 +1686,13 @@ class AnalysisIndicators(BasePandasObject):
         result = median(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def median_ad_hl2(self, length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = median_ad_hl2(high=high, low=low, close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def quantile(self, length=None, q=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = quantile(close=close, length=length, q=q, offset=offset, **kwargs)

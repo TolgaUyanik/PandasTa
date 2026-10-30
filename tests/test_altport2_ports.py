@@ -164,7 +164,7 @@ REGISTERED = {
 #: under waivers #23 / #22). Pinned, not computed,
 #: precisely so an accidental Category edit fails here instead of shipping
 #: silently.
-CATEGORY_TOTAL = 237
+CATEGORY_TOTAL = 238  # +1: J-MEDIAN-AD-5 added `median_ad_hl2` to statistics (#119)
 CATEGORY_BUCKETS = {"trend": 58, "volatility": 20, "volume": 24}
 
 #: Gate E, re-measured on the SHIPPED columns over 89 BIST_100 daily frames /
