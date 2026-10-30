@@ -26,9 +26,9 @@ What these tests pin, in order of how much it would hurt to lose them:
 * CORRECTNESS against an independent loop written from the TSFEL formula
   text, not from the module, and a constant-log-return hand check.
 * BOUND: a median of absolute values is non-negative by construction.
-* Wiring: the accessor, the column name `MEDABSDIFF_20`, and the `Category`
-  entry (restored 2026-10-30 once the Gate E ledger row was recorded SHIP;
-  see `docs/TfMedianAbsdiff20Measured.md`).
+* Wiring: the accessor and the column name `MEDABSDIFF_20`; `Category` entry
+  is withheld on purpose until Gate E has a ledger row (see
+  `docs/TfMedianAbsdiff20Measured.md`).
 """
 import importlib
 import types
@@ -204,8 +204,9 @@ def test_name_registration_and_accessor():
     close = _walk(200)
     df = DataFrame({"open": close, "high": close, "low": close,
                     "close": close, "volume": 1.0})
-    # Gate E ledger row recorded 2026-10-30, SHIP 0.7422 vs natr -- back in Category.
-    assert "tf_median_absdiff_20" in ta.Category["volatility"]
+    # Out of `Category` on purpose until the Gate E ledger has a row for it
+    # (`tests/test_gate_e_ledger.py`); the accessor is wired regardless.
+    assert "tf_median_absdiff_20" not in ta.Category["volatility"]
     out = df.ta.tf_median_absdiff_20()
     assert out.name == "MEDABSDIFF_20"
     pd.testing.assert_series_equal(out, tf_median_absdiff_20(close))

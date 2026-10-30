@@ -1,7 +1,8 @@
 # Median Absolute Daily Log Return — measured (`tf_median_absdiff_20`)
 
-**Status: SHIPPED 2026-10-30. Gates A-F all cleared** — Gate E ledger row recorded
-2026-10-30 (SHIP, max |ρ| 0.7422 vs `natr`), back in `Category`.
+**Status: BUILT 2026-10-30. Gates A, B and D cleared; C synthetic only; Gate E pending, run by
+issue-solver after this session; F not yet confirmed by both repos (see below).**
+If Gate E strikes it, revert and keep this file as the receipt.
 
 **2026-10-30, same-day follow-up:** `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
 failed on this branch because `tf_median_absdiff_20` entered `Category` with no ledger row (the
@@ -16,23 +17,6 @@ records a ledger row — `df.ta.tf_median_absdiff_20()` and `ta.tf_median_absdif
 `docs/IndicatorDictionary.md`'s probe table while out of `Category`, same mechanism as `beta` /
 `up_and_down_volume`). This is a narrower fix than a full revert: nothing here says the gates
 failed, only that this session cannot clear Gate E.
-
-**2026-10-30, receipt session:** the issue-solver launcher ran Gate E on the port (run
-`is118-tf_median_absdiff_20-888ff065`, `meta.json`: 89 frames, 397,069 bars pooled, canary
-"AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal"). `MEDABSDIFF_20` measured max |ρ| **0.7422**
-against `natr` (`compute_all`, n = 397,069), per-frame max median **0.7337** against the same
-comparator, 0% of the 89 frames at or above 0.90 pooled → **SHIP** (CLAUDE.md's band: SHIP < 0.76;
-this is the port's own measurement, slightly below the prototype's screen-level 0.7422 against the
-same comparator — the two agree to four decimal places even though the port and the prototype
-compute the log-return differently in floating point, see Gate D). Recorded with
-`python docs/gate_e_ledger.py record <run dir> --measured 2026-10-30` into
-`docs/gate_e_ledger.csv`. The `Category` entry is restored (`pandas_ta/__init__.py`), the wiring
-test flipped back (`tests/test_tf_median_absdiff_20.py::test_name_registration_and_accessor`),
-`CATEGORY_TOTAL`/`CATEGORY_BUCKETS` in `tests/test_altport2_ports.py` bumped 237 -> 238 /
-volatility 20 -> 21, `docs/IndicatorDictionary.md` regenerated (238 in `Category`, volatility
-(21), 571 tagged columns / 217 `SF`), and README / `docs/MLCompanionContract.md` updated to match.
-Gate C's real-data counts are still open (synthetic only, see below) — not required by the
-issue's Done-when, which asks for Gates A-F and the Gate E numbers, both now met.
 
 Column `MEDABSDIFF_20`: the rolling 20-bar median of the absolute bar-to-bar log return — a
 robust (outlier-resistant) realised-volatility measure, in the same spirit as `natr` but built
@@ -76,7 +60,7 @@ Synthetic numbers are a 1,200-bar GBM walk, σ = 0.02, seed 11, 0.05 tick, the s
 | B Causality | 31-offset future-perturbation sweep (`test_real_module_never_reads_the_future`): the real module leaks at 0 of 31 offsets. The catching mutant shifts the log-return series 10 bars into the future (`importlib`-read source, `exec`'d in memory) and is caught at 31 of 31 (`test_mutant_is_caught`). ⚠ A naive 1-bar-ahead shift is a genuine look-ahead (proved live — differs from the real module) but is caught at only 17 of the same 31 offsets, documented and pinned by `test_one_bar_future_read_is_only_partially_caught`: median is a robust statistic, so replacing exactly one of the 20 window values changes the median's rank only part of the time. A test that checked a single offset with the naive mutant would have better-than-even odds of reading a real leak as "causal" — the CANDLE-1 / `smc_sweep` escape, reproduced here by construction rather than found by accident, which is why the 10-bar mutant is the one `test_mutant_is_caught` requires at 31/31. |
 | C Reachability | Synthetic only: on the seed-11 walk, 1,180 of 1,200 bars finite (20-bar warm-up), all 1,180 non-zero, range [0.004214, 0.025018], mean 0.013706. **Real-data counts owed** — the BIST frames are in the Backtesting repo, out of scope for this session. |
 | D Scale-free | ×8 and ×64 bit-identical with matching NaN masks — achieved by computing `log(close / close.shift(1))` as a single log of a ratio (exact under a power-of-two rescale in IEEE float) rather than `log(close).diff()`, whose two separate logs cancel the `log(k)` term only to within a few ulp, not bit-exactly. The rejected `log(close).diff()` form is kept as a non-shipped comparison block in `docs/measure_tf_median_absdiff_20.py` (run it to reproduce): max|diff| 8.882e-16 at ×8, 1.776e-15 at ×64 — small, but not the exact 0 the shipped ratio form achieves, which is what CLAUDE.md's Gate D asks for. ×10 and ×3.7 within 2.2e-16 (tighter than CLAUDE.md's 1e-12 bar, because the ratio form has no subtraction to lose precision in). `0 < fires < n` (1,180 of 1,200) plus > 100 distinct values and a non-constant column (`test_column_is_not_constant`), so a degenerate pass cannot sneak through. A flat price run (all-zero log-return window) is pinned to read exactly 0, not NaN or an error (`test_flat_price_run_reads_zero_not_nan`) — unlike `tf_centroid_20`, there is no division here, so no NaN guard is needed for this case. |
-| E Attribution | **SHIP.** Measured 2026-10-30 by the issue-solver launcher: `MEDABSDIFF_20` max \|ρ\| **0.7422** against `natr` (`compute_all`, n = 397,069), per-frame max median **0.7337** against `natr`, 89 frames, 0% ≥ 0.90. Below CLAUDE.md's SHIP line (< 0.76). Recorded in `docs/gate_e_ledger.csv` (`python docs/gate_e_ledger.py record`, run `is118-tf_median_absdiff_20-888ff065`, measured 2026-10-30). |
+| E Attribution | **Pending, run by issue-solver after this session.** From `../Backtesting/Backtesting`: `python scripts/analysis/gate_e_overlap.py run --module pandas_ta.volatility.tf_median_absdiff_20 --name tf_median_absdiff_20`, then record with `python docs/gate_e_ledger.py record`. |
 | F Suites | See below. |
 
 ### Gate F, this repo (re-measured 2026-10-30 after the `Category`-withholding follow-up,
@@ -96,9 +80,8 @@ first version of this port registered `tf_median_absdiff_20` in `Category` with 
 the same day by withholding the `Category` entry — see the follow-up note at the top of this
 file.
 
-`tests/test_tf_median_absdiff_20.py` itself: 14 passed (its wiring test now asserts the `Category`
-entry is present, not withheld). The Backtesting repo's suite is run by the issue-solver launcher,
-not in this worktree.
+`tests/test_tf_median_absdiff_20.py` itself: 14 passed. The Backtesting repo's suite was not run
+here — Gate E and both suites are run by the issue-solver launcher after this session.
 
 **Disclosed, pre-existing issue found while running tests, not introduced by this port:**
 `pandas_ta.core.AnalysisIndicators.strategy()` (`pandas_ta/core.py`, `_indicators_by_category`)
@@ -115,12 +98,19 @@ is why the whole-suite number above is clean. Out of scope for this port (unrela
 pre-existing on `dev`, not something this session introduced or was asked to fix) — recorded here
 for whoever next touches `strategy()` or `Category`-pinned tests.
 
-## Closed
+## To close
 
-Gate E ran SHIP (0.7422 < 0.76) and is recorded in `docs/gate_e_ledger.csv`. `tf_median_absdiff_20`
-is back in `Category`, the wiring test, counts, dictionary and README/`MLCompanionContract` are
-updated to match (see the 2026-10-30 receipt-session note above). Gate C's real-data counts (the
-BIST frames the Gate E run touched) are still open, as a follow-up — out of scope for this
-worktree, which has no access to the Backtesting repo's frame cache. Both repos' suites: this
-repo's is green modulo the two known, pre-existing failures above; the Backtesting repo's suite is
-run by the issue-solver launcher.
+1. Run Gate E on the port (not the prototype) and record it with `docs/gate_e_ledger.py record`.
+2. Apply CLAUDE.md's thresholds (SHIP < 0.76, DISCLOSE 0.76–0.80, DISCLOSE_GAP 0.80–0.90, STRUCK
+   ≥ 0.90 pooled or per-frame median). The prototype's screen-level measurement (0.7422 vs `natr`)
+   sits just inside SHIP; the port must be re-measured on its own, since the prototype and the
+   module compute the log-return differently in floating point (see Gate D).
+3. On SHIP/DISCLOSE/DISCLOSE_GAP: add `tf_median_absdiff_20` back to `Category`
+   (`pandas_ta/__init__.py`, volatility list), flip `tests/test_tf_median_absdiff_20.py`'s
+   `test_name_registration_and_accessor` assertion back to `in`, bump `CATEGORY_TOTAL` /
+   `CATEGORY_BUCKETS["volatility"]` in `tests/test_altport2_ports.py` by 1, regenerate
+   `docs/IndicatorDictionary.md`, and restore the README / `MLCompanionContract` counts this
+   follow-up reverted. On STRUCK with no waiver: delete the module, its exports, accessor, tests,
+   and leave the counts as they are now (already excluding it), and keep this file.
+3. Fill Gate C from the same real frames the Gate E run touches.
+4. Run both repos' suites.
