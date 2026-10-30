@@ -1,9 +1,9 @@
 # Temporal Centroid of Squared Returns — measured (`tf_centroid_20`)
 
-> **Status: Gates A, B, D measured (pass). Gate C synthetic only. Gate E PENDING — run by
-> issue-solver after this session. Gate F: this repo's suite has 3 failures, 2 pre-existing
-> and unrelated plus 1 new and expected — caused by this port, not a regression (see below);
-> Backtesting not run here.**
+> **Status: Gates A, B, D, E measured (pass — SHIP). Gate C synthetic + real-data fire count
+> from the Gate E run. Gate F: this repo's suite has 3 failures, 2 pre-existing and unrelated
+> plus 1 new and expected — caused by this port, not a regression (see below); Backtesting not
+> run here.**
 
 `TFCENTROID_20 = sum(t * ret^2) / sum(ret^2)` over the last 20 bars, `ret` = simple returns,
 `t = 0..19` rescaled to `0..1` (oldest bar = 0, current bar = 1). Issue
@@ -81,9 +81,9 @@ needed for this module. Synthetic numbers are from `tests/test_tf_centroid_20.py
 |---|---|---|
 | A Correctness | pass — checked against the TSFEL source formula (not the prototype) and an independent loop | `test_hand_computed` (hand-computed 4-bar window, length=4); `test_matches_an_independent_loop`, a bar-by-bar Python loop reproducing `sum(t*ret^2)/sum(ret^2)` directly from the formula, `rtol=1e-12` against the vectorized module over 1,180 bars; `test_bounded_0_1`, every finite value in `[0, 1]` (true by construction: a convex combination of `t` values, which live in `[0, 1]`) |
 | B Causality | pass | Future-perturbation at 31 offsets (`j = 60..1094` step 34), two futures per offset (an independent walk, and the same walk ×1000): real module leaks at **0 of 31**. One one-bar look-ahead mutant (`close.shift(-1)` feeding the return calc, via `importlib`-read source + `exec`) is shown live (differs from the real module) then caught at **31 of 31** |
-| C Reachability | synthetic only — real-data counts owed from the Gate E run | On the 1,200-bar walk: 1,180 of 1,180 post-warm-up bars finite (20-bar warm-up, matching `length`), **1,180 distinct values**, range **0.2270 .. 0.7640**, mean **0.5007**, median **0.5015** (close to the 0.5 "evenly spread energy" midpoint, as expected for return noise with no particular time clustering) |
+| C Reachability | synthetic + real | Synthetic, 1,200-bar walk: 1,180 of 1,180 post-warm-up bars finite (20-bar warm-up, matching `length`), **1,180 distinct values**, range **0.2270 .. 0.7640**, mean **0.5007**, median **0.5015**. Real, from the Gate E run below: **397,069 of 398,849 pooled bars finite** (non-zero on all of those), 89 frames |
 | D Scale-free | pass | Price ×8 / ×64: **bit-identical** (measured exactly, not assumed — the returns ratio cancels the uniform price scale before squaring). Price ×10 / ×3.7: max relative error **6.633e-15** / **6.076e-15** (test asserts `<= 1e-13`, two orders of margin above the measured value). NaN masks match in all four. `0 < fires < n`: 1,180 of 1,200 (not constant: 1,180 distinct values, see Gate C) |
-| E Attribution | **PENDING** — run by issue-solver after this session, via `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.tf_centroid_20 --name tf_centroid_20`. The issue's own prototype-stage numbers (not a Gate E run on this port, and not re-verified in this session): max \|ρ\| **0.5943** vs `ATR_Ratio_5_20_Pctl` (manifest, n = 391,818), top-5 per-frame max median 0.5946 → prototype verdict SHIP (run `screen_r2_20261024`, 89 ALTPORT-1 frames, 398,849 bars, 687 comparators, canary bit-equal). Next comparators: `ATR_Ratio_5_20` 0.5900, `ATR_Ratio_5_20_State` 0.5644. Fork overlap (stage 2, not Gate E, 12 frames, scale-free `Category` defaults): max \|ρ\| 0.6167 vs `cvi:CVI_10_10`, per-frame max median 0.6195 — not a restatement at the 0.90 line |
+| E Attribution | **measured, 2026-10-30, SHIP** — run via `gate_e_overlap.py run --module pandas_ta.statistics.tf_centroid_20`, recorded in `docs/gate_e_ledger.csv`. `TFCENTROID_20`: max \|ρ\| **0.5943** vs `ATR_Ratio_5_20_Pctl` (manifest comparator set, n = 391,818 pooled bars), per-frame max median \|ρ\| **0.5946** (89 frames, 0% of frames ≥ 0.90) → verdict **SHIP** (bands: SHIP < 0.76 pooled and per-frame-median). 687 comparators (329 `compute_all` + 358 manifest), 398,849 pooled bars across 89 ALTPORT-1 frames, canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS. Against `compute_all` alone: max \|ρ\| 0.4919 vs `CHOP`, n = 396,311. This matches the issue's prototype-stage number (0.5943) almost exactly — the port reproduces the prototype's measured overlap |
 | F Suites | this repo: 3 failed / 3,272 passed / 83 skipped at this branch's head. **Two are pre-existing, unrelated to this port**: `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` (needs the sibling `../AlternativeRepos` checkout) and `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (CLAUDE.md's documented known break, `docs/pine/` untracked) — both fail identically on a clean checkout of this branch's base, before this port. **The third is new and expected, caused directly by this port, not a regression**: `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails because `tf_centroid_20` just entered `Category` with no ledger row — it has none because Gate E is deferred to the launcher; the ledger row is added by the Gate E receipt session once that run exists. Before this port, that test is green. Backtesting's suite not run from this session (no access to that worktree) |
 
 ## Wiring
@@ -97,16 +97,7 @@ needed for this module. Synthetic numbers are from `tests/test_tf_centroid_20.py
 216 → 217 `SF`. `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL` 237 → 238 (its own
 per-bucket counts, `trend`/`volatility`/`volume`, are untouched by this port).
 
-## To close
+## Closed
 
-1. Run Gate E on the port (`pandas_ta.statistics.tf_centroid_20`), record it in
-   `docs/gate_e_ledger.csv`, and fill in the measured max \|ρ\|, comparator and sample
-   size above in place of "PENDING".
-2. Fill Gate C from the same real frames.
-3. Apply CLAUDE.md's bands (SHIP < 0.76, DISCLOSE 0.76-0.80, DISCLOSE_GAP 0.80-0.90,
-   STRUCK ≥ 0.90 pooled or per-frame-median). The prototype's own number (0.5943) sits
-   well inside SHIP, but that was measured on the prototype, not the shipped column, and
-   is not a substitute for the port's own run.
-4. On a revert, delete the module, the export, the `Category` entry, the accessor and
-   the tests, undo the README/dictionary/contract count edits, and keep this file as the
-   receipt.
+Gate E measured 2026-10-30 on the port itself (not the prototype): max \|ρ\| 0.5943,
+well inside SHIP (< 0.76 pooled and per-frame-median). Shipped as-is; no revert needed.
