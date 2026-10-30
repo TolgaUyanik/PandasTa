@@ -71,7 +71,7 @@ Category = {
     "performance": ["log_return", "percent_return", "trend_return"],
     # Statistics
     "statistics": [
-        "entropy", "kurtosis", "mad", "median", "quantile", "skew", "stdev",
+        "entropy", "kpss", "kurtosis", "mad", "median", "quantile", "skew", "stdev",
         "variance", "zscore",
         "rolling_sum", "normalize", "covariance"
     ],

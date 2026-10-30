@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from .entropy import entropy
+from .kpss import kpss
 from .kurtosis import kurtosis
 from .mad import mad
 from .median import median
