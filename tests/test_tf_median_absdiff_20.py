@@ -204,9 +204,8 @@ def test_name_registration_and_accessor():
     close = _walk(200)
     df = DataFrame({"open": close, "high": close, "low": close,
                     "close": close, "volume": 1.0})
-    # Out of `Category` on purpose until the Gate E ledger has a row for it
-    # (`tests/test_gate_e_ledger.py`); the accessor is wired regardless.
-    assert "tf_median_absdiff_20" not in ta.Category["volatility"]
+    # In `Category` since its Gate E ledger row was recorded (SHIP, 0.7422 vs natr).
+    assert "tf_median_absdiff_20" in ta.Category["volatility"]
     out = df.ta.tf_median_absdiff_20()
     assert out.name == "MEDABSDIFF_20"
     pd.testing.assert_series_equal(out, tf_median_absdiff_20(close))

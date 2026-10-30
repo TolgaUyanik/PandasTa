@@ -163,21 +163,19 @@ REGISTERED = {
 #: (all four measured in docs/gate_e_ledger.csv; pfe and KFT_VEL are STRUCK, kept
 #: under waivers #23 / #22), -> 240 by LIQ (issue #10: `corwin_schultz` and
 #: `roll_spread` into volatility, `amihud` into volume; Gate E SHIP, in the ledger).
-#: `tf_median_absdiff_20` (issue #118) ships as a module and accessor but stays
-#: OUT of `Category` until its Gate E ledger row is recorded
-#: (`tests/test_gate_e_ledger.py`), so it does not count here. -> 241 by adxr
-#: (Gate E pending; revert with the port if it does not clear), -> 242 by
+#: -> 241 by adxr (Gate E DISCLOSE_GAP, 0.8838, in the ledger), -> 242 by
 #: tf_centroid_20 (statistics; Gate E measured, SHIP, 0.5943 vs
 #: ATR_Ratio_5_20_Pctl, see docs/TfCentroid20Measured.md), -> 243 by
 #: median_ad_hl2 (statistics, #119), -> 244 by kpss (#157, Gate E SHIP,
 #: 0.2256, in the ledger), -> 245 by cusum (#16, Gate E DISCLOSE,
 #: 0.7767, in the ledger), -> 246 by gapm (Gate E SHIP, 0.3738,
 #: in the ledger), -> 247 by max_return (#12, Gate E SHIP,
-#: 0.6716, in the ledger). Pinned, not
+#: 0.6716, in the ledger), -> 248 by tf_median_absdiff_20 (#118, volatility;
+#: Gate E SHIP, 0.7422, in the ledger). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
-CATEGORY_TOTAL = 247
-CATEGORY_BUCKETS = {"trend": 59, "volatility": 22, "volume": 25}
+CATEGORY_TOTAL = 248
+CATEGORY_BUCKETS = {"trend": 59, "volatility": 23, "volume": 25}
 
 #: Gate E, re-measured on the SHIPPED columns over 89 BIST_100 daily frames /
 #: 408,253 bars against 496 comparators. See docstring item 4.
