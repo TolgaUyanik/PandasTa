@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from .ad import ad
 from .adosc import adosc
+from .amihud import amihud
 from .aobv import aobv
 from .avwap_z import avwap_z
 from .bw_mfi import bw_mfi
