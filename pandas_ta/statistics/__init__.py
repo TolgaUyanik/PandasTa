@@ -3,6 +3,7 @@ from .entropy import entropy
 from .kurtosis import kurtosis
 from .mad import mad
 from .median import median
+from .median_ad_hl2 import median_ad_hl2
 from .quantile import quantile
 from .skew import skew
 from .stdev import stdev
