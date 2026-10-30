@@ -1,9 +1,8 @@
 # Temporal Centroid of Squared Returns — measured (`tf_centroid_20`)
 
 > **Status: Gates A, B, D, E measured (pass — SHIP). Gate C synthetic + real-data fire count
-> from the Gate E run. Gate F: this repo's suite has 3 failures, 2 pre-existing and unrelated
-> plus 1 new and expected — caused by this port, not a regression (see below); Backtesting not
-> run here.**
+> from the Gate E run. Gate F: this repo's suite has 2 failures, both pre-existing and
+> unrelated (see below); Backtesting not run here.**
 
 `TFCENTROID_20 = sum(t * ret^2) / sum(ret^2)` over the last 20 bars, `ret` = simple returns,
 `t = 0..19` rescaled to `0..1` (oldest bar = 0, current bar = 1). Issue
@@ -84,7 +83,7 @@ needed for this module. Synthetic numbers are from `tests/test_tf_centroid_20.py
 | C Reachability | synthetic + real | Synthetic, 1,200-bar walk: 1,180 of 1,180 post-warm-up bars finite (20-bar warm-up, matching `length`), **1,180 distinct values**, range **0.2270 .. 0.7640**, mean **0.5007**, median **0.5015**. Real, from the Gate E run below: **397,069 of 398,849 pooled bars finite** (non-zero on all of those), 89 frames |
 | D Scale-free | pass | Price ×8 / ×64: **bit-identical** (measured exactly, not assumed — the returns ratio cancels the uniform price scale before squaring). Price ×10 / ×3.7: max relative error **6.633e-15** / **6.076e-15** (test asserts `<= 1e-13`, two orders of margin above the measured value). NaN masks match in all four. `0 < fires < n`: 1,180 of 1,200 (not constant: 1,180 distinct values, see Gate C) |
 | E Attribution | **measured, 2026-10-30, SHIP** — run via `gate_e_overlap.py run --module pandas_ta.statistics.tf_centroid_20`, recorded in `docs/gate_e_ledger.csv`. `TFCENTROID_20`: max \|ρ\| **0.5943** vs `ATR_Ratio_5_20_Pctl` (manifest comparator set, n = 391,818 pooled bars), per-frame max median \|ρ\| **0.5946** (89 frames, 0% of frames ≥ 0.90) → verdict **SHIP** (bands: SHIP < 0.76 pooled and per-frame-median). 687 comparators (329 `compute_all` + 358 manifest), 398,849 pooled bars across 89 ALTPORT-1 frames, canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS. Against `compute_all` alone: max \|ρ\| 0.4919 vs `CHOP`, n = 396,311. This matches the issue's prototype-stage number (0.5943) almost exactly — the port reproduces the prototype's measured overlap |
-| F Suites | this repo: 3 failed / 3,272 passed / 83 skipped at this branch's head. **Two are pre-existing, unrelated to this port**: `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` (needs the sibling `../AlternativeRepos` checkout) and `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (CLAUDE.md's documented known break, `docs/pine/` untracked) — both fail identically on a clean checkout of this branch's base, before this port. **The third is new and expected, caused directly by this port, not a regression**: `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails because `tf_centroid_20` just entered `Category` with no ledger row — it has none because Gate E is deferred to the launcher; the ledger row is added by the Gate E receipt session once that run exists. Before this port, that test is green. Backtesting's suite not run from this session (no access to that worktree) |
+| F Suites | this repo: 2 failed / 3,280 passed / 83 skipped at this branch's head (launcher's `tests.md`, HEAD). **Both pre-existing, unrelated to this port**: `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` (needs the sibling `../AlternativeRepos` checkout) and `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (CLAUDE.md's documented known break, `docs/pine/` untracked) — both fail identically on a clean checkout of this branch's base, before this port. `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` passes: the `tf_centroid_20` row shipped in `docs/gate_e_ledger.csv` in this same commit series. Backtesting's suite not run from this session (no access to that worktree) |
 
 ## Wiring
 
@@ -100,4 +99,6 @@ per-bucket counts, `trend`/`volatility`/`volume`, are untouched by this port).
 ## Closed
 
 Gate E measured 2026-10-30 on the port itself (not the prototype): max \|ρ\| 0.5943,
-well inside SHIP (< 0.76 pooled and per-frame-median). Shipped as-is; no revert needed.
+well inside SHIP (< 0.76 pooled and per-frame-median). Ledger row recorded
+(`docs/gate_e_ledger.csv`), so `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+is green. Shipped as-is; no revert needed.

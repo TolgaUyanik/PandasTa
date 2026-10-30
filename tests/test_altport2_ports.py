@@ -161,8 +161,9 @@ REGISTERED = {
 #: reverted 7 of the 16 (see docs/PineBuiltinsMeasured.md), -> 234 by pfe,
 #: -> 235 by kalman_trend, -> 236 by range_compress_run, -> 237 by maxvol_adv
 #: (all four measured in docs/gate_e_ledger.csv; pfe and KFT_VEL are STRUCK, kept
-#: under waivers #23 / #22), -> 238 by tf_centroid_20 (statistics; Gate E pending,
-#: see docs/TfCentroid20Measured.md). Pinned, not computed,
+#: under waivers #23 / #22), -> 238 by tf_centroid_20 (statistics; Gate E measured,
+#: SHIP, 0.5943 vs ATR_Ratio_5_20_Pctl, see docs/TfCentroid20Measured.md). Pinned,
+#: not computed,
 #: precisely so an accidental Category edit fails here instead of shipping
 #: silently.
 CATEGORY_TOTAL = 238
