@@ -51,7 +51,7 @@ Category = {
     # Momentum
     "momentum": [
         "ao", "apo", "bias", "bop", "brar", "cci", "cdvo", "cfo", "cg", "cmo",
-        "coppock", "cti", "dm", "er", "eri", "fisher", "imi", "inertia", "kalman_rsi", "kdj", "kst", "lrsi", "macd", "macd_area_divergence",
+        "coppock", "cti", "dm", "er", "eri", "fisher", "gapm", "imi", "inertia", "kalman_rsi", "kdj", "kst", "lrsi", "macd", "macd_area_divergence",
         "mom", "pfe", "pgo", "po", "ppo", "pressure_pulse", "psl", "pvo", "qqe", "roc", "rsi", "rsi_divergence", "rsx", "rvgi",
         "slope", "smi", "squeeze", "squeeze_pro", "stc", "stoch", "stochrsi", "td_seq", "trix",
         "trixh", "tsi", "uo", "vwmacd", "wavetrend", "willr",
@@ -71,13 +71,13 @@ Category = {
     "performance": ["log_return", "percent_return", "trend_return", "max_return"],
     # Statistics
     "statistics": [
-        "entropy", "kurtosis", "mad", "median", "quantile", "skew", "stdev",
-        "variance", "zscore",
-        "rolling_sum", "normalize", "covariance"
+        "entropy", "kpss", "kurtosis", "mad", "median", "median_ad_hl2", "quantile", "skew", "stdev",
+        "tf_centroid_20", "variance", "zscore",
+        "rolling_sum", "normalize", "covariance", "cusum"
     ],
     # Trend
     "trend": [
-        "adx", "amat", "aroon", "atr_push", "band_cross_retest", "bdi4kewl", "bos", "choch", "chop", "cksp", "decay", "decreasing", "dtdb",
+        "adx", "adxr", "amat", "aroon", "atr_push", "band_cross_retest", "bdi4kewl", "bos", "choch", "chop", "cksp", "decay", "decreasing", "dtdb",
         "dpo", "equal_highs_lows", "flag_breakout", "fvg", "fvg_sweep_magnet", "halftrend", "increasing", "inverse_fvg", "liquidity_compression_box",
         "head_shoulders",
         "liquidity_sweep", "long_run",
@@ -92,13 +92,13 @@ Category = {
     ],
     # Volatility
     "volatility": [
-        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "cvi", "donchian", "har_park", "hwc", "kc",
-        "massi", "natr", "pdist", "range_compress_run", "range_profile", "rvi", "thermo", "true_range", "ui"
+        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "corwin_schultz", "cvi", "donchian", "har_park", "hwc", "kc",
+        "massi", "natr", "pdist", "range_compress_run", "range_profile", "roll_spread", "rvi", "thermo", "true_range", "ui"
     ],
 
     # Volume, "vp" or "Volume Profile" is unique
     "volume": [
-        "ad", "adosc", "aobv", "avwap_z", "bw_mfi", "cmf", "efi", "eom", "kvo", "maxvol_adv", "mfi", "nvi", "obv", "pocket_pivot", "pvi",
+        "ad", "adosc", "amihud", "aobv", "avwap_z", "bw_mfi", "cmf", "efi", "eom", "kvo", "maxvol_adv", "mfi", "nvi", "obv", "pocket_pivot", "pvi",
         "pvol", "pvr", "pvt", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "weis_wave",
         "vzo", 
         # `up_and_down_volume` and `volume_delta` are deliberately NOT here.

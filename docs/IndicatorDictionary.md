@@ -26,7 +26,10 @@ window per ticker before concatenating tickers.
 `*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is
 invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
-**240 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
+**249 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
+The `gapm` row and its scale-free list entry were patched in by hand on 2026-10-28,
+copied verbatim from a `.venv-pd2` (pandas 2.3.3, no TA-Lib) run of the generator.
+Regenerate with TA-Lib installed to replace this note.
 
 ### How many indicators is that, exactly
 
@@ -34,8 +37,8 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | surface | n | what it means |
 |---|---|---|
-| registered in `Category` | **238** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **246** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| registered in `Category` | **247** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **256** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `tf_median_absdiff_20`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
@@ -63,7 +66,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `ht_sine` | C | — | `HT_SINE` SF<br>`HT_LEADSINE` SF | 63 | `sin(DCPhase)` and `sin(DCPhase + 45 degrees)`. Ehlers' reading is that the two lines cross ahead of a cyclic turn and wander without crossing while… |
 | `ht_trendmode` | C | — | `HT_TRENDMODE` BIN | 63 | 1 when the market is judged to be trending, 0 when it is judged to be cycling. Four tests, in TA-Lib's order: a SineWave crossing resets the trend… |
 
-## momentum (57)
+## momentum (58)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -83,6 +86,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `er` | C | `length=None`, `drift=None` | `ER_10` SF | 10 | The Efficiency Ratio was invented by Perry J. Kaufman and presented in his book "New Trading Systems and Methods". It is designed to account for… |
 | `eri` | H/L/C | `length=None` | `BULLP_13` PX<br>`BEARP_13` PX | 12 | Elder's Bulls Ray Index contains his Bull and Bear Powers. Which are useful ways to look at the price and see the strength behind the market. Bull… |
 | `fisher` | H/L | `length=None`, `signal=None` | `FISHERT_9_1` SF<br>`FISHERTs_9_1` SF | 9 | Attempts to identify significant price reversals by normalizing prices over a user-specified number of periods. A reversal signal is suggested when… |
+| `gapm` | O/C | `length=40`, `signal=20` | `GAPM_40_20` SF | 59 | The ratio of the sum of up gaps to the sum of down gaps over `length` bars, smoothed by an EMA of span `signal`. A gap is today's open minus… |
 | `imi` | O/C | `length=None` | `IMI_14` SF | 13 | Chande's Intraday Momentum Index: RSI computed on the intraday body (close - open) instead of the close-to-close change. A market that gaps up and… |
 | `inertia` | H/L/C | `length=None`, `rvi_length=None`, `scalar=None`, `refined=None`, `thirds=None`, `mamode=None`, `drift=None` | `INERTIA_20_14` SF | 32 | Inertia was developed by Donald Dorsey and was introduced his article in September, 1995. It is the Relative Vigor Index smoothed by the Least… |
 | `kalman_rsi` | C | `length=None`, `process_noise=None`, `measurement_noise=None`, `initial_error=None` | `KRSI_5` SF | 5 | RSI computed on a Kalman-filtered (smoothed) close instead of raw close. The Kalman filter is a simple scalar predict/update recursion (not the… |
@@ -190,28 +194,33 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `percent_return` | C | `length=None`, `cumulative=False` | `PCTRET_1` SF | 1 | Calculates the percent return of a Series. See also: help(df.ta.percent_return) for additional **kwargs a valid 'df'. |
 | `trend_return` | C | `trend`, `log=True`, `asbool=None`, `trend_reset=0`, `trade_offset=None` | `TR_LOGRET_1` SF<br>`TR_CUMLOGRET_1` SF<br>`TR_Trends` BIN<br>`TR_Trades` BIN<br>`TR_Entries` BIN<br>`TR_Exits` BIN | 1 | Calculates the Returns and Cumulative Returns of a Trend as defined by a sequence of booleans called a 'trend'. One popular example in TA literature… |
 
-## statistics (12)
+## statistics (13)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
 | `covariance` | C | `other=None`, `length=None`, `ddof=None` | `COV_30_1` SF | 30 | The trailing covariance of two series over `length` bars. The two-series counterpart of `variance`, and the unnormalised counterpart of `correlation`. |
+| `cusum` | C | `length=None` | `CUSUM_100` SF | 100 | The largest standardised rise of log price over any earlier reference bar in a rolling window: for each reference bar n, the log change from n to the… |
 | `entropy` | C | `length=None`, `base=None` | `ENTP_10` SF | 18 | Introduced by Claude Shannon in 1948, entropy measures the unpredictability of the data, or equivalently, of its average information. A die has… |
+| `kpss` | C | `length=None` | `KPSS_100` SF | 99 | The Kwiatkowski-Phillips-Schmidt-Shin statistic of log price over a rolling window, under the trend-stationary null: regress log price on a constant… |
 | `kurtosis` | C | `length=None` | `KURT_30` SF | 29 | Sources: |
 | `mad` | C | `length=None` | `MAD_30` PX | 29 | Sources: |
 | `median` | C | `length=None` | `MEDIAN_30` PX | 29 | Rolling Median of over 'n' periods. Sibling of a Simple Moving Average. |
+| `median_ad_hl2` | H/L/C | `length=None` | `MEDIANAD_HL2_5` SF | 4 | Source: jesse (MIT), `median_ad.py`: `scipy.stats.median_abs_deviation(hl2, window)`. scipy's function with its default `scale=1.0` is the plain,… |
 | `normalize` | C | `length=None` | `NORM_14` SF | 13 | Where the current value sits inside its own trailing range, on [0, 1]. 0 is the window low, 1 the window high. |
 | `quantile` | C | `length=None`, `q=None` | `QTL_30_0.5` PX | 29 | Sources: |
 | `rolling_sum` | C | `length=None` | `SUM_10` PX | 9 | The sliding sum of the last `length` values. |
 | `skew` | C | `length=None` | `SKEW_30` SF | 29 | Sources: |
 | `stdev` | C | `length=None`, `ddof=1` | `STDEV_30` PX | 29 | Sources: |
+| `tf_centroid_20` | C | `length=None` | `TFCENTROID_20` SF | 20 | The energy-weighted mean position of the last `length` bars' simple returns, on a 0..1 time axis where 0 is the oldest bar in the window and 1 is the… |
 | `variance` | C | `length=None`, `ddof=None` | `VAR_30` PX2 | 29 | Sources: |
 | `zscore` | C | `length=None`, `std=None` | `Z_30` SF | 29 | Sources: |
 
-## trend (58)
+## trend (59)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
 | `adx` | H/L/C | `length=None`, `scalar=None`, `mamode=None`, `drift=None` | `ADX_14` SF<br>`DMP_14` SF<br>`DMN_14` SF | 27 | Average Directional Movement is meant to quantify trend strength by measuring the amount of movement in a single direction. |
+| `adxr` | H/L/C | `length=None`, `scalar=None`, `mamode=None`, `drift=None` | `ADXR_14` SF | 41 | ADXR rates the trend strength ADX reports by averaging it against its own value `length` bars back, damping ADX's bar-to-bar noise at the cost of a… |
 | `amat` | C | `fast=None`, `slow=None`, `mamode=None`, `lookback=None`, `slope_length=None` | `AMATe_LR_2` BIN<br>`AMATe_SR_2` BIN | 0 | Indicator: Archer Moving Averages Trends (AMAT) |
 | `aroon` | H/L | `length=None`, `scalar=None` | `AROOND_14` SF<br>`AROONU_14` SF<br>`AROONOSC_14` SF | 14 | Aroon attempts to identify if a security is trending and how strong. |
 | `atr_push` | O/H/L/C | `atr_length=None`, `breakout_lookback=None`, `push_window=None`, `min_push_atr=None`, `max_push_candles=None` | `APUSH_BULL_14_5_5` BIN<br>`APUSH_BEAR_14_5_5` BIN | 14 | A structural breakout AND an ATR-scaled impulse leg, required together. A bar qualifies as a bullish push when it closes green, closes above the… |
@@ -270,7 +279,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `zigzag` | C | `pct_threshold=None` | `ZIGZAG_5` ?? | 0 | Marks pivot highs and lows where the price has reversed by at least `pct_threshold` from the last pivot. Non-pivot bars are NaN. |
 | `zigzag_fib` | H/L/C | `length=None` | `ZZFIB_50_5` SF<br>`ZZFIB_618_5` SF | 13 | Scale-free % distance from close to the 0.5 and 0.618 (golden ratio) Fibonacci retracement levels of the CURRENT zigzag leg -- the alternating… |
 
-## volatility (20)
+## volatility (22)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -280,6 +289,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `atr2` | H/L/C | `length=None`, `drift=None` | `ATR2_14` PX | 0 | TradingView `ta.atr2()` -- Wilder smoothing of `ta.tr(true)` with a per-bar `length` and a source seed, so it is finite from bar 0 where `atr` needs… |
 | `atr_ma_multiple` | H/L/C | `atr_length=None`, `ma_length=None` | `ATRMAX_14_50` SF | 49 | How many ATR%-units away from its own SMA the close currently sits -- a volatility-adjusted distance-to-MA measure. `(close - MA) / MA * 100` alone… |
 | `bbands` | C | `length=None`, `std=None`, `mamode=None`, `ddof=0` | `BBL_5_2.0` PX<br>`BBM_5_2.0` PX<br>`BBU_5_2.0` PX<br>`BBB_5_2.0` SF | 4 | A popular volatility indicator. |
+| `corwin_schultz` | H/L | `length=None` | `CS_1` SF | 1 | Estimates the bid-ask spread, as a fraction of price, from two-day high/low ranges alone -- no trade or quote data. Corwin & Lipson Schultz derive it… |
 | `cvi` | H/L | `length=None`, `roc_length=None` | `CVI_10_10` SF | 19 | The rate of change of a smoothed High-Low range. Where `natr` reports the LEVEL of volatility and `chop` reports trending-versus-ranging, CVI reports… |
 | `donchian` | H/L | `lower_length=None`, `upper_length=None` | `DCL_20_20` PX<br>`DCM_20_20` PX<br>`DCU_20_20` PX | 19 | Donchian Channels are used to measure volatility, similar to Bollinger Bands and Keltner Channels. |
 | `har_park` | H/L/C | `short_length=None`, `medium_length=None`, `long_length=None`, `fit_window=None` | `HARPARK_1_5_22_500` SF | 499 | A causal, rolling-refit HAR (Heterogeneous AutoRegressive) regression that forecasts NEXT-bar Parkinson range-based volatility (as a % of price,… |
@@ -290,17 +300,19 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `pdist` | O/H/L/C | `drift=None` | `PDIST` PX | 1 | Measures the "distance" covered by price movements. |
 | `range_compress_run` | H/L | `cap=None` | `RCR_100` ORD | 1 | How many consecutive bars, ending at this one, have had a high-low range strictly below the previous bar's range. 0 on a bar whose range is equal to… |
 | `range_profile` | H/L/C | `lookback=None`, `ob_os_level=None`, `bins=None`, `min_range_pct=None`, `require_coherent_bars=True`, `min_coherent_bars=None`, `emit_osc=False` | `RPO_VA_WIDTH_PCT_110_80` SF<br>`RPO_BREAK_UP_110_80` BIN<br>`RPO_BREAK_DN_110_80` BIN | 111 | Ports the calculation half of the TradingView indicator `atvJpWjW` ("Range Profile Oscillator", (c) Uncle_the_shooter, MPL-2.0). Over a rolling… |
+| `roll_spread` | C | `length=None` | `ROLL_20` SF | 31 | Roll (1984)'s classic estimator: under a pure bid-ask bounce with no information in the trade, consecutive price CHANGES are negatively… |
 | `rvi` | H/L/C | `length=None`, `scalar=None`, `refined=None`, `thirds=None`, `mamode=None`, `drift=None` | `RVI_14` SF | 13 | The Relative Volatility Index (RVI) was created in 1993 and revised in 1995. Instead of adding up price changes like RSI based on price direction,… |
 | `thermo` | H/L/C | `length=None`, `long=None`, `short=None`, `mamode=None`, `drift=None` | `THERMO_20_2_0.5` PX<br>`THERMO_20_2_0.5_RATIO_PCT` SF<br>`THERMOma_20_2_0.5` PX<br>`THERMOl_20_2_0.5` BIN<br>`THERMOs_20_2_0.5` BIN | 19 | Elder's Thermometer measures price volatility. |
 | `true_range` | H/L/C | `drift=None` | `TRUERANGE_1` PX | 1 | An method to expand a classical range (high minus low) to include possible gap scenarios. |
 | `ui` | C | `length=None`, `scalar=None` | `UI_14` SF | 26 | The Ulcer Index by Peter Martin measures the downside volatility with the use of the Quadratic Mean, which has the effect of emphasising large… |
 
-## volume (25)
+## volume (26)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
 | `ad` | O/H/L/C/V | — | `ADo` SF | 0 | Accumulation/Distribution indicator utilizes the relative position of the close to it's High-Low range with volume. Then it is cumulated. |
 | `adosc` | O/H/L/C/V | `fast=None`, `slow=None` | `ADOSC_3_10` SF | 9 | Accumulation/Distribution Oscillator indicator utilizes Accumulation/Distribution and treats it similarily to MACD or APO. |
+| `amihud` | C/V | `length=None` | `AMIHUD_21` SF | 21 | Amihud (2002)'s illiquidity measure: the average absolute return per unit of dollar volume over a trailing window -- a large price move on thin… |
 | `aobv` | C/V | `fast=None`, `slow=None`, `mamode=None`, `max_lookback=None`, `min_lookback=None` | `OBV` SF<br>`OBV_min_2` SF<br>`OBV_max_2` SF<br>`OBVe_4` SF<br>`OBVe_12` SF<br>`AOBV_LR_2` BIN<br>`AOBV_SR_2` BIN | 11 | Indicator: Archer On Balance Volume (AOBV) |
 | `avwap_z` | H/L/C/V | `anchor=None`, `min_samples=None` | `AVWAP_Z_W` SF<br>`AVWAP_DIST_PCT_W` SF | 1 | Ports ONLY Module 1 ("MODULO 1: VWAP Anclado (automatico)") of the TradingView community indicator "MAEM - Volume Suite" by MAEmisary,… |
 | `bw_mfi` | H/L/C/V | `length=None`, `raw=False` | `MFI_BW_SF_20` SF | 19 | How much price movement does one unit of volume buy? Price impact, or liquidity efficiency. `eom` is the nearest shipped idea but is directional and… |
@@ -329,7 +341,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation needed.
 
-`cdl_doji` `cdl_inside` `cdl_z` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `cti` `er` `fisher` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `kalman_trend` `ma_disparity` `log_return` `max_return` `percent_return` `trend_return` `covariance` `entropy` `kurtosis` `normalize` `skew` `zscore` `adx` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `cvi` `har_park` `massi` `natr` `range_compress_run` `range_profile` `rvi` `ui` `ad` `adosc` `aobv` `avwap_z` `bw_mfi` `cmf` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `pocket_pivot` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `vzo`
+`cdl_doji` `cdl_inside` `cdl_z` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `cti` `er` `fisher` `gapm` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `kalman_trend` `ma_disparity` `log_return` `max_return` `percent_return` `trend_return` `covariance` `cusum` `entropy` `kpss` `kurtosis` `median_ad_hl2` `normalize` `skew` `tf_centroid_20` `zscore` `adx` `adxr` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `corwin_schultz` `cvi` `har_park` `massi` `natr` `range_compress_run` `range_profile` `roll_spread` `rvi` `ui` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `pocket_pivot` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `vzo`
 
 ## Never fires on the probe
 
