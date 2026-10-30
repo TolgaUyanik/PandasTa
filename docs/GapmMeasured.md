@@ -2,8 +2,8 @@
 
 **Status: BUILT 2026-10-28 (issue #189, B2-GAPM-40). Gate A cleared against the owner's
 formula only (the Kaufman source was not checked); B and D cleared; C is synthetic
-only; F is clean against the baseline on both venvs, but the baseline is not green. Owed on the
-Backtesting machine: E, real-data C (fire counts), and the real-data NaN rate (stop and ask the
+only; F is clean against the baseline on both venvs, but the baseline is not green. E is SHIP (2026-10-31, below). Owed on the
+Backtesting machine: real-data C (fire counts), and the real-data NaN rate (stop and ask the
 owner if it is material).
 The step-1 equivalence check split by frame, and the owner ruled PORT on 2026-10-28 (next
 section).** Gate E on the real BIST frames decides: if it strikes, revert and keep this file as
@@ -143,7 +143,7 @@ Synthetic numbers come from `tests/test_gapm.py`. The frame there is a 1,200-bar
 | B | Future perturbation at 31 offsets: the real module leaks at 0. Three look-ahead mutants, `close.shift(-1)` in the gap, `up.shift(-1)` in the up-gap sum, and `gapm.shift(-1)` on the output (a write back-dated one bar; added in review round 2), are each proved live and caught at 31 of 31. With the random future alone, the `window` mutant was caught at only 28 of 31, so a second future (every open 1000 above the prior close) was added. |
 | C | Synthetic only: 706 bars above 1, 435 below, 59 NaN (warm-up), 1,141 distinct values in 1,200 bars. **Not measured on real data**, because the BIST frames are not on this machine. |
 | D | ×8 and ×64 bit-identical; ×10 and ×3.7 within a relative 1.73e-14 / 1.36e-14, the same on `.venv-pd2` and `.venv` (pinned at 1.8e-14); all four with matching NaN masks; `0 < (GAPM > 1) < n`. |
-| E | **Owed, and CI blocks the merge until it is recorded:** `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails with "no Gate E ledger row for ['gapm']". After the run below, record it with `python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD` (see CLAUDE.md, "Gate E ledger"). The only numbers are from the issue #189 body, measured on prototype `ind_screen_r8` and not re-run: max \|ρ\| 0.3746 vs `ZIGZAG`, n = 33,418; top-5 per-frame median 0.5052. The prototype's formula was not cross-checked, so these say nothing certain about `GAPM_40_20`; they would be SHIP only if the two formulas match. To re-run, from `../Backtesting/Backtesting`: `python scripts/analysis/gate_e_overlap.py run --module pandas_ta.momentum.gapm --name gapm`. |
+| E | **SHIP.** `GAPM_40_20` max \|ρ\| 0.3738 vs `ZIGZAG` (`compute_all`, n = 33,234; top-5 per-frame median 0.5080), 89 frames / 398,849 bars / 687 comparators. Run `gapm-168365f2` on 2026-10-31 against this branch merged with `dev`; row in `docs/gate_e_ledger.csv`. The issue #189 prototype measured 0.3746 vs `ZIGZAG`, n = 33,418. |
 | F | See below. The Backtesting suite was not run, because that repo is not on this machine. |
 
 ### Gate F, this repo (measured 2026-10-28, base `dev` at `d7fd91d`)

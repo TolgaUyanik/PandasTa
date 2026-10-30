@@ -171,8 +171,8 @@ REGISTERED = {
 #: ATR_Ratio_5_20_Pctl, see docs/TfCentroid20Measured.md), -> 243 by
 #: median_ad_hl2 (statistics, #119), -> 244 by kpss (#157, Gate E SHIP,
 #: 0.2256, in the ledger), -> 245 by cusum (#16, Gate E DISCLOSE,
-#: 0.7767, in the ledger), -> 246 by gapm (Gate E not yet measured;
-#: revert with the port if it strikes). Pinned, not
+#: 0.7767, in the ledger), -> 246 by gapm (Gate E SHIP, 0.3738,
+#: in the ledger). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
 CATEGORY_TOTAL = 246

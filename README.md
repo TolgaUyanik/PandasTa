@@ -139,10 +139,6 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 
 `help(ta.<name>)` for the same per indicator.
 
-⚠ **Gate E pending:** `gapm` is registered, so `df.ta.strategy()` emits it, but it has not been
-measured against the parent repo's column set (no row in `docs/gate_e_ledger.csv`). It is
-reverted if Gate E strikes.
-
 **candles (5)** — `cdl_doji` `cdl_inside` `cdl_pattern` `cdl_z` `ha`
 
 **cycles (8)** — `dsp` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode`

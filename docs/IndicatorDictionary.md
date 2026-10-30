@@ -30,9 +30,6 @@ invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 The `gapm` row and its scale-free list entry were patched in by hand on 2026-10-28,
 copied verbatim from a `.venv-pd2` (pandas 2.3.3, no TA-Lib) run of the generator.
 Regenerate with TA-Lib installed to replace this note.
-⚠ **Gate E pending** for `gapm`: its row describes a registered column that has not been
-measured against the parent repo's column set (no row in `docs/gate_e_ledger.csv`), and it is
-reverted if Gate E strikes.
 
 ### How many indicators is that, exactly
 
