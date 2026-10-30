@@ -26,7 +26,7 @@ window per ticker before concatenating tickers.
 `*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is
 invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
-**242 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
+**243 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
 
 ### How many indicators is that, exactly
 
@@ -34,8 +34,8 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | surface | n | what it means |
 |---|---|---|
-| registered in `Category` | **240** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **249** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `tf_median_absdiff_20`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| registered in `Category` | **241** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **250** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `tf_median_absdiff_20`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
@@ -206,11 +206,12 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `variance` | C | `length=None`, `ddof=None` | `VAR_30` PX2 | 29 | Sources: |
 | `zscore` | C | `length=None`, `std=None` | `Z_30` SF | 29 | Sources: |
 
-## trend (58)
+## trend (59)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
 | `adx` | H/L/C | `length=None`, `scalar=None`, `mamode=None`, `drift=None` | `ADX_14` SF<br>`DMP_14` SF<br>`DMN_14` SF | 27 | Average Directional Movement is meant to quantify trend strength by measuring the amount of movement in a single direction. |
+| `adxr` | H/L/C | `length=None`, `scalar=None`, `mamode=None`, `drift=None` | `ADXR_14` SF | 41 | ADXR rates the trend strength ADX reports by averaging it against its own value `length` bars back, damping ADX's bar-to-bar noise at the cost of a… |
 | `amat` | C | `fast=None`, `slow=None`, `mamode=None`, `lookback=None`, `slope_length=None` | `AMATe_LR_2` BIN<br>`AMATe_SR_2` BIN | 0 | Indicator: Archer Moving Averages Trends (AMAT) |
 | `aroon` | H/L | `length=None`, `scalar=None` | `AROOND_14` SF<br>`AROONU_14` SF<br>`AROONOSC_14` SF | 14 | Aroon attempts to identify if a security is trending and how strong. |
 | `atr_push` | O/H/L/C | `atr_length=None`, `breakout_lookback=None`, `push_window=None`, `min_push_atr=None`, `max_push_candles=None` | `APUSH_BULL_14_5_5` BIN<br>`APUSH_BEAR_14_5_5` BIN | 14 | A structural breakout AND an ATR-scaled impulse leg, required together. A bar qualifies as a bullish push when it closes green, closes above the… |
@@ -331,7 +332,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation needed.
 
-`cdl_doji` `cdl_inside` `cdl_z` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `cti` `er` `fisher` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `kalman_trend` `ma_disparity` `log_return` `percent_return` `trend_return` `covariance` `entropy` `kurtosis` `normalize` `skew` `zscore` `adx` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `corwin_schultz` `cvi` `har_park` `massi` `natr` `range_compress_run` `range_profile` `roll_spread` `rvi` `ui` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `pocket_pivot` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `vzo`
+`cdl_doji` `cdl_inside` `cdl_z` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `cti` `er` `fisher` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `kalman_trend` `ma_disparity` `log_return` `percent_return` `trend_return` `covariance` `entropy` `kurtosis` `normalize` `skew` `zscore` `adx` `adxr` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `corwin_schultz` `cvi` `har_park` `massi` `natr` `range_compress_run` `range_profile` `roll_spread` `rvi` `ui` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `pocket_pivot` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `vzo`
 
 ## Never fires on the probe
 
