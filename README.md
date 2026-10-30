@@ -4,9 +4,9 @@ Technical analysis indicators as a pandas extension. Fork of
 [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, extended with
 price-action / SMC indicators and oriented toward **machine-learning feature generation**.
 
-**243 indicators** registered in `Category`, across 9 categories — that is the number
+**244 indicators** registered in `Category`, across 9 categories — that is the number
 that matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two other
-counts are true of the same package and are easy to confuse with it: **252** are callable
+counts are true of the same package and are easy to confuse with it: **253** are callable
 as `df.ta.<name>()` (`Category` plus `beta`, `hwma` and `vp`), and `drawdown` and `ma` are
 importable as `ta.<name>()` without being either. All of them are in the dictionary; the
 three counts are emitted by its generator, and `tests/test_readme_counts.py` fails if this
@@ -149,7 +149,7 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 
 **performance (3)** — `log_return` `percent_return` `trend_return` (`cumulative=True` for cumulative)
 
-**statistics (14)** — `covariance` `entropy` `kurtosis` `mad` `median` `median_ad_hl2` `normalize` `quantile` `rolling_sum` `skew` `stdev` `tf_centroid_20` `variance` `zscore`
+**statistics (15)** — `covariance` `entropy` `kpss` `kurtosis` `mad` `median` `median_ad_hl2` `normalize` `quantile` `rolling_sum` `skew` `stdev` `tf_centroid_20` `variance` `zscore`
 
 **trend (59)** — `adx` `adxr` `amat` `aroon` `atr_push` `band_cross_retest` `bdi4kewl` `bos` `choch` `chop` `cksp` `decay` `decreasing` `dpo` `dtdb` `equal_highs_lows` `flag_breakout` `fvg` `fvg_sweep_magnet` `halftrend` `head_shoulders` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `pmax` `priorday_fib` `priormonth_range` `psar` `qstick` `rejection_blocks` `renko_trend` `ribbon_concordance` `rounding_cup` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `triple_top_bottom` `tsignals` `ttm_trend` `tvstop` `vhf` `volume_sr_zones` `vortex` `vstop` `vstop2` `xsignals` `zigzag` `zigzag_fib`
 
