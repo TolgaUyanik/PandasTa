@@ -6,6 +6,7 @@ from .median import median
 from .quantile import quantile
 from .skew import skew
 from .stdev import stdev
+from .tf_centroid_20 import tf_centroid_20
 from .variance import variance
 from .zscore import zscore
 from .rolling_sum import rolling_sum
