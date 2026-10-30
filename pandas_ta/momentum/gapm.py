@@ -34,7 +34,12 @@ def gapm(open_, close, length=40, signal=20, offset=None, **kwargs):
         gapm.fillna(kwargs["fillna"], inplace=True)
     if "fill_method" in kwargs:
         method = kwargs["fill_method"]
-        gapm = gapm.ffill() if method in ("ffill", "pad") else gapm.bfill()
+        if method in ("ffill", "pad"):
+            gapm = gapm.ffill()
+        elif method in ("bfill", "backfill"):
+            gapm = gapm.bfill()
+        else:  # a silent bfill on a typo would be a look-ahead
+            raise ValueError(f"fill_method must be ffill/pad or bfill/backfill, not {method!r}")
 
     gapm.name = f"GAPM_{length}_{signal}"
     gapm.category = "momentum"

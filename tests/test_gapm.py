@@ -9,9 +9,10 @@ What these tests pin, in order of how much it would hurt to lose them:
 
 * CAUSALITY by future-perturbation: rewrite open and close from bar `j`
   onward with another walk, demand bars `[0:j]` bit-identical with matching
-  NaN masks, over 31 offsets.  Two look-ahead mutants (`importlib` source
+  NaN masks, over 31 offsets.  Three look-ahead mutants (`importlib` source
   read, one index shifted forward, `exec`'d in memory): the gap reading
-  `close.shift(-1)`, and the up-gap sum reading one bar ahead.  Each is
+  `close.shift(-1)`, the up-gap sum reading one bar ahead, and the output
+  written one bar early (`gapm.shift(-1)`).  Each is
   proved live, then caught at 31 of 31.  The real module leaks at 0.  With
   the random rewrite alone the `window` mutant was caught at only 28 of 31,
   which is why a second, all-up-gap future exists.
@@ -34,7 +35,8 @@ What these tests pin, in order of how much it would hurt to lose them:
 * CORRECTNESS against an independent loop written from the definition
   (sums, ratio, and the EMA recursion with NaNs skipped and `signal` valid
   ratios before the first value), and a hand-computed sequence.
-* EDGES: a NaN input mid-series; `offset`; `fillna`; `fill_method`.
+* EDGES: a NaN input mid-series; `offset`; `fillna`; `fill_method`, where
+  an unknown value raises (it used to back-fill: a silent look-ahead).
 * Wiring: `Category`, the accessor (parameters forwarded under the right
   names), the column name `GAPM_40_20`.
 """
@@ -149,6 +151,8 @@ def test_edge_cases():
     pd.testing.assert_series_equal(gapm(o, c, offset=1), base.shift(1))
     assert gapm(o, c, fillna=0).isna().sum() == 0
     assert gapm(on, c, fill_method="ffill").iloc[600:].isna().sum() == 0
+    with pytest.raises(ValueError):
+        gapm(on, c, fill_method="ffil")  # used to bfill silently: bar 600 read bar 640
 
 
 # -------------------------------------------------------------- causality
@@ -168,6 +172,7 @@ def _load_mutant(old, new, tag):
 MUTANTS = {
     "gap": ("gap = open_ - close.shift(1)", "gap = open_ - close.shift(-1)"),
     "window": ("ratio = up.rolling(length).sum()", "ratio = up.shift(-1).rolling(length).sum()"),
+    "write": ('gapm.name = f"GAPM', 'gapm = gapm.shift(-1); gapm.name = f"GAPM'),
 }
 
 OFFSETS = range(70, 1150, 35)  # 31 offsets
