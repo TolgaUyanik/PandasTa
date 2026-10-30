@@ -4,6 +4,20 @@
 issue-solver after this session; F not yet confirmed by both repos (see below).**
 If Gate E strikes it, revert and keep this file as the receipt.
 
+**2026-10-30, same-day follow-up:** `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+failed on this branch because `tf_median_absdiff_20` entered `Category` with no ledger row (the
+same gap the ledger test exists to catch, per its docstring: "`pfe`, `kalman_trend` and
+`range_compress_run` were all merged with Gate E owed; this is the test that would have stopped
+them"). This session cannot run Gate E itself (no access to `../Backtesting`), so the module,
+its exports (`pandas_ta/volatility/__init__.py`), tests and `core.py` accessor stay, but the
+**`Category` entry is withheld** (`pandas_ta/__init__.py`) until a later session runs Gate E and
+records a ledger row — `df.ta.tf_median_absdiff_20()` and `ta.tf_median_absdiff_20()` work today,
+`df.ta.strategy()` does not sweep it yet. README's "Present but outside `Category`" paragraph and
+`docs/MLCompanionContract.md`'s counts were reverted to match (the column is not in
+`docs/IndicatorDictionary.md`'s probe table while out of `Category`, same mechanism as `beta` /
+`up_and_down_volume`). This is a narrower fix than a full revert: nothing here says the gates
+failed, only that this session cannot clear Gate E.
+
 Column `MEDABSDIFF_20`: the rolling 20-bar median of the absolute bar-to-bar log return — a
 robust (outlier-resistant) realised-volatility measure, in the same spirit as `natr` but built
 from the median instead of a mean/EMA. Category `volatility`.
@@ -49,20 +63,22 @@ Synthetic numbers are a 1,200-bar GBM walk, σ = 0.02, seed 11, 0.05 tick, the s
 | E Attribution | **Pending, run by issue-solver after this session.** From `../Backtesting/Backtesting`: `python scripts/analysis/gate_e_overlap.py run --module pandas_ta.volatility.tf_median_absdiff_20 --name tf_median_absdiff_20`, then record with `python docs/gate_e_ledger.py record`. |
 | F Suites | See below. |
 
-### Gate F, this repo (measured 2026-10-30, branch `issue-118-tf-median-absdiff-20`)
+### Gate F, this repo (re-measured 2026-10-30 after the `Category`-withholding follow-up,
+branch `issue-118-tf-median-absdiff-20`)
 
-`python -m pytest -q`: **3 failed, 3272 passed, 83 skipped.** The 3 failures, all pre-existing and
+`python -m pytest -q`: **2 failed, 3272 passed, 83 skipped.** Both failures pre-existing and
 unrelated to this port:
 
 * `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` — the known break
   recorded in `CLAUDE.md` (the untracked `docs/pine/` corpus).
 * `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` — needs the
   sibling `../AlternativeRepos` checkout, not present here; CI deselects it by name.
-* `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` — **expected for
-  this port**: `tf_median_absdiff_20` is new, not in `docs/gate_e_grandfathered.json`, and has no
-  ledger row yet because Gate E is pending. The same test would have failed on `pfe`,
-  `kalman_trend`, `range_compress_run` and `tf_centroid_20` before their rows were recorded; this
-  one clears once the Gate E receipt session runs `docs/gate_e_ledger.py record`.
+
+`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` passes now: the
+first version of this port registered `tf_median_absdiff_20` in `Category` with no ledger row
+(same gap `pfe` / `kalman_trend` / `range_compress_run` once had), which this test caught; fixed
+the same day by withholding the `Category` entry — see the follow-up note at the top of this
+file.
 
 `tests/test_tf_median_absdiff_20.py` itself: 14 passed. The Backtesting repo's suite was not run
 here — Gate E and both suites are run by the issue-solver launcher after this session.
@@ -75,7 +91,7 @@ removes any of its own members that also sit in the hard-coded `excluded` list (
 loses `long_run`/`short_run`, `momentum` loses `td_seq`) for the rest of the process. Measured:
 running `tests/test_wiring_accessors.py`'s `test_each_previously_broken_category_runs` before
 `tests/test_altport2_ports.py`'s `test_the_category_count_moved_by_exactly_three` in the same
-session drops the live `Category` total from 238 to 235 and makes the pinned-count test fail —
+session drops the live `Category` total from 237 to 234 and makes the pinned-count test fail —
 purely an artifact of invoking those two files in that explicit order; the default alphabetical
 full-suite run (`test_altport2_ports.py` before `test_wiring_accessors.py`) does not hit it, which
 is why the whole-suite number above is clean. Out of scope for this port (unrelated file,
@@ -84,13 +100,17 @@ for whoever next touches `strategy()` or `Category`-pinned tests.
 
 ## To close
 
-1. Run Gate E on the port (not the prototype) and record it with `docs/gate_e_ledger.py record`,
-   which also clears the `test_gate_e_ledger.py` failure above.
+1. Run Gate E on the port (not the prototype) and record it with `docs/gate_e_ledger.py record`.
 2. Apply CLAUDE.md's thresholds (SHIP < 0.76, DISCLOSE 0.76–0.80, DISCLOSE_GAP 0.80–0.90, STRUCK
    ≥ 0.90 pooled or per-frame median). The prototype's screen-level measurement (0.7422 vs `natr`)
    sits just inside SHIP; the port must be re-measured on its own, since the prototype and the
-   module compute the log-return differently in floating point (see Gate D). On a revert, delete
-   the module, its exports, `Category` entry, accessor, tests, and the README/`IndicatorDictionary`/
-   `MLCompanionContract` counts added here, and keep this file.
+   module compute the log-return differently in floating point (see Gate D).
+3. On SHIP/DISCLOSE/DISCLOSE_GAP: add `tf_median_absdiff_20` back to `Category`
+   (`pandas_ta/__init__.py`, volatility list), flip `tests/test_tf_median_absdiff_20.py`'s
+   `test_name_registration_and_accessor` assertion back to `in`, bump `CATEGORY_TOTAL` /
+   `CATEGORY_BUCKETS["volatility"]` in `tests/test_altport2_ports.py` by 1, regenerate
+   `docs/IndicatorDictionary.md`, and restore the README / `MLCompanionContract` counts this
+   follow-up reverted. On STRUCK with no waiver: delete the module, its exports, accessor, tests,
+   and leave the counts as they are now (already excluding it), and keep this file.
 3. Fill Gate C from the same real frames the Gate E run touches.
 4. Run both repos' suites.
