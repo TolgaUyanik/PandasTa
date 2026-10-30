@@ -8,9 +8,10 @@ Also jesse (MIT) `adxr.py`, the same average. Candidate `lean_adxr_14` from the
 2026-10-24 library catalog screen round 2 (`docs/issues/screen/ind_screen_r2.py`,
 `docs/issues/screen/candidates_r2.csv`). Issue #110 / LEAN-ADXR-14.
 
-**Status: Gates A, B, D cleared; Gate C synthetic only (real-data counts owed);
-Gate E pending, run by issue-solver after this session; Gate F this repo green
-(3 pre-existing failures, none naming `adxr`, see below).**
+**Status: Gates A, B, D cleared; Gate C synthetic only (real-data counts owed,
+Gate E's n below is the real-data count); Gate E measured DISCLOSE_GAP, shipped
+(not STRUCK); Gate F this repo green (3 pre-existing failures, none naming
+`adxr`, see below).**
 
 Shipped: `pandas_ta/trend/adxr.py`, one column `ADXR_<length>` (default
 `ADXR_14`), range [0, 100] (inherits ADX's own range). Tests: `tests/test_adxr.py`
@@ -38,9 +39,9 @@ average arithmetic in the test body, not in the module under test).
 |---|---|---|
 | A Correctness | pass | `test_matches_the_lean_formula_recomposed_from_adx` (length 14 and 7): `adxr()` output bit-identical to `(adx()["ADX_<n>"] + adx()["ADX_<n>"].shift(n)) / 2` computed independently in the test, on a 900-bar synthetic OHLC walk. `test_bounded_zero_to_hundred`: output in [0, 100] (an average of two ADX reads, each already in that range). |
 | B Causality | pass | Future-perturbation sweep, 15 offsets (60..830 step 55) on a 900-bar OHLC walk: real module leaks at 0/15. A look-ahead mutant (`importlib` source read, the backward `adx_.shift(length)` flipped to a forward `adx_.shift(-length)`, `exec`'d into a fresh in-memory module) is proved live (differs from the real module's output) and caught at 15/15 offsets. |
-| C Reachability | synthetic only | 900-bar synthetic trending walk (seed 11, σ=0.02): 859 of 900 bars finite (41-bar warm-up: `adx()`'s own RMA warm-up plus the `length`-bar backward shift), 859 distinct values, range [8.693323, 28.490809]. **Real-data counts owed**, pending Gate E. |
+| C Reachability | synthetic + real | 900-bar synthetic trending walk (seed 11, σ=0.02): 859 of 900 bars finite (41-bar warm-up: `adx()`'s own RMA warm-up plus the `length`-bar backward shift), 859 distinct values, range [8.693323, 28.490809]. Real data (Gate E run, 89 ALTPORT-1 frames): 395,200 non-NaN of 398,849 pooled bars (99.1%), all non-zero. |
 | D Scale-free | pass | ×8 / ×64 OHLC scaling: bit-identical, max \|diff\| 0.0 (ADXR is an average of two ADX reads, and ADX is itself built from ratios — `scalar / atr_`, `(dmp - dmn).abs() / (dmp + dmn)` — that cancel a price scale exactly). ×10: max \|diff\| 7.105427e-14, well inside the 1e-9 tolerance pinned by `test_other_scales_within_tolerance`. `0 < 859 < 900` fires, plus 859 distinct values (`test_fires_on_real_shaped_data_and_is_not_constant`), so a constant column cannot pass. `test_too_short_a_series_returns_none` pins the other edge: a 10-bar series (below `2 * length`) returns `None` rather than an all-NaN series. |
-| E Attribution | **PENDING** — run by issue-solver after this session via `gate_e_overlap.py run --module pandas_ta.trend.adxr --name adxr`. The *prototype* `lean_adxr_14` (a different implementation — its own `dx_wilder`, not this fork's `adx()`) measured max \|ρ\| 0.8806 vs `ADX` (compute_all, n=396,446), top-5 per-frame max median 0.8796 → `DISCLOSE_GAP` band on the `r3-perframe-0.90` scale. ADXR is `(ADX + ADX[14]) / 2` by construction, so a high correlation with `ADX` is expected on both implementations; the prototype's number is context from the issue, not a measurement of the shipped module, and is not a substitute for the real Gate E run. |
+| E Attribution | **DISCLOSE_GAP, shipped.** `gate_e_overlap.py run --module pandas_ta.trend.adxr`, 89 ALTPORT-1 frames, 398,849 pooled bars, 687 comparators (329 `compute_all` + 358 manifest), canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS. `ADXR_14`: max \|ρ\| **0.8838** vs `ADX` (`compute_all`, n=395,200); per-frame max median \|ρ\| **0.8835** (89 frames, 11.24% ≥ 0.90) → `DISCLOSE_GAP` band (0.80 ≤ ρ < 0.90) on `r3-perframe-0.90`, not STRUCK (pooled < 0.90 and top-5 per-frame median < 0.90). Against the manifest set: max \|ρ\| 0.7194 vs `ADX_Pctl` (n=391,195). Run `is110-adxr-60f99558`, measured 2026-10-30, recorded in `docs/gate_e_ledger.csv`. ADXR is `(ADX + ADX[14]) / 2` by construction, so this echoes the prototype's own-formula `DISCLOSE_GAP` (0.8806 vs `ADX`) — same band, different implementation (this fork's `adx()` vs the prototype's own `dx_wilder`). Disclosed per the issue's `Done when`: ships with the gap stated, not struck. |
 | F Suites | this repo only | `python -m pytest -q`: 3 failed, 3271 passed, 83 skipped (2026-10-30). None of the 3 failures name `adxr`: `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` (needs the sibling `../AlternativeRepos` checkout, deselected in CI), `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (expected until the ledger row is recorded after Gate E runs), `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (CLAUDE.md's documented pre-existing break from `8d8f705`, present on a clean checkout before this port). Parent repo suite run by the launcher. |
 
 ## Wiring (five touch points)
@@ -58,22 +59,13 @@ columns, 216 -> 217 `SF` (`tests/test_ml_companions.py`). README's headline move
 237 -> 238, the `trend` row 58 -> 59, and the `df.ta` accessor count 245 -> 246
 (`tests/test_readme_counts.py`).
 
-`docs/gate_e_ledger.csv` is **not** updated by this session, per the
-issue-solver rule: the launcher runs Gate E after this session, and a later
-receipt session records the ledger row with the measured numbers.
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails until then — expected, listed under Gate F above.
+`docs/gate_e_ledger.csv` recorded: `adxr:ADXR_14` DISCLOSE_GAP 0.8838 vs `ADX`,
+measured 2026-10-30, run `is110-adxr-60f99558`
+(`python docs/gate_e_ledger.py record ... --measured 2026-10-30`).
 
-## To close
+## Closed
 
-1. Launcher runs Gate E (`gate_e_overlap.py run --module pandas_ta.trend.adxr
-   --name adxr`) and both repos' suites.
-2. A receipt session reads the Gate E numbers, applies the `r3-perframe-0.90`
-   bands, and either:
-   - records the ledger row (`python docs/gate_e_ledger.py record ...`) and
-     fills in the measured max \|ρ\|, comparator and sample size above — SHIP,
-     DISCLOSE, or DISCLOSE_GAP; or
-   - if STRUCK with no waiver: deletes `pandas_ta/trend/adxr.py`, its export,
-     `Category` entry, accessor, `tests/test_adxr.py`, and reverts the README /
-     `docs/IndicatorDictionary.md` / `docs/MLCompanionContract.md` / Gate E
-     ledger counts this port moved — keeping this file as the receipt.
+Gate E measured DISCLOSE_GAP (0.8838, not STRUCK) — shipped per the issue's
+`Done when` (disclosed gap, not a revert). All five wiring touch points,
+ledger row, and both repos' suites (parent repo run by the launcher) are in
+place. Issue #110 / LEAN-ADXR-14 closed by ship.
