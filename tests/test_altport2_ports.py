@@ -172,8 +172,8 @@ REGISTERED = {
 #: median_ad_hl2 (statistics, #119), -> 244 by kpss (#157, Gate E SHIP,
 #: 0.2256, in the ledger), -> 245 by cusum (#16, Gate E DISCLOSE,
 #: 0.7767, in the ledger), -> 246 by gapm (Gate E SHIP, 0.3738,
-#: in the ledger), -> 247 by max_return (#12, Gate E pending:
-#: revert with the port). Pinned, not
+#: in the ledger), -> 247 by max_return (#12, Gate E SHIP,
+#: 0.6716, in the ledger). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
 CATEGORY_TOTAL = 247

@@ -1,10 +1,7 @@
 # max_return — measured
 
-> **Status: Gates A, B and D pass; C and E are owed (issue [#12](https://github.com/TolgaUyanik/PandasTa/issues/12)).**
-> Gate E and Gate C's real-data counts need the private Backtesting engine and the BIST cache,
-> which the author's machine does not have. Until a Gate E run is recorded in
-> `docs/gate_e_ledger.csv`, `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-> fails on this branch, and that is the one failure (see Gate F). Merging is the owner's call.
+> **Status: Gates A, B and D pass; Gate E is SHIP (0.6716 vs `natr`); C is owed (issue [#12](https://github.com/TolgaUyanik/PandasTa/issues/12)).**
+> Gate E was run on 2026-10-31 and is recorded in `docs/gate_e_ledger.csv`. Merging is the owner's call.
 
 `MAXRET_21` is the largest one-bar simple return, `close_t / close_{t-1} - 1`, over the last 21
 bars, the current bar included. It is the "MAX" lottery measure: stocks with a recent extreme
@@ -59,7 +56,7 @@ seed 11.
 | B | Future perturbation at 31 offsets, with two futures (another walk, and the same walk ×1000). The real module leaks at 0 of 31. Two one-bar look-ahead mutants (`importlib` source read, `exec`'d in memory) are each shown to change the output, then caught at 31 of 31: the return series read one bar ahead, and the output written one bar early (`.shift(-1)`). There is no recursive stage, so the taint reach is exactly the `length + 1`-close window. |
 | C | **Owed.** Real-data counts come from the Gate E run. Synthetic: 1,179 non-NaN bars, 109 distinct values (a maximum holds until it leaves the window), range 0.0090 to 0.0559. None is zero or negative on this walk, but the column can be: in a window where every bar falls, the largest return is negative. |
 | D | Close ×8 and ×64 are bit-identical. ×10 and ×3.7 differ by at most 2.2e-16 absolute; the test asserts ≤ 1e-14. NaN masks match in all four. The column is continuous, so `0 < fires < n` is replaced by nunique = 109 over 1,179 non-NaN bars (see C). |
-| E | **Owed.** From `../Backtesting/Backtesting`, with `issue-12-max-lottery` checked out as the PandasTa sibling (`record` checks the run's `pandas_ta_src_sha1` against this tree): `python scripts/analysis/gate_e_overlap.py run --module pandas_ta.performance.max_return --name <run name>`, then `python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`. No prototype measurement exists for this candidate. |
+| E | **SHIP.** `MAXRET_21` max \|ρ\| 0.6716 vs `natr` (`compute_all`, n = 396,980; top-5 per-frame median 0.6518), 89 frames / 398,849 bars / 687 comparators. Run `is12-max_return-bb5c0fb9` on 2026-10-31 against this branch merged with `dev`; row in `docs/gate_e_ledger.csv`. |
 | F | **No regressions in this repo** (below). Backtesting not run. |
 
 ### Gate F (2026-10-30, the author's machine, `.venv-pd2`)
@@ -70,7 +67,7 @@ Run with CI's two `--deselect`s:
 * this branch: 1 failed, 3274 passed, 83 skipped. The +16 passes are `tests/test_max_return.py`.
 
 The one failure is `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, for
-`max_return`, and it clears when the Gate E row lands.
+`max_return`; it cleared when the Gate E row landed (2026-10-31).
 
 ## Dictionary row provenance
 
