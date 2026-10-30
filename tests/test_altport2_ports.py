@@ -161,13 +161,15 @@ REGISTERED = {
 #: reverted 7 of the 16 (see docs/PineBuiltinsMeasured.md), -> 234 by pfe,
 #: -> 235 by kalman_trend, -> 236 by range_compress_run, -> 237 by maxvol_adv
 #: (all four measured in docs/gate_e_ledger.csv; pfe and KFT_VEL are STRUCK, kept
-#: under waivers #23 / #22). `tf_median_absdiff_20` (issue #118) ships as a
-#: module and accessor but stays OUT of `Category` until its Gate E ledger row
-#: is recorded (`tests/test_gate_e_ledger.py`), so the total here is still 237.
-#: Pinned, not computed, precisely so an accidental Category edit fails here
-#: instead of shipping silently.
-CATEGORY_TOTAL = 237
-CATEGORY_BUCKETS = {"trend": 58, "volatility": 20, "volume": 24}
+#: under waivers #23 / #22), -> 240 by LIQ (issue #10: `corwin_schultz` and
+#: `roll_spread` into volatility, `amihud` into volume; Gate E SHIP, in the ledger).
+#: `tf_median_absdiff_20` (issue #118) ships as a module and accessor but stays
+#: OUT of `Category` until its Gate E ledger row is recorded
+#: (`tests/test_gate_e_ledger.py`), so the total here is still 240. Pinned,
+#: not computed, precisely so an accidental Category edit fails here instead
+#: of shipping silently.
+CATEGORY_TOTAL = 240
+CATEGORY_BUCKETS = {"trend": 58, "volatility": 22, "volume": 25}
 
 #: Gate E, re-measured on the SHIPPED columns over 89 BIST_100 daily frames /
 #: 408,253 bars against 496 comparators. See docstring item 4.

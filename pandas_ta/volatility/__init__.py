@@ -5,6 +5,7 @@ from .atr import atr
 from .atr2 import atr2
 from .atr_ma_multiple import atr_ma_multiple
 from .bbands import bbands
+from .corwin_schultz import corwin_schultz
 from .cvi import cvi
 from .donchian import donchian
 from .har_park import har_park
@@ -15,6 +16,7 @@ from .pdist import pdist
 from .range_compress_run import range_compress_run
 from .range_profile import range_profile
 from .natr import natr
+from .roll_spread import roll_spread
 from .rvi import rvi
 from .tf_median_absdiff_20 import tf_median_absdiff_20
 from .thermo import thermo

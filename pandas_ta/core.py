@@ -2290,6 +2290,12 @@ class AnalysisIndicators(BasePandasObject):
         result = bbands(close=close, length=length, std=std, mamode=mamode, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def corwin_schultz(self, length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        result = corwin_schultz(high=high, low=low, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def cvi(self, length=None, roc_length=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
@@ -2420,6 +2426,11 @@ class AnalysisIndicators(BasePandasObject):
         result = range_profile(high=high, low=low, close=close, lookback=lookback, ob_os_level=ob_os_level, bins=bins, min_range_pct=min_range_pct, require_coherent_bars=require_coherent_bars, emit_osc=emit_osc, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def roll_spread(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = roll_spread(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def rvi(self, length=None, scalar=None, refined=None, thirds=None, mamode=None, drift=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
@@ -2465,6 +2476,12 @@ class AnalysisIndicators(BasePandasObject):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = adosc(high=high, low=low, close=close, volume=volume, open_=open_, fast=fast, slow=slow, signed=signed, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def amihud(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = amihud(close=close, volume=volume, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def aobv(self, fast=None, slow=None, mamode=None, max_lookback=None, min_lookback=None, offset=None, **kwargs):
