@@ -161,10 +161,11 @@ REGISTERED = {
 #: reverted 7 of the 16 (see docs/PineBuiltinsMeasured.md), -> 234 by pfe,
 #: -> 235 by kalman_trend, -> 236 by range_compress_run, -> 237 by maxvol_adv
 #: (all four measured in docs/gate_e_ledger.csv; pfe and KFT_VEL are STRUCK, kept
-#: under waivers #23 / #22). Pinned, not computed,
+#: under waivers #23 / #22), -> 238 by max_return (#12, Gate E pending: revert
+#: with the port). Pinned, not computed,
 #: precisely so an accidental Category edit fails here instead of shipping
 #: silently.
-CATEGORY_TOTAL = 237
+CATEGORY_TOTAL = 238
 CATEGORY_BUCKETS = {"trend": 58, "volatility": 20, "volume": 24}
 
 #: Gate E, re-measured on the SHIPPED columns over 89 BIST_100 daily frames /
