@@ -6,7 +6,7 @@ price-action / SMC indicators and oriented toward **machine-learning feature gen
 
 **240 indicators** registered in `Category`, across 9 categories — that is the number
 that matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two other
-counts are true of the same package and are easy to confuse with it: **248** are callable
+counts are true of the same package and are easy to confuse with it: **249** are callable
 as `df.ta.<name>()` (`Category` plus `beta`, `hwma` and `vp`), and `drawdown` and `ma` are
 importable as `ta.<name>()` without being either. All of them are in the dictionary; the
 three counts are emitted by its generator, and `tests/test_readme_counts.py` fails if this
@@ -165,6 +165,11 @@ functions `up_and_down_volume` / `volume_delta`, and the four TA-Lib ports
 `ma` only as `ta.drawdown()` / `ta.ma()`. `beta` is a TALIB-1 port and needs a BENCHMARK
 series a single-frame sweep cannot supply, which is the same reason as the two volume
 functions below; it is absent from the dictionary for the same reason they are.
+`tf_median_absdiff_20` (issue #118) is reachable as `df.ta.tf_median_absdiff_20()` but
+withheld from `Category` on purpose: its Gate E ledger row
+(`tests/test_gate_e_ledger.py`, `docs/gate_e_ledger.csv`) is not recorded yet, so a
+strategy sweep must not pick it up until that measurement lands — see
+`docs/TfMedianAbsdiff20Measured.md`.
 
 `ht_trendline`, `mama` and `sarext` return TA-Lib's raw PRICE LEVELS, and their
 scale-free distance forms were measured into the Gate E revert band against columns

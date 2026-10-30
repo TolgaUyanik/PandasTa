@@ -35,7 +35,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | surface | n | what it means |
 |---|---|---|
 | registered in `Category` | **240** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **248** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| callable as `df.ta.<name>()` | **249** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `tf_median_absdiff_20`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.

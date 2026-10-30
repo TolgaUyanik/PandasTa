@@ -2400,6 +2400,11 @@ class AnalysisIndicators(BasePandasObject):
         result = natr(high=high, low=low, close=close, length=length, mamode=mamode, scalar=scalar, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def tf_median_absdiff_20(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = tf_median_absdiff_20(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def pdist(self, drift=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         high = self._get_column(kwargs.pop("high", "high"))
