@@ -68,7 +68,7 @@ Category = {
         "frama"
     ],
     # Performance
-    "performance": ["log_return", "percent_return", "trend_return"],
+    "performance": ["log_return", "percent_return", "trend_return", "max_return"],
     # Statistics
     "statistics": [
         "entropy", "kpss", "kurtosis", "mad", "median", "median_ad_hl2", "quantile", "skew", "stdev",
