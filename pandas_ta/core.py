@@ -1687,6 +1687,11 @@ class AnalysisIndicators(BasePandasObject):
         result = entropy(close=close, length=length, base=base, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def ffd(self, d=None, threshold=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ffd(close=close, d=d, threshold=threshold, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def kpss(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = kpss(close=close, length=length, offset=offset, **kwargs)
