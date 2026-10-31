@@ -57,7 +57,7 @@ red, with CI waiting for approval, or with CI that never produces `tests`, it sw
 off with a comment and moves to the next. One PR is tested at a time. `merge-queue.yml` runs on each
 push to `dev` and on `workflow_dispatch --ref dev`, which `auto-merge-guard.yml` sends when a PR is
 queued; `ci.yml`'s `queue` job runs when a PR's CI finishes, has no owner token, takes red PRs out,
-and dispatches `merge-queue.yml` when the next PR needs an update ; either runner dispatches it when
+and dispatches `merge-queue.yml` when the next PR needs an update; either runner dispatches it when
 a later PR still has no CI run. Branch updates use the owner's fine-grained token (Contents, Pull
 requests, Workflows: read/write) as `MERGE_QUEUE_TOKEN` in the `merge-queue` environment, which only
 `dev` may use, so a PR's workflows cannot read it. `dev` requires no approving review, so a merged
