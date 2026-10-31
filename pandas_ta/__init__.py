@@ -92,8 +92,8 @@ Category = {
     ],
     # Volatility
     "volatility": [
-        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "corwin_schultz", "cvi", "donchian", "har_park", "hwc", "kc",
-        "massi", "natr", "pdist", "range_compress_run", "range_profile", "roll_spread", "rvi", "tf_median_absdiff_20", "thermo", "true_range", "ui"
+        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "corwin_schultz", "cvi", "donchian", "garman_klass", "har_park", "hwc", "kc",
+        "massi", "natr", "pdist", "range_compress_run", "range_profile", "rogers_satchell", "roll_spread", "rvi", "tf_median_absdiff_20", "thermo", "true_range", "ui", "yang_zhang"
     ],
 
     # Volume, "vp" or "Volume Profile" is unique
