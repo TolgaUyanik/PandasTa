@@ -2671,6 +2671,11 @@ class AnalysisIndicators(BasePandasObject):
         result = vol_delta(open_=open_, high=high, low=low, close=close, volume=volume, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def volcv(self, length=None, offset=None, **kwargs):
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = volcv(volume=volume, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def up_and_down_volume(self, lower=None, anchor=None, **kwargs):
         result = up_and_down_volume(lower=lower, anchor=anchor, **kwargs)
         return self._post_process(result, **kwargs)
