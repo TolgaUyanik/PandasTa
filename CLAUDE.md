@@ -51,14 +51,14 @@ builds one from auto-merge. Queue a PR with
 `gh pr merge <N> --auto --merge`; PRs go roughly in the order auto-merge was switched on. The queue
 runs on each push to `dev`, when a PR into `dev` is queued (`auto-merge-guard.yml`), and when a PR's
 CI finishes (`ci.yml` job `queue`), and takes the head of the line, reading only the `tests` check:
-behind `dev`, it updates the branch and dispatches `ci.yml` on it (a GITHUB_TOKEN branch update does
-not trigger `pull_request`; `workflow_dispatch` is exempt); conflicting or red, it switches auto-merge
-off with a comment and moves to the next. One PR is tested at a time. If `dev` changed a file under
-`.github/workflows` since a PR branch was cut, GitHub refuses the token's update: that PR is dropped
-with a comment, and `dev` is merged into it by hand. `auto-merge-guard.yml` switches auto-merge off
-on any PR whose base is not `dev` (best effort: it runs after the fact). Keep `guard` out of `dev`'s
-required checks while this queue is in use: it runs on `pull_request_target`, which the token's
-branch update does not trigger, so every updated PR would sit blocked. A cancelled `queue` job on a CI run is
+behind `dev`, it updates the branch, and the update's `pull_request` CI follows; conflicting or red,
+it switches auto-merge off with a comment and moves to the next. One PR is tested at a time. Branch
+updates use the repo secret `MERGE_QUEUE_TOKEN`, the owner's fine-grained token (Contents, Pull
+requests, Workflows: read/write): on #226 an update made with GITHUB_TOKEN started a pull_request run
+that waited for approval, and the PR stayed blocked although a dispatched run passed `tests`. When the
+token expires, every update fails and the PR is dropped with a comment: renew the token and the
+secret. `auto-merge-guard.yml` switches auto-merge off on any PR whose base is not `dev` (best effort:
+it runs after the fact). A cancelled `queue` job on a CI run is
 expected: the queue's concurrency group keeps one waiting step and cancels older ones.
 
 ## Architecture
