@@ -2,10 +2,10 @@
 # The merge queue for `dev`: one step for the PR at the head of the line. Run by
 # .github/workflows/merge-queue.yml (push to dev, a PR queued) and ci.yml (job `queue`, when a
 # PR's CI finishes); merge-queue.yml's header says what it does and why.
-# Needs REPO and GH_TOKEN (the job's token: pull-requests write, contents and actions read).
+# Needs REPO and GH_TOKEN (the job's token: pull-requests and actions write, contents read).
 # MQ_TOKEN (environment secret MERGE_QUEUE_TOKEN, the owner's token) is used only for branch
 # updates; ci.yml's job has none and dispatches merge-queue.yml (which sets MQ_REQUIRED=1) to
-# update a branch, so it also needs actions: write.
+# update a branch. Either runner also dispatches merge-queue.yml after its one CI poll per step.
 set -euo pipefail
 owner="${REPO%/*}"; name="${REPO#*/}"
 
@@ -50,19 +50,19 @@ drop() {   # $1 PR, $2 reason; uses the loop's $head; skipped if the PR's head m
 while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
   echo "#$pr: merge state $state, tests $tests"
   if [ "$cross" = "true" ]; then
-    drop "$pr" "this workflow cannot update a branch from a fork; update it from dev by hand" || echo "::error::#$pr: drop failed"
+    drop "$pr" "this workflow cannot update a branch from a fork; update it from dev by hand" || { echo "::error::#$pr: drop failed"; drop_failed=1; }
     continue
   fi
   if [ "$draft" = "true" ] || [ "$state" = "DRAFT" ]; then
     echo "#$pr: draft; skipping it"; continue
   fi
   case "$state" in
-    DIRTY) drop "$pr" "it conflicts with dev" || echo "::error::#$pr: drop failed"; continue ;;
+    DIRTY) drop "$pr" "it conflicts with dev" || { echo "::error::#$pr: drop failed"; drop_failed=1; }; continue ;;
     UNKNOWN) echo "#$pr: merge state still UNKNOWN after 60 s; skipping it this run"; continue ;;
   esac
   case "$tests" in
     FAILURE|TIMED_OUT|CANCELLED|ACTION_REQUIRED|STARTUP_FAILURE)
-      drop "$pr" "its \`tests\` check ended $tests" || echo "::error::#$pr: drop failed"; continue ;;
+      drop "$pr" "its \`tests\` check ended $tests" || { echo "::error::#$pr: drop failed"; drop_failed=1; }; continue ;;
   esac
   if [ "$state" = "BEHIND" ]; then
     if [ -z "${MQ_TOKEN:-}" ]; then
@@ -91,26 +91,28 @@ while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
     # or GitHub's: fail red, drop nothing.
     if ! out="$(GH_TOKEN="$MQ_TOKEN" gh api -X PUT "repos/$REPO/pulls/$pr/update-branch" 2>&1)"; then
       if grep -q "HTTP 422" <<<"$out"; then
-        # GitHub computes the merge state lazily: give a real conflict up to 60 s to read DIRTY.
-        merge_state=""
+        # GitHub computes the merge state lazily: give a real conflict up to 60 s to show.
+        merge_state="" mergeable=""
         for attempt in $(seq 6); do
-          merge_state="$(gh pr view "$pr" --repo "$REPO" --json mergeStateStatus --jq .mergeStateStatus)"
-          case "$merge_state" in DIRTY|CLEAN|HAS_HOOKS|UNSTABLE) break ;; esac
-          sleep 10
+          read -r merge_state mergeable < <(gh pr view "$pr" --repo "$REPO" --json mergeStateStatus,mergeable \
+            --jq '"\(.mergeStateStatus) \(.mergeable)"' || echo "UNKNOWN UNKNOWN")
+          case "$merge_state" in DIRTY|CLEAN|HAS_HOOKS|UNSTABLE|BLOCKED|DRAFT) break ;; esac
+          [ "$mergeable" = "CONFLICTING" ] && break
+          [ "$attempt" -lt 6 ] && sleep 10
         done
-        if [ "$merge_state" = "DIRTY" ]; then
-          drop "$pr" "GitHub refused to update its branch from dev: it conflicts; merge dev into it by hand" || echo "::error::#$pr: drop failed"
+        if [ "$merge_state" = "DIRTY" ] || [ "$mergeable" = "CONFLICTING" ]; then
+          drop "$pr" "GitHub refused to update its branch from dev: it conflicts; merge dev into it by hand" || drop_failed=1
           continue
         fi
-        if [ "$merge_state" = "BEHIND" ] || [ "$merge_state" = "UNKNOWN" ]; then
-          # Still behind, still refused, not known to conflict. Not retried (a 422 that repeats
-          # would loop): taken out with the reason, so it does not hold the line. drop() skips it
-          # if the head moved meanwhile (a stale read of BEHIND).
-          drop "$pr" "GitHub refused to update its branch from dev (HTTP 422: $(tail -c 200 <<<"$out" | tr -cd '[:print:]')) and it still reads $merge_state; merge dev into it by hand" || echo "::error::#$pr: drop failed"
-          continue
-        fi
-        echo "#$pr: update refused (HTTP 422), but it now reads $merge_state (no update needed); next PR"
-        continue
+        case "$merge_state" in
+          CLEAN|HAS_HOOKS|UNSTABLE|BLOCKED|DRAFT)
+            # No update was needed after all (a stale read of BEHIND): its CI or auto-merge acts.
+            echo "#$pr: update refused (HTTP 422), but it now reads $merge_state; waiting"; exit 0 ;;
+        esac
+        # Still behind (or unknown), refused, and not known to conflict: not retried (a repeating
+        # 422 would loop) and not dropped (no evidence against the PR). Red, so it is seen.
+        echo "::error::#$pr: update refused (HTTP 422) and it still reads $merge_state/$mergeable: $(jq -r '.message? // empty' 2>/dev/null <<<"${out%%gh:*}" || tail -c 200 <<<"$out"). Re-run this workflow, or update the branch by hand."
+        exit 1
       fi
       echo "::error::#$pr: branch update failed, not a conflict (token permissions?): $(tail -c 300 <<<"$out"). No PR was taken out."; exit 1
     fi
@@ -122,7 +124,7 @@ while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
       [ "$now" != "$head" ] && break
     done
     if [ "$now" = "$head" ]; then
-      drop "$pr" "its branch update from dev did not land within 60 s (see the merge-queue run log); merge dev into it by hand" || echo "::error::#$pr: drop failed"
+      drop "$pr" "its branch update from dev did not land within 60 s (see the merge-queue run log); merge dev into it by hand" || { echo "::error::#$pr: drop failed"; drop_failed=1; }
       continue
     fi
     echo "#$pr: updated from dev; its pull_request CI runs, and its end runs the queue again"
@@ -137,10 +139,14 @@ while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
       gh run list --repo "$REPO" --workflow ci.yml --branch "$ref" --limit 20 --json headSha,status,conclusion \
         --jq "[.[] | select(.headSha == \"$head\") | if .conclusion == \"action_required\" then \"action_required\" else .status end]"
     }
-    # Poll once per step (job timeout 20 min): a later PR in the same step exits instead.
+    # Poll once per step (job timeout 20 min): a later PR in the same step hands over to a fresh
+    # step instead (dispatched), rather than wait for an unrelated event. Bounded: the earlier PR
+    # was dropped (gone from the queue), and the fresh step polls once, then drops or proceeds.
+    # If that drop failed, the earlier PR is still queued and would be polled again: stop red.
     if [ -n "${polled:-}" ]; then
-      # Already polled once in this step: start a fresh step for this PR rather than wait for an
-      # unrelated event. Bounded: that step polls once, then drops or proceeds.
+      if [ -n "${drop_failed:-}" ]; then
+        echo "::error::#$pr: a drop failed earlier in this step; not dispatching (it would repeat)"; exit 1
+      fi
       if ! gh workflow run merge-queue.yml --repo "$REPO" --ref dev; then
         echo "::error::#$pr: no CI run yet, and dispatching merge-queue.yml failed"; exit 1
       fi
@@ -154,17 +160,17 @@ while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
       runs="$(list_runs)"
     done
     if [ "$(jq 'length' <<<"$runs")" = "0" ]; then
-      drop "$pr" "no CI run started for $head within 3 minutes; push to it, or re-run CI, then queue it again" || echo "::error::#$pr: drop failed"
+      drop "$pr" "no CI run started for $head within 3 minutes; push to it, or re-run CI, then queue it again" || { echo "::error::#$pr: drop failed"; drop_failed=1; }
       continue
     fi
     if [ "$(jq 'map(select(. == "waiting" or . == "action_required")) | length' <<<"$runs")" != "0" ]; then
-      drop "$pr" "its CI run for $head waits for approval; approve it in the Actions tab" || echo "::error::#$pr: drop failed"
+      drop "$pr" "its CI run for $head waits for approval; approve it in the Actions tab" || { echo "::error::#$pr: drop failed"; drop_failed=1; }
       continue
     fi
     if [ "$(jq 'map(select(. != "completed")) | length' <<<"$runs")" != "0" ]; then
       echo "#$pr: a CI run for $head is still running; waiting"; exit 0
     fi
-    drop "$pr" "CI ran on $head but left no \`tests\` check (cancelled before it started?); re-run CI on it" || echo "::error::#$pr: drop failed"
+    drop "$pr" "CI ran on $head but left no \`tests\` check (cancelled before it started?); re-run CI on it" || { echo "::error::#$pr: drop failed"; drop_failed=1; }
     continue
   elif [ "$state" = "BLOCKED" ] && [ "$tests" = "SUCCESS" ]; then
     # Green and up to date, yet blocked by something CI cannot fix (a review, an unresolved
