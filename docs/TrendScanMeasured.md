@@ -7,13 +7,9 @@ of the OLS slope of log price on time over the trailing `L` bars; emits the sign
 ch. 5 "Financial Labels" (6 hits, sim 0.78-0.84) — "trend scanning", described there as a
 FORWARD-looking labelling method; this port keeps only the trailing, feature-side half.
 
-**Status: Gates A, B, D cleared; Gate C synthetic only (real-data counts owed, no access
-to the parent repo in this worktree); Gate E PENDING, run by the issue-solver launcher
-after this session.** `trend_scan` is in `Category`, following the `pfe` / `kalman_trend` /
-`ffd` precedent of registering before Gate E records (`docs/MLCompanionContract.md`).
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails until
-the launcher's run is recorded with `docs/gate_e_ledger.py record`; that is expected, not a
-bug in this session's work.
+**Status: Gates A-F cleared. SHIPPED, both columns kept.** `TSCAN_L` SHIP (0.2909); `TSCAN_T`
+DISCLOSE_GAP (0.8804, below the 0.90 STRUCK line) — disclosed below, not struck. Gate E run
+recorded in `docs/gate_e_ledger.csv` (`is20-trend_scan-64f3c2ea`, measured 2026-10-31).
 
 Shipped: `pandas_ta/statistics/trend_scan.py`, two columns `TSCAN_T_<horizons>` (signed
 t-stat, SF) and `TSCAN_L_<horizons>` (the winning horizon, ORD), default
@@ -109,9 +105,9 @@ asked for ("rolling sums"), just kept at the right numerical scale.
 |---|---|
 | A Correctness | matches TWO independent oracles at 15 (horizon, bar) pairs: a plain definitional OLS (sample means/covariances, not the module's rolling-sum formulas) and the task's own cited identity `t = r * sqrt((n-2)/(1-r**2))`, both to 1e-6 (the formula's own floating-point floor at `length=3`, measured above; see "A design decision this port made and reverted once") |
 | B Causality | future-perturbation, 8 offsets: real module 0/8 leaks; forward mutant (writes the same regression at the window's start bar instead of its end bar — the task's requested forward form) 8/8 leaks |
-| C Reachability | **synthetic only**: 3,000-bar GBM, seed 11, tick 0.05, drift 0.0005, default horizons: 2,996 / 3,000 finite (warm-up 4 = min horizon 5, minus 1), 2,996 distinct T values, all 5 horizons used as the argmax somewhere (counts: L=5: 151, L=10: 248, L=20: 546, L=40: 706, L=60: 1,345). Real-data counts owed |
+| C Reachability | **synthetic**: 3,000-bar GBM, seed 11, tick 0.05, drift 0.0005, default horizons: 2,996 / 3,000 finite, all 5 horizons used as the argmax somewhere (counts: L=5: 151, L=10: 248, L=20: 546, L=40: 706, L=60: 1,345). **Real data** (Gate E run, 89 ALTPORT-1 frames, pooled 398,849 bars): `TSCAN_T` 398,493 finite / 398,849 (356 warm-up NaN), 398,490 non-zero (3 degenerate-fit ties); `TSCAN_L` 398,493 finite, 398,493 non-zero (every finite bar names a horizon) |
 | D Scale-free | x8, x64: T max\|diff\| 0.0, bit-identical (`Series.equals` True); L max\|diff\| 0.0 both scales. x10, x3.7: T max\|diff\| 4.523e-08 / 8.271e-08 (test bound 1e-6), L max\|diff\| 0.0, NaN masks match; `0 < 2996 < 3000` fires, > 100 distinct T values |
-| E Attribution | **PENDING**, run by the issue-solver launcher after this session. Proxy overlap below is NOT Gate E |
+| E Attribution | **Measured** 2026-10-31, 89 ALTPORT-1 frames, 687 comparators (329 compute_all + 358 manifest), pooled n 398,849. `TSCAN_T_5-10-20-40-60`: max \|ρ\| **0.8804** vs `Dist_to_Cloud_pct` (manifest, n 391,996); per-frame max median \|ρ\| 0.8802, same comparator, 13.48% of 89 frames ≥ 0.90 → **DISCLOSE_GAP** (0.80 ≤ ρ < 0.90, below the 0.90 STRUCK line). `TSCAN_L_5-10-20-40-60`: max \|ρ\| **0.2909** vs `Supertrend_Flip_Age` (manifest, n 398,493); per-frame max median \|ρ\| 0.2926 → **SHIP**. Neither column pooled or per-frame-median ≥ 0.90: no STRUCK, nothing removed. Run `is20-trend_scan-64f3c2ea`, recorded in `docs/gate_e_ledger.csv` |
 | F Suites | this repo: see the commit this file ships with; both repos' suites are run by the launcher in clean worktrees, per this session's rules |
 
 ## Proxy overlap (NOT Gate E) — disclosed, not ship-decided
@@ -152,20 +148,12 @@ it is a real signal that `trend_scan` may sit close to or above the ship line on
 data is in, closer than `ffd`'s proxy ceiling (0.7346) or most other recent ports. Gate E
 decides; this section exists so that decision is not a surprise.
 
-## To close
+## Closed
 
-1. The issue-solver launcher runs Gate E (`gate_e_overlap.py build` then `run --module
-   pandas_ta.statistics.trend_scan --name trend_scan`) against the parent repo's
-   `compute_all` ∪ `ml_features` manifest, over the 89 ALTPORT-1 frames.
-2. Record the run: `python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`,
-   then fill Gate C's real-data counts from the same frames and enter the Gate E verdict
-   and max \|ρ\| above.
-3. Apply CLAUDE.md's `r3-perframe-0.90` bands. Given the proxy's `DISCLOSE_GAP`-band
-   ceiling against `SLOPE_40`, the owner should weigh whether `TSCAN_T` survives as
-   written, or whether `SLOPE_40` (or a similarly-shaped existing column) already covers
-   the question it answers. If STRUCK with no waiver, or if the owner judges the proxy
-   ceiling too close to ship regardless: delete the module, the export, the `Category`
-   entry, the accessor, the tests, the README counts, the dictionary row and the
-   `MLCompanionContract` count, and keep this file. A revert closes the task as well as a
-   ship.
-4. Run both suites.
+Gate E ran on the code at the commit this file ships with (module sha1
+`44f3d1d81a0ce0886fcbbf38b992bf6fe5122564`). The proxy's worry — `SLOPE_40` at 0.8187 on a
+synthetic walk — turned out close to the real result: `TSCAN_T`'s real top comparator is a
+different column (`Dist_to_Cloud_pct`, not `SLOPE_40`) at 0.8804, still inside
+`DISCLOSE_GAP` and below the 0.90 `STRUCK` line, so it ships disclosed rather than deleted.
+`TSCAN_L` ships clean at 0.2909. Both repos' suites are run by the launcher per this
+session's rules; this file is the receipt.
