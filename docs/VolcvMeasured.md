@@ -1,9 +1,8 @@
 # volcv — measured
 
-> **Status: Gates A, B, D measured; Gate E pending, run by issue-solver after this session.**
-> Gate C is synthetic only (no real-data frame available in this session). Gate F (both repos'
-> suites) is run by the launcher. Merging is the owner's call, and depends on the Gate E verdict
-> this session could not produce.
+> **Status: Gates A, B, D, E measured; SHIP.** Gate C is synthetic only (no real-data frame was
+> available to the porting session; Gate E's real-data run below covers reachability on the 89
+> ALTPORT-1 frames instead). Gate F (both repos' suites) is run by the launcher.
 
 `VOLCV_20 = std(volume, 20) / mean(volume, 20)`, `ddof=1` (pandas' default sample std). The window
 ends at, and includes, the current bar. The value is NaN where the mean is <= 0 (an all-zero-volume
@@ -44,22 +43,16 @@ rounded lognormal(10, 0.6) volume, seed 11 (same frame as `maxvol_adv`'s suite, 
 | B | Future perturbation at 31 offsets, using two futures (another walk, and the same walk x1000). The real module leaks at 0 of 31. Two one-bar look-ahead mutants (`volume.shift(-1)` feeding the mean, and the same feeding the std) are each shown to change the output, then caught at 31 of 31. |
 | C | Synthetic only: 1,200-bar seed-11 walk, 1,181 non-NaN bars (1,200 - 19 warm-up), 1,181 distinct values, range 0.2867 to 1.4415. No real-data (BIST) frame is available in this session; real-data counts are Gate E's job (owed, see below). |
 | D | The column reads no price. Volume x8 and x64 are bit-identical (measured: exact equality on all 1,181 non-NaN bars at both factors). x10 and x3.7 differ by at most 7.26e-15 and 1.85e-14 relative (max \|Δ\| / \|base\|) -- float rounding from the ratio's near-but-not-exact algebraic cancellation, not a correctness issue. NaN masks match in all four. `0 < fires < n`: 1,181 of 1,200 bars fire (the column is continuous, so `fires` is read as non-NaN, matching the convention `maxvol_adv` and `tf_centroid_20` use for continuous columns). |
-| E | **Pending.** This session cannot reach `../Backtesting` (rule in this session's system prompt: no reads or writes outside this worktree, and Gate E is run by the launcher after this session, not by me). The issue's own "guess, not measured" is that `VOLCV_20` may correlate with `Volume_Ratio_20` on spike days; that comparator is where the launcher's run should look first. No number is stated here because none was run. |
+| E | **Measured 2026-10-31**, `gate_e_overlap.py run --module pandas_ta.volume.volcv`, 89 ALTPORT-1 frames, 687 comparators (329 `compute_all` + 358 manifest 1d), n = 33,601 pooled bars for the top hit, canary AKBNK/BIENY/AGHOL/SASA.IS bit-equal. `VOLCV_20`: max \|ρ\| **0.4485** against `ZIGZAG` (pooled, `compute_all`), manifest-side max \|ρ\| 0.2860 against `Pct_Up_Days_63`; per-frame max median \|ρ\| **0.4937** (also against `ZIGZAG`, 85 of 89 frames scored, 0% of frames ≥ 0.90). Both well under the `r3-perframe-0.90` SHIP line (< 0.76). **Verdict: SHIP.** The issue's guess -- correlation with `Volume_Ratio_20` -- did not hold: `Volume_Ratio_20` is not the top comparator; `ZIGZAG` is, and even that is far below the disclosure band. Ledger row recorded in `docs/gate_e_ledger.csv`. |
 | F | Not run here. The launcher runs both repos' suites in clean worktrees after this session. This worktree's own `python -m pytest -q` is reported below as a sanity check, not as Gate F. |
 
 ### This worktree's suite (sanity check, not Gate F)
 
 `python -m pytest -q` in this worktree: see the commit's accompanying run. The one known
 pre-existing failure is `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
-(CLAUDE.md "Known breaks"), unrelated to this change. `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-is expected to fail until the receipt session records `volcv`'s Gate E run in
-`docs/gate_e_ledger.csv` -- that is the documented, expected state for an indicator with Gate E
-pending, not a regression.
+(CLAUDE.md "Known breaks"), unrelated to this change.
 
-## Next step
+## Receipt
 
-A later "receipt" session runs Gate E (`gate_e_overlap.py run --module pandas_ta.volume.volcv`),
-records the result in `docs/gate_e_ledger.csv`, and fills in this file's Gate E and Gate C
-(real-data) rows with the measured numbers. If Gate E strikes `volcv` against `Volume_Ratio_20` or
-anything else at or above the `r3-perframe-0.90` ship line, that receipt session reverts the module
-and keeps this file as the record -- a measured revert closes issue #19 exactly as well as a ship.
+Gate E ran clean on `pandas_ta.volume.volcv` SHIP, recorded in `docs/gate_e_ledger.csv` on
+2026-10-31. Issue #19 is closed by shipping `volcv` as-is -- no column removal needed.
