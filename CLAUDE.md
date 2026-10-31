@@ -19,7 +19,7 @@ GitHub and calls it from `backtesting_engine/indicator_engine.py`. Every indicat
 ## Commands
 
 ```sh
-python -m pytest -q                     # full suite; the 21 skips are explained below (plus any "Gate E owed")
+python -m pytest -q                     # full suite; the 21 skips are explained below; an owed Gate E row fails here (CI into `dev` skips it)
 python -m pytest tests/test_tvstop.py -q            # one module
 python -m pytest tests/test_tvstop.py::test_name -q # one test
 python -m pytest -q -k "causal or scale"            # one concern across modules
@@ -173,13 +173,13 @@ lacks its waiver. A waiver in `ALLOWED_WAIVERS` names the exact measurement (iss
 output fingerprint); today only `pfe` #23 and `kalman_trend`'s `KFT_VEL` #22 (owner, 2026-10-28).
 
 **Owed, not failed, on the way to `dev` (owner, 2026-11-01).** Contributors cannot run Gate E, so
-`ci.yml` and `gate-e-guard.yml` set `GATE_E_PENDING_OK=1` for every CI run whose target is not
-`main` (PRs into `dev`, pushes to it, manual runs off `main`): a measurement that is owed (no row
-for an indicator that needs one, a deleted row, or a row whose module, output or columns moved since
-its run) is a skip whose reason starts "Gate E owed", listed in the run summary under "Gate E owed";
-the owner runs Gate E and records the row later. Toward `main` (a release PR, a push to `main`) and
-on every local run the variable is not `1` and these fail, so a release needs every row. Strict
-everywhere: a waived STRUCK column whose code or output moved, a STRUCK row without its waiver, a
+`ci.yml` (PRs into `dev`, pushes to it, manual runs off `main`) and `gate-e-guard.yml` (PRs into
+`dev`) set `GATE_E_PENDING_OK=1`: a measurement that is owed (no row for an indicator that needs
+one, a deleted row, or a row whose module, output or columns moved since its run) is a skip whose
+reason starts "Gate E owed", listed in the run summary under "Gate E owed"; the owner runs Gate E
+and records the row later. Toward `main` (a release PR, a push to `main`) and on every local run the
+variable is not `1` and these fail, so a release needs every row. Strict everywhere: a waived STRUCK
+column whose code or output moved or whose row was deleted, a STRUCK row without its waiver, a
 hand-edited verdict, and missing Gate B/D tests. Until the owner records it, `dev` may carry an
 unmeasured column that Gate E would strike; if its run is STRUCK, the column is reverted (or waived)
 before the release, whose PR into `main` fails until then.

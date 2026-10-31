@@ -45,14 +45,15 @@ Each of these was broken on purpose on 2026-10-28 and failed; the breaks are
 listed in PR #196.
 
 Owed, not failed, on the way to `dev` (owner, 2026-11-01): contributors cannot run
-Gate E, so CI sets GATE_E_PENDING_OK=1 for PRs into `dev` and pushes to it. Then a
+Gate E, so ci.yml (PRs into `dev`, pushes to it, manual runs off `main`) and
+gate-e-guard.yml (PRs into `dev`) set GATE_E_PENDING_OK=1. Then a
 measurement that is OWED -- no row for an indicator that needs one, or a row whose
 module, output or columns moved since its run -- is a skip whose reason starts
 "Gate E owed", and the owner records it later. Toward `main` (a release PR, a push
-to `main`) and on any local run the variable is unset and these fail as before, so
+to `main`) and on any local run the variable is not `1` and these fail as before, so
 a release still needs every row. A deleted row counts as owed too (its indicator
 then has no row). Strict everywhere: a waived STRUCK column (ALLOWED_WAIVERS)
-whose code or output moved, a STRUCK row without its waiver, a hand-edited
+whose code or output moved or whose row was deleted, a STRUCK row without its waiver, a hand-edited
 verdict, missing Gate B/D tests. A manual CI run relaxes unless it is on `main`.
 Until the owner records it, `dev` may carry an unmeasured column that Gate E would
 strike; if its run is STRUCK, the column is reverted (or waived by the owner)
@@ -65,7 +66,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, Optional
 
 import pytest
 
@@ -97,7 +98,7 @@ GRANDFATHERED_SHA1 = "1b16434916bc4fb85889e2b72bc0960afcedb3dc"
 PENDING_OK = os.environ.get("GATE_E_PENDING_OK") == "1"
 
 
-def _owed(message: str, row: dict | None = None) -> NoReturn:
+def _owed(message: str, row: Optional[dict] = None) -> NoReturn:
     """A measurement is owed: a skip under GATE_E_PENDING_OK=1 (see the docstring), else a failure.
     Never a skip for a waived STRUCK column: its waiver covers one exact measurement."""
     if PENDING_OK and not (row and (row["indicator"], row["column"]) in ALLOWED_WAIVERS):
@@ -138,6 +139,13 @@ def test_every_indicator_that_needs_a_row_has_one():
         _owed(f"no Gate E ledger row for {sorted(missing)} (new to Category, or a grandfathered "
               "indicator whose default columns grew). Run Gate E (CLAUDE.md, 'Gate E harness'), "
               "then `python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`")
+
+
+def test_every_waived_column_keeps_its_row():
+    """Strict in both modes: deleting a waived row would otherwise turn its edit into "owed"."""
+    have = {(r["indicator"], r["column"]) for r in ROWS}
+    gone = sorted(k for k in ALLOWED_WAIVERS if k not in have)
+    assert not gone, f"waived STRUCK rows {gone} were removed from the ledger; restore them or ask the owner"
 
 
 @pytest.mark.parametrize("indicator", sorted(CATEGORY - set(GRANDFATHERED)))
