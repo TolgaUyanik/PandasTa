@@ -63,8 +63,8 @@ while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
   esac
   if [ "$state" = "BEHIND" ]; then
     # With the owner's token, not GITHUB_TOKEN: an update made with GITHUB_TOKEN starts no
-    # normal CI (measured on #226: the pull_request run waited for approval, and a dispatched
-    # run's `tests` check did not satisfy branch protection). This update starts `pull_request`
+    # normal CI (measured on #226: the pull_request run waited for approval, and the PR stayed
+    # blocked although a dispatched run passed `tests`). This update starts `pull_request`
     # CI like a push. Refused on a conflict GitHub had not computed yet: drop it, so it does not
     # hold the line. The same if the update is accepted but never lands.
     if ! GH_TOKEN="$MQ_TOKEN" gh api -X PUT "repos/$REPO/pulls/$pr/update-branch" --silent; then
