@@ -172,6 +172,15 @@ indicator has no `tests/test_<name>.py` with a `mutant` and a `scale` test, or w
 lacks its waiver. A waiver in `ALLOWED_WAIVERS` names the exact measurement (issue, module sha1,
 output fingerprint); today only `pfe` #23 and `kalman_trend`'s `KFT_VEL` #22 (owner, 2026-10-28).
 
+**Owed, not failed, on the way to `dev` (owner, 2026-11-01).** Contributors cannot run Gate E, so
+`ci.yml` sets `GATE_E_PENDING_OK=1` for PRs into `dev` and pushes to it: a measurement that is owed
+(no row for an indicator that needs one, or a row whose module, output or columns moved since its
+run) is a skip whose reason starts "Gate E owed", listed in the run summary under "Gate E owed"; the
+owner runs Gate E and records the row later. Toward `main` (a release PR, a push to `main`) and on
+every local run the variable is unset and these fail, so a release needs every row. Nothing else
+relaxes: a STRUCK row without its waiver, a hand-edited verdict, and missing Gate B/D tests fail
+everywhere.
+
 The dominant historical defect is **a claim written before it was measured** — 17 of 18 candidates
 failed first review, almost none on the mathematics. Every sentence containing *only, never, always,
 every, all, identical* or a specific count must correspond to a run. Deleting an over-correlated
