@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The merge queue for `dev`: one step for the PR at the head of the line. Run by
-# .github/workflows/merge-queue.yml (push to dev, a PR queued) and ci.yml (job `queue`, when a
+# .github/workflows/merge-queue.yml (push to dev, a PR queued, its own re-dispatch) and ci.yml (job `queue`, when a
 # PR's CI finishes); merge-queue.yml's header says what it does and why.
 # Needs REPO and GH_TOKEN (the job's token: pull-requests and actions write, contents read).
 # MQ_TOKEN (environment secret MERGE_QUEUE_TOKEN, the owner's token) is used only for branch
@@ -87,31 +87,38 @@ while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
     # run passed `tests`. Expected (GitHub's rules, not yet measured here): the owner's update
     # starts pull_request CI like a push. A 422 on a PR that really conflicts drops it, so it does
     # not hold the line; so does an update that is accepted but never lands.
-    # A 422 is the PR's (a conflict, or a stale read of BEHIND); any other failure is the token's
-    # or GitHub's: fail red, drop nothing.
+    # A 422 drops the PR only when it then reads as conflicting; a 422 that still reads BEHIND or
+    # UNKNOWN, like any other failure, fails red and drops nothing.
     if ! out="$(GH_TOKEN="$MQ_TOKEN" gh api -X PUT "repos/$REPO/pulls/$pr/update-branch" 2>&1)"; then
       if grep -q "HTTP 422" <<<"$out"; then
         # GitHub computes the merge state lazily: give a real conflict up to 60 s to show.
         merge_state="" mergeable=""
         for attempt in $(seq 6); do
           read -r merge_state mergeable < <(gh pr view "$pr" --repo "$REPO" --json mergeStateStatus,mergeable \
-            --jq '"\(.mergeStateStatus) \(.mergeable)"' || echo "UNKNOWN UNKNOWN")
+            --jq '"\(.mergeStateStatus) \(.mergeable)"' || echo "READ_FAILED READ_FAILED")
           case "$merge_state" in DIRTY|CLEAN|HAS_HOOKS|UNSTABLE|BLOCKED|DRAFT) break ;; esac
           [ "$mergeable" = "CONFLICTING" ] && break
           [ "$attempt" -lt 6 ] && sleep 10
         done
         if [ "$merge_state" = "DIRTY" ] || [ "$mergeable" = "CONFLICTING" ]; then
-          drop "$pr" "GitHub refused to update its branch from dev: it conflicts; merge dev into it by hand" || drop_failed=1
+          drop "$pr" "GitHub refused to update its branch from dev: it conflicts; merge dev into it by hand" || { echo "::error::#$pr: drop failed"; drop_failed=1; }
           continue
         fi
+        # No update was needed after all (a stale read of BEHIND): treat it as the main loop does.
         case "$merge_state" in
-          CLEAN|HAS_HOOKS|UNSTABLE|BLOCKED|DRAFT)
-            # No update was needed after all (a stale read of BEHIND): its CI or auto-merge acts.
-            echo "#$pr: update refused (HTTP 422), but it now reads $merge_state; waiting"; exit 0 ;;
+          DRAFT) echo "#$pr: now a draft; skipping it"; continue ;;
+          BLOCKED)
+            if [ "$tests" = "SUCCESS" ]; then echo "#$pr: green but blocked; skipping it"; continue; fi
+            echo "#$pr: update refused (HTTP 422), but it now reads BLOCKED; its CI end runs the queue"; exit 0 ;;
+          CLEAN|HAS_HOOKS|UNSTABLE)
+            echo "#$pr: update refused (HTTP 422), but it now reads $merge_state; auto-merge acts"; exit 0 ;;
         esac
         # Still behind (or unknown), refused, and not known to conflict: not retried (a repeating
         # 422 would loop) and not dropped (no evidence against the PR). Red, so it is seen.
-        echo "::error::#$pr: update refused (HTTP 422) and it still reads $merge_state/$mergeable: $(jq -r '.message? // empty' 2>/dev/null <<<"${out%%gh:*}" || tail -c 200 <<<"$out"). Re-run this workflow, or update the branch by hand."
+        msg="$(jq -r '.message? // empty' 2>/dev/null <<<"${out%%gh:*}" || true)"
+        [ -n "$msg" ] || msg="$(grep -m1 '^gh:' <<<"$out" || tail -c 200 <<<"$out")"
+        msg="$(tr '\n%' '  ' <<<"$msg")"
+        echo "::error::#$pr: update refused (HTTP 422) and it still reads $merge_state/$mergeable: $msg. Re-run this workflow, or update the branch by hand."
         exit 1
       fi
       echo "::error::#$pr: branch update failed, not a conflict (token permissions?): $(tail -c 300 <<<"$out"). No PR was taken out."; exit 1
