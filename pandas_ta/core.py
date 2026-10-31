@@ -1682,6 +1682,11 @@ class AnalysisIndicators(BasePandasObject):
         result = cusum(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def entlz(self, length=None, base=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = entlz(close=close, length=length, base=base, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def entropy(self, length=None, base=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = entropy(close=close, length=length, base=base, offset=offset, **kwargs)
