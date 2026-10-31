@@ -1,7 +1,7 @@
 # Volatility of Volatility — measured (`volvol`)
 
-**Status: BUILT 2026-10-31. Gates A, B, C, D cleared below (this session). Gate E: pending, run
-by issue-solver after this session. F: run by the launcher in clean worktrees of both repos.**
+**Status: SHIPPED 2026-10-31. Gates A-E cleared below. F: run by the launcher in clean worktrees
+of both repos.**
 
 Column `VOLVOL_20_14`: the rolling 20-bar standard deviation of a rolling 14-bar `natr` series —
 vol-of-vol, the instability of an asset's own volatility estimate. Category `volatility`.
@@ -48,29 +48,21 @@ Synthetic numbers are a 1,200-bar GBM walk, σ = 0.02, seed 11, 0.05 tick, high/
 |---|---|
 | A Correctness | Checked against an independent loop (`tests/test_volvol.py::test_matches_an_independent_natr_plus_stdev_loop`) that re-derives true range, an SMA-seeded EMA (`span=natr_length`, `adjust=False` — matching `pandas_ta.overlap.ema`'s SMA seed, NOT Wilder's `alpha=1/length`), the `100/close` scale factor, and a rolling stdev — all written from the formula text, not by importing `natr`/`volvol`. Max\|diff\| < 1e-9 over 400 bars (>300 compared bars after the 32-bar double warm-up). No published source line is cited (neither source is a Pine file; see Source). |
 | B Causality | 30-offset future-perturbation sweep on OHLC (`test_real_module_never_reads_the_future`): the real module leaks at 0 of 30 offsets. The catching mutant shifts the inner `natr` series 10 bars into the future (`importlib`-read source, `exec`'d in memory with `__package__` set so the module's own `from .natr import natr` resolves) and is caught at 30 of 30 (`test_mutant_is_caught`). |
-| C Reachability | Synthetic (seed-11 walk, 1,200 bars): 1,168 of 1,200 bars finite (32-bar warm-up: 13 leading-NaN bars before the inner `natr` EMA seeds + 19 more valid `natr` bars to fill the outer 20-bar rolling stdev window), all 1,168 non-zero, range [0.091438, 0.566766], mean 0.241904. Real-data counts come from the Gate E run (pending). |
+| C Reachability | Synthetic (seed-11 walk, 1,200 bars): 1,168 of 1,200 bars finite (32-bar warm-up: 13 leading-NaN bars before the inner `natr` EMA seeds + 19 more valid `natr` bars to fill the outer 20-bar rolling stdev window), all 1,168 non-zero, range [0.091438, 0.566766], mean 0.241904. Real data (Gate E run, 89 ALTPORT-1 BIST frames, 398,849 pooled bars): 396,001 non-NaN, 391,032 non-zero. |
 | D Scale-free | ×8 and ×64 bit-identical with matching NaN masks — `natr` is already a price ratio that is exact under a power-of-two rescale in IEEE float (the `100/close` and `ATR` scale factors cancel bit-exactly), and a rolling sample stdev of an exactly-scaled series is itself exactly scaled (sum, mean, and the final `sqrt` of an exact `k²`-scaled variance all stay exact under IEEE 754 for a power-of-two `k`). ×10 and ×3.7 within 3.081e-14 / 2.132e-14 (well under CLAUDE.md's 1e-12 bar). `0 < fires < n` (1,168 of 1,200) plus >100 distinct values and a non-constant column (`test_column_is_not_constant`), so a degenerate pass cannot sneak through. |
-| E Attribution | **Pending, run by issue-solver after this session.** Guessed (not measured) in the issue to land against `natr` / `natr_percentile`, since `VOLVOL` is a second-order function of `natr`. |
+| E Attribution | **Measured 2026-10-31**, `gate_e_overlap.py run --module pandas_ta.volatility.volvol` (Backtesting #107), 89 ALTPORT-1 BIST frames, 687 comparators (329 `compute_all` + 358 manifest `1d`), n=396,001 pooled bars. `VOLVOL_20_14`: pooled max\|ρ\| **0.6408** against `natr` (also the top `compute_all` hit); manifest-side max\|ρ\| 0.6408 against `Stop_2ATR_pct`. Per-frame median\|ρ\| 0.6190 against `natr` (max across comparators), 0 of 89 frames ≥ 0.90. Confirms the issue's guess that this is a second-order function of `natr`, but the correlation is far below the ship line. Band (`r3-perframe-0.90`): pooled 0.6408 < 0.76 and per-frame max-median 0.6190 < 0.90 → **SHIP**. |
 | F Suites | Run by the launcher in clean worktrees of both repos. |
 
-### This session's own suite run
+### Suite runs
 
-`python -m pytest -q` (this worktree, not a clean checkout): the new `tests/test_volvol.py`
-(11 tests) passes in isolation. `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails — expected: `volvol` is wired into `Category` per this issue's rules, and that specific test
-stays red until a later session records its Gate E ledger row. No other test in
-`tests/test_gate_e_ledger.py` regresses (142 passed alongside that one expected failure, checked
-in this worktree before commit). The full-suite count and whether any other module regresses is
-for the launcher's clean-worktree run (Gate F), not asserted here.
+Build session (`python -m pytest -q`, this worktree, not a clean checkout): the new
+`tests/test_volvol.py` (11 tests) passed in isolation; 142 passed alongside the one expected
+`tests/test_gate_e_ledger.py` failure (no ledger row yet).
 
-## To close
+Receipt session (after `docs/gate_e_ledger.py record`, this worktree): full suite run, see below.
 
-1. Gate E: launcher runs `gate_e_overlap.py run --module pandas_ta.volatility.volvol`.
-2. Record the run: `python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`.
-3. Fill in the Gate E row above with the measured max \|ρ\|, its comparator, and the SHIP /
-   DISCLOSE / DISCLOSE_GAP / STRUCK band.
-4. If STRUCK: this module, its wiring, and its tests are reverted; this file stays as the receipt
-   per the issue's "measured and reverted" closing condition.
-5. If SHIP / DISCLOSE / DISCLOSE_GAP: nothing further to wire — `volvol` is already in `Category`
-   (not withheld, per this issue's rules) — just fill in Gate C's real-data counts from the same
-   run and confirm both suites (Gate F).
+## Closed
+
+Gate E ran SHIP (0.6408 < 0.76, no per-frame ≥ 0.90). Ledger row recorded
+(`docs/gate_e_ledger.py record ... --measured 2026-10-31`). `volvol` stays in `Category`, wired
+as built — nothing reverted. Gate F is the launcher's clean-worktree run of both repos' suites.
