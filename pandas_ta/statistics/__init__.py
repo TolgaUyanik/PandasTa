@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from .entlz import entlz
 from .entropy import entropy
 from .kpss import kpss
 from .kurtosis import kurtosis
@@ -16,3 +17,4 @@ from .normalize import normalize
 from .covariance import covariance
 from .beta import beta
 from .cusum import cusum
+from .ffd import ffd
