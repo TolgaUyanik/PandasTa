@@ -2613,6 +2613,12 @@ class AnalysisIndicators(BasePandasObject):
         result = pocket_pivot(close=close, open_=open_, high=high, low=low, volume=volume, length=length, max_offset_pct=max_offset_pct, lookback=lookback, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def pvcorr(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = pvcorr(close=close, volume=volume, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def pvi(self, length=None, initial=None, signed=True, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
