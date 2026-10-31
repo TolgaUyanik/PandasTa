@@ -8,13 +8,10 @@ machine, so the recursion is implemented from the task's own description of AFML
 5.1-5.2 (`getWeights_FFD`, `fracDiff_FFD`), not checked line-by-line against the printed
 book.
 
-**Status: Gates A, B, D cleared; Gate C synthetic only (real-data counts owed, no access
-to the parent repo in this worktree); Gate E PENDING, run by the issue-solver launcher
-after this session.** `ffd` is in `Category`, following the `pfe` / `kalman_trend` /
-`range_compress_run` precedent of registering before Gate E records
-(`docs/MLCompanionContract.md`). `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails until the launcher's run is recorded with `docs/gate_e_ledger.py record`; that is
-expected, not a bug in this session's work.
+**Status: Gates A, B, D, E cleared; Gate C synthetic only (real-data counts owed, no
+access to the parent repo in this worktree).** Gate E ran 2026-10-31 (run
+`is13-ffd-406bc97e`), verdict `DISCLOSE_GAP` (0.80 ≤ max |ρ| < 0.90, not STRUCK) — shipped,
+disclosed below. Recorded in `docs/gate_e_ledger.csv` via `docs/gate_e_ledger.py record`.
 
 Shipped: `pandas_ta/statistics/ffd.py`, one column `FFD_<d>_<threshold>` (default
 `_0.4_0.0001`). Tests: `tests/test_ffd.py` (30). Every number below is printed by
@@ -80,7 +77,7 @@ selector is a second indicator's worth of machinery with its own warm-up and tes
 | B Causality | future-perturbation over 8 offsets past the warm-up: real module 0 leaks. Two mutants, each proved live, then caught at 8 of 8: the output write back-dated by one bar, and the anchor read from `usable[-1]` (the END of the series) instead of `usable[0]` — the look-ahead class the task's 🔴 flagged, here as a data-dependent reference rather than a fitted parameter, since `d` itself is never fit |
 | C Reachability | **synthetic only**: 3,000-bar GBM, seed 11, tick 0.05, default `d, threshold`: 2,719 finite, 2,719 nonzero (1,629 pos / 1,090 neg), 2,719 distinct values. Real-data counts owed |
 | D Scale-free | x8, x64 max diff 0.0 and `Series.equals` True; x10, x3.7 max diff 3.3e-16 / 4.4e-16 (test bound 1e-9), NaN masks match; `0 < 2719 < 3000` fires, > 100 distinct values |
-| E Attribution | **PENDING**, run by the issue-solver launcher after this session. Proxy overlap below is NOT Gate E |
+| E Attribution | **DISCLOSE_GAP.** `FFD_0.4_0.0001` max \|ρ\| = 0.8494 vs `Dist_to_SMA_200_pct` (manifest, n = 373,840); per-frame max median \|ρ\| = 0.8425 (same comparator, 89 frames, 0.0% of frames ≥ 0.90 pooled-only). Run `is13-ffd-406bc97e`, 2026-10-31, 687 comparators (329 `compute_all` + 358 `ml_features` manifest), 89 ALTPORT-1 frames. Band: 0.80 ≤ ρ < 0.90, not STRUCK — shipped |
 | F Suites | this repo: see the commit this file ships with; both repos' suites are run by the launcher in clean worktrees, per this session's rules |
 
 ## Proxy overlap (NOT Gate E)
@@ -109,17 +106,20 @@ The maximum (CMO_14 / RSI_14, 0.7346) does not move much with volatility (σ fro
 synthetic proxy on comparators this repo already ships, not Gate E's 687-comparator sweep
 against the production engine's real columns on 89 BIST frames. Gate E decides.
 
-## To close
+## Gate E close-out (2026-10-31)
 
-1. The issue-solver launcher runs Gate E (`gate_e_overlap.py build` then `run --module
-   pandas_ta.statistics.ffd --name ffd`) against the parent repo's `compute_all` ∪
-   `ml_features` manifest, over the 89 ALTPORT-1 frames.
-2. Record the run: `python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`,
-   then fill Gate C's real-data counts from the same frames and enter the Gate E verdict
-   and max |ρ| above.
-3. Apply CLAUDE.md's `r3-perframe-0.90` bands. If STRUCK with no waiver, or if the owner
-   judges the proxy ceiling (0.7346) too close to the 0.76 ship line once real data is in:
-   delete the module, the export, the `Category` entry, the accessor, the tests, the
-   README counts, the dictionary row and the `MLCompanionContract` count, and keep this
-   file. A revert closes the task as well as a ship.
-4. Run both suites.
+Gate E ran against the production engine's `compute_all` ∪ `ml_features` manifest (687
+comparators) over the 89 ALTPORT-1 BIST frames; outputs recorded in
+`docs/gate_e_ledger.csv` (run `is13-ffd-406bc97e`).
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `FFD_0.4_0.0001` | 0.8494 | `Dist_to_SMA_200_pct` (manifest) | 373,840 | 0.8425 | `DISCLOSE_GAP` |
+
+`DISCLOSE_GAP` (0.80 ≤ max \|ρ\| < 0.90) is not `STRUCK` under CLAUDE.md's
+`r3-perframe-0.90` bands — 0.0% of the 89 frames hit the per-frame ≥ 0.90 STRUCK trip. The
+real-data overlap (0.8494) sits well above the synthetic proxy's 0.7346 ceiling above, which
+undersold it: a fixed-`d` fractional difference of log price tracks a 200-bar distance-to-SMA
+closely on these frames. Disclosed, not struck — the column ships as-is; `ffd` stays
+registered, no module/wiring/test removal needed. Gate C's real-data counts remain owed (no
+parent-repo access in this worktree).
