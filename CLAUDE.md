@@ -47,12 +47,17 @@ only once the workflow file is on it, because `pull_request_target` reads the wo
 
 **Merging into `dev`: the merge queue.** GitHub's native merge queue is not available on this
 repository, so `.github/workflows/merge-queue.yml` builds one from auto-merge. Queue a PR with
-`gh pr merge <N> --auto --merge`; PRs go in the order auto-merge was switched on. On each push to
-`dev` (and when a PR is queued) the workflow takes the head of the line: behind `dev`, it updates
-the branch and dispatches `ci.yml` on it (a GITHUB_TOKEN branch update does not trigger
-`pull_request`, `workflow_dispatch` is exempt); conflicting or red, it switches auto-merge off with a
-comment and moves to the next. One PR is tested at a time. `.github/workflows/auto-merge-guard.yml`
-switches auto-merge off on any PR whose base is not `dev`: a merge into `main` stays a human act.
+`gh pr merge <N> --auto --merge`; PRs go roughly in the order auto-merge was switched on. The queue
+runs on each push to `dev`, when a PR into `dev` is queued (`auto-merge-guard.yml`), and when a PR's
+CI finishes (`ci.yml` job `queue`), and takes the head of the line, reading only the `tests` check:
+behind `dev`, it updates the branch and dispatches `ci.yml` on it (a GITHUB_TOKEN branch update does
+not trigger `pull_request`; `workflow_dispatch` is exempt); conflicting or red, it switches auto-merge
+off with a comment and moves to the next. One PR is tested at a time. If `dev` changed a file under
+`.github/workflows` since a PR branch was cut, GitHub refuses the token's update: that PR is dropped
+with a comment, and `dev` is merged into it by hand. `auto-merge-guard.yml` switches auto-merge off
+on any PR whose base is not `dev` (best effort: it runs after the fact). Keep `guard` out of `dev`'s
+required checks while this queue is in use: it runs on `pull_request_target`, which the token's
+branch update does not trigger, so every updated PR would sit blocked.
 
 ## Architecture
 
