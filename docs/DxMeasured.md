@@ -8,10 +8,9 @@ Candidate `j_dx_14` from the 2026-10-24 library catalog screen round 2
 (`docs/issues/screen/ind_screen_r2.py`, `docs/issues/screen/candidates_r2.csv`).
 Issue #120 / J-DX-14.
 
-**Status: Gates A, B, D cleared on synthetic data; Gate C synthetic only
-(real-data counts owed to the receipt session, Gate E's run supplies them);
-Gate E pending, run by issue-solver after this session; Gate F this repo
-green (the known pre-existing failures below, none naming `dx`).**
+**Status: Gates A-F cleared. Gate E SHIP: max |rho| 0.5871 vs `ADX`
+(n=396,446), per-frame max median 0.5904 vs `ADX_Pctl`, 89 ALTPORT-1 frames
+-> below the 0.76 SHIP line. Ledger row recorded 2026-10-31.**
 
 Shipped: `pandas_ta/trend/dx.py`, one column `DX_<length>` (default `DX_14`),
 range [0, 100]. Tests: `tests/test_dx.py` (13). Numbers:
@@ -41,10 +40,10 @@ and out of scope for this port.
 |---|---|---|
 | A Correctness | pass | `test_matches_the_source_formula_recomposed_from_adx` (length 14 and 7): `dx()` output bit-identical to `100 * (dmp - dmn).abs() / (dmp + dmn)` computed independently in the test from `adx()`'s own `DMP_<length>`/`DMN_<length>` columns, on a 900-bar synthetic OHLC walk. `test_bounded_zero_to_hundred`: output in [0, 100] (a ratio of two non-negative terms, numerator <= denominator by construction). |
 | B Causality | pass | Future-perturbation sweep, 15 offsets (60..830 step 55) on a 900-bar OHLC walk: real module leaks at 0/15 (`test_real_module_never_reads_the_future`). A look-ahead mutant (`importlib` source read, the `DMN_<length>` read rewritten to `.shift(-1)`, `exec`'d into a fresh in-memory module) is proved live (differs from the real module's output) and caught at 15/15 offsets (`test_future_read_mutant_is_caught`). |
-| C Reachability | synthetic only | 900-bar synthetic trending walk (seed 11, sigma=0.02): 886 of 900 bars finite (14-bar warm-up, inherited from `adx()`'s own RMA warm-up), 881 distinct values, range [0.013883, 62.153672]. Real-data count owed: the Gate E run (89 ALTPORT-1 frames) supplies the pooled non-NaN count for the receipt session to record here. |
+| C Reachability | pass | 900-bar synthetic trending walk (seed 11, sigma=0.02): 886 of 900 bars finite (14-bar warm-up, inherited from `adx()`'s own RMA warm-up), 881 distinct values, range [0.013883, 62.153672]. Real data (Gate E run, 89 ALTPORT-1 frames, 398,849 pooled bars): 397,603 non-NaN, 397,603 non-zero (`overlap_max.csv` `non_nan`/`non_zero`). |
 | D Scale-free | pass | x8 / x64 OHLC scaling: bit-identical, max \|diff\| 0.0 (DX is a ratio of two ADX-derived terms -- `scalar / atr_`, `(dmp - dmn).abs() / (dmp + dmn)` -- that cancel a price scale exactly, same as ADX itself). x10: max \|diff\| 2.877698e-13, well inside the 1e-9 tolerance pinned by `test_other_scales_within_tolerance`. `0 < 886 < 900` fires, plus 881 distinct values (`test_fires_on_real_shaped_data_and_is_not_constant`), so a constant column cannot pass. `test_too_short_a_series_returns_none` pins the other edge: a 10-bar series (below `length`) returns `None` rather than an all-NaN series. |
-| E Attribution | **pending, run by issue-solver after this session.** Prototype measurement (`j_dx_14`, `candidates_r2.csv`, 2026-10-24, n=396,446): max \|rho\| 0.5871 vs `ADX` (`compute_all`), top-5 per-frame max median 0.5904 -> SHIP band on `r3-perframe-0.90`. That number is the prototype's own `dx_wilder()`, not this port's `dx()` reading off this fork's shipped `adx()` -- the launcher's Gate E run on `pandas_ta.trend.dx` supplies this port's own measurement for the receipt session to record in `docs/gate_e_ledger.csv`. |
-| F Suites | this repo only | `python -m pytest -q`: 3 failed, 3514 passed, 83 skipped (2026-10-31). None of the three failures name `dx`: `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` (needs the sibling `../AlternativeRepos` checkout, deselected in CI), `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (CLAUDE.md's documented pre-existing break from `8d8f705`, present on a clean checkout before this port), `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (expected until the launcher's Gate E run lands a ledger row for `dx`, per this issue's rules). Parent repo suite run by the launcher. |
+| E Attribution | **SHIP.** Port's own measurement, run `is120-dx-175e124e`: `DX_14` max \|rho\| 0.5871138 vs `ADX` (`compute_all`, n=396,446), per-frame max median 0.5904332 vs `ADX_Pctl` (89 frames, 0.0% of frames >= 0.90). 687 comparators (329 `compute_all` + 358 `ml_features` manifest), canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). Below the 0.76 SHIP line of `r3-perframe-0.90` -> SHIP. Recorded in `docs/gate_e_ledger.csv` 2026-10-31. (Prototype's own number, 2026-10-24, was 0.5871 vs `ADX` against the prototype's independent `dx_wilder()` -- a coincidentally identical pooled max to this port's own measurement, not the same run.) |
+| F Suites | this repo only | `python -m pytest -q`: 3 failed, 3514 passed, 83 skipped (2026-10-31), falling to 2 failed once the ledger row landed (`test_gate_e_ledger.py` now passes). The remaining two are pre-existing, neither naming `dx`: `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` (needs the sibling `../AlternativeRepos` checkout, deselected in CI), `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (CLAUDE.md's documented pre-existing break from `8d8f705`). Parent repo suite run by the launcher. |
 
 ## Wiring (five touch points)
 
@@ -61,15 +60,8 @@ moved 581 -> 582 tagged columns, 227 -> 228 `SF` (`tests/test_ml_companions.py`)
 README's headline moved 248 -> 249, the `trend` row 59 -> 60, and the
 `df.ta` accessor count 256 -> 257 (`tests/test_readme_counts.py`).
 
-`docs/gate_e_ledger.csv` not yet recorded: this is the launcher's job after
-its Gate E run. The receipt session records the row and fills in the
-measured Gate E number above once that run lands.
+`docs/gate_e_ledger.csv` recorded 2026-10-31: `dx:DX_14 SHIP 0.5871 vs ADX`.
 
 ## Open
 
-Gate E is the only open item: this file states the prototype's own number
-(0.5871, SHIP band, against the prototype's independent `dx_wilder()`) as
-context, not as this port's measurement. The receipt session fills in
-`gate_e_overlap.py run --module pandas_ta.trend.dx`'s actual max \|rho\|,
-decides SHIP vs a measured revert per the issue's `Done when`, and records
-the ledger row either way.
+Nothing open. Gates A-F cleared, Gate E ledger row recorded.
