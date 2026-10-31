@@ -172,10 +172,12 @@ REGISTERED = {
 #: in the ledger), -> 247 by max_return (#12, Gate E SHIP,
 #: 0.6716, in the ledger), -> 248 by tf_median_absdiff_20 (#118, volatility;
 #: Gate E SHIP, 0.7422, in the ledger), -> 249 by entlz (#11, statistics;
-#: Gate E pending, run by issue-solver after this session). Pinned, not
+#: Gate E pending, run by issue-solver after this session), -> 250 by ffd (#13,
+#: statistics; Gate E DISCLOSE_GAP, 0.8494 vs Dist_to_SMA_200_pct, in the ledger;
+#: see docs/FfdMeasured.md). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
-CATEGORY_TOTAL = 249
+CATEGORY_TOTAL = 250
 CATEGORY_BUCKETS = {"trend": 59, "volatility": 23, "volume": 25}
 
 #: Gate E, re-measured on the SHIPPED columns over 89 BIST_100 daily frames /

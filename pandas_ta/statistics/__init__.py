@@ -17,3 +17,4 @@ from .normalize import normalize
 from .covariance import covariance
 from .beta import beta
 from .cusum import cusum
+from .ffd import ffd
