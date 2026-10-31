@@ -52,26 +52,26 @@ dispatch() {   # $1 PR, $2 branch
 while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
   echo "#$pr: merge state $state, tests $tests"
   if [ "$cross" = "true" ]; then
-    drop "$pr" "this workflow cannot update a branch from a fork; update it from dev by hand"
+    drop "$pr" "this workflow cannot update a branch from a fork; update it from dev by hand" || echo "::error::#$pr: drop failed"
     continue
   fi
   if [ "$draft" = "true" ] || [ "$state" = "DRAFT" ]; then
     echo "#$pr: draft; skipping it"; continue
   fi
   case "$state" in
-    DIRTY) drop "$pr" "it conflicts with dev"; continue ;;
+    DIRTY) drop "$pr" "it conflicts with dev" || echo "::error::#$pr: drop failed"; continue ;;
     UNKNOWN) echo "#$pr: merge state still UNKNOWN after 60 s; skipping it this run"; continue ;;
   esac
   case "$tests" in
     FAILURE|TIMED_OUT|CANCELLED|ACTION_REQUIRED|STARTUP_FAILURE)
-      drop "$pr" "its \`tests\` check ended $tests"; continue ;;
+      drop "$pr" "its \`tests\` check ended $tests" || echo "::error::#$pr: drop failed"; continue ;;
   esac
   if [ "$state" = "BEHIND" ]; then
     # Refused when dev changed a workflow file since the branch was cut (GITHUB_TOKEN may not
     # write those), or on a conflict GitHub had not computed yet: drop it, so it does not hold
     # the line. The same if the update is accepted but never lands.
     if ! gh api -X PUT "repos/$REPO/pulls/$pr/update-branch" --silent; then
-      drop "$pr" "updating its branch from dev failed (a workflow file changed on dev, or a conflict; see the merge-queue run log); merge dev into it by hand"
+      drop "$pr" "updating its branch from dev failed (a workflow file changed on dev, or a conflict; see the merge-queue run log); merge dev into it by hand" || echo "::error::#$pr: drop failed"
       continue
     fi
     # The update is asynchronous: dispatch only once the head commit has moved.
@@ -82,17 +82,21 @@ while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
       [ "$now" != "$head" ] && break
     done
     if [ "$now" = "$head" ]; then
-      drop "$pr" "its branch update from dev did not land within 60 s (likely a workflow file changed on dev); merge dev into it by hand"
+      drop "$pr" "its branch update from dev did not land within 60 s (likely a workflow file changed on dev); merge dev into it by hand" || echo "::error::#$pr: drop failed"
       continue
     fi
     dispatch "$pr" "$ref" || continue
   elif [ "$tests" = "NONE" ]; then
     # Up to date, no `tests` check on its head: start CI, unless a ci.yml run for this exact
     # head exists already (queued, or one whose check never reached the PR: never loop).
-    runs="$(gh run list --repo "$REPO" --workflow ci.yml --branch "$ref" --limit 20 \
-              --json headSha --jq "[.[] | select(.headSha == \"$head\")] | length")"
-    if [ "$runs" != "0" ]; then
-      echo "#$pr: a CI run for $head exists already; waiting"; exit 0
+    runs="$(gh run list --repo "$REPO" --workflow ci.yml --branch "$ref" --limit 20 --json headSha,status \
+              --jq "[.[] | select(.headSha == \"$head\") | .status]")"
+    if [ "$(jq 'map(select(. != "completed")) | length' <<<"$runs")" != "0" ]; then
+      echo "#$pr: a CI run for $head is still running; waiting"; exit 0
+    fi
+    if [ "$(jq 'length' <<<"$runs")" != "0" ]; then
+      drop "$pr" "CI ran on $head but left no \`tests\` check (cancelled before it started?); re-run CI on it" || echo "::error::#$pr: drop failed"
+      continue
     fi
     dispatch "$pr" "$ref" || continue
   elif [ "$state" = "BLOCKED" ] && [ "$tests" = "SUCCESS" ]; then

@@ -58,7 +58,8 @@ off with a comment and moves to the next. One PR is tested at a time. If `dev` c
 with a comment, and `dev` is merged into it by hand. `auto-merge-guard.yml` switches auto-merge off
 on any PR whose base is not `dev` (best effort: it runs after the fact). Keep `guard` out of `dev`'s
 required checks while this queue is in use: it runs on `pull_request_target`, which the token's
-branch update does not trigger, so every updated PR would sit blocked.
+branch update does not trigger, so every updated PR would sit blocked. A cancelled `queue` job on a CI run is
+expected: the queue's concurrency group keeps one waiting step and cancels older ones.
 
 ## Architecture
 
