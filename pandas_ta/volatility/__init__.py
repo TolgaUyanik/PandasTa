@@ -8,6 +8,7 @@ from .bbands import bbands
 from .corwin_schultz import corwin_schultz
 from .cvi import cvi
 from .donchian import donchian
+from .garman_klass import garman_klass
 from .har_park import har_park
 from .hwc import hwc
 from .kc import kc
@@ -16,6 +17,7 @@ from .pdist import pdist
 from .range_compress_run import range_compress_run
 from .range_profile import range_profile
 from .natr import natr
+from .rogers_satchell import rogers_satchell
 from .roll_spread import roll_spread
 from .rvi import rvi
 from .tf_median_absdiff_20 import tf_median_absdiff_20
@@ -23,3 +25,4 @@ from .thermo import thermo
 from .true_range import true_range
 from .ui import ui
 from .volvol import volvol
+from .yang_zhang import yang_zhang
