@@ -17,7 +17,8 @@ What is pinned, in order of how much it would hurt to lose:
   `pfe`: 233 indicators, 563 default columns) -- and a grandfathered indicator
   loses its exemption the moment its default columns grow. `pfe`,
   `kalman_trend` and `range_compress_run` were all merged with Gate E owed;
-  this is the test that would have stopped them.
+  this is the test that would have stopped them (reaching `main`; on the way
+  to `dev` it reports them as owed, see below).
 * Each row still describes its code: the LF-normalised sha1 of the module file,
   AND an output fingerprint of every column on a fixed synthetic frame, which
   catches an edit to a helper the module imports (`pfe` imports `ema`,
@@ -49,8 +50,13 @@ measurement that is OWED -- no row for an indicator that needs one, or a row who
 module, output or columns moved since its run -- is a skip whose reason starts
 "Gate E owed", and the owner records it later. Toward `main` (a release PR, a push
 to `main`) and on any local run the variable is unset and these fail as before, so
-a release still needs every row. Nothing else relaxes: a STRUCK row without its
-waiver, a hand-edited verdict, missing Gate B/D tests still fail everywhere.
+a release still needs every row. A deleted row counts as owed too (its indicator
+then has no row). Strict everywhere: a waived STRUCK column (ALLOWED_WAIVERS)
+whose code or output moved, a STRUCK row without its waiver, a hand-edited
+verdict, missing Gate B/D tests. A manual CI run relaxes unless it is on `main`.
+Until the owner records it, `dev` may carry an unmeasured column that Gate E would
+strike; if its run is STRUCK, the column is reverted (or waived by the owner)
+before the release, and the release PR into `main` fails until then.
 """
 import hashlib
 import importlib.util
@@ -59,6 +65,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
@@ -90,9 +97,10 @@ GRANDFATHERED_SHA1 = "1b16434916bc4fb85889e2b72bc0960afcedb3dc"
 PENDING_OK = os.environ.get("GATE_E_PENDING_OK") == "1"
 
 
-def _owed(message: str) -> None:
-    """A measurement is owed: a skip under GATE_E_PENDING_OK=1 (see the docstring), else a failure."""
-    if PENDING_OK:
+def _owed(message: str, row: dict | None = None) -> NoReturn:
+    """A measurement is owed: a skip under GATE_E_PENDING_OK=1 (see the docstring), else a failure.
+    Never a skip for a waived STRUCK column: its waiver covers one exact measurement."""
+    if PENDING_OK and not (row and (row["indicator"], row["column"]) in ALLOWED_WAIVERS):
         pytest.skip(f"Gate E owed (the owner records it later): {message}")
     pytest.fail(message)
 
@@ -158,18 +166,18 @@ def test_row_names_the_module_that_defines_the_indicator(row):
 def test_row_still_describes_its_module(row):
     path = gl.module_path(row["module"])
     if gl.lf_sha1(path) != row["module_sha1"]:
-        _owed(f"{path.relative_to(REPO)} changed after Gate E run {row['run']}; re-run Gate E and re-record it")
+        _owed(f"{path.relative_to(REPO)} changed after Gate E run {row['run']}; re-run Gate E and re-record it", row)
 
 
 @pytest.mark.parametrize("row", LIVE, ids=_row_id)
 def test_row_output_has_not_moved(row):
     out = _output(row["indicator"])
     if row["column"] not in out.columns:
-        _owed(f"{_row_id(row)} is no longer in the default output; re-run Gate E and re-record it")
+        _owed(f"{_row_id(row)} is no longer in the default output; re-run Gate E and re-record it", row)
     now = gl.fingerprint(out[row["column"]])
     if not gl.fingerprints_match(now, row["output_fp"]):
         _owed(f"{_row_id(row)} output moved since Gate E run {row['run']} ({row['output_fp']} -> {now}); "
-              "a helper it imports may have changed. Re-run Gate E and re-record it")
+              "a helper it imports may have changed. Re-run Gate E and re-record it", row)
 
 
 @pytest.mark.parametrize("row", ROWS, ids=_row_id)
@@ -272,3 +280,18 @@ def test_record_refuses_a_waiver_on_a_run_with_nothing_struck(tmp_path):
 def test_a_nan_per_frame_median_is_read_not_raised():
     assert gl.expected_verdict(gl.to_float("0.5"), gl.to_float("")) == "SHIP"
     assert gl.expected_verdict(gl.to_float("0.95"), gl.to_float("")) == "STRUCK"
+
+
+def test_owed_fails_unless_pending_ok(monkeypatch):
+    """The switch itself: owed is a failure without GATE_E_PENDING_OK=1, a skip with it, and a
+    failure for a waived STRUCK column either way."""
+    plain = {"indicator": "x", "column": "X_1"}
+    waived = {"indicator": "pfe", "column": "PFE_10_5"}
+    monkeypatch.setitem(globals(), "PENDING_OK", False)
+    with pytest.raises(pytest.fail.Exception):
+        _owed("owed", plain)
+    monkeypatch.setitem(globals(), "PENDING_OK", True)
+    with pytest.raises(pytest.skip.Exception):
+        _owed("owed", plain)
+    with pytest.raises(pytest.fail.Exception):
+        _owed("owed", waived)
