@@ -1094,6 +1094,12 @@ class AnalysisIndicators(BasePandasObject):
         result = mom(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def ovn_split(self, length=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ovn_split(open_=open_, close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def pfe(self, length=None, smooth=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = pfe(close=close, length=length, smooth=smooth, offset=offset, **kwargs)
