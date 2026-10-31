@@ -87,17 +87,30 @@ while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
     # run passed `tests`. Expected (GitHub's rules, not yet measured here): the owner's update
     # starts pull_request CI like a push. A 422 on a PR that really conflicts drops it, so it does
     # not hold the line; so does an update that is accepted but never lands.
-    # Only a 422 (GitHub refuses the merge: a conflict) is the PR's fault; any other failure is
-    # the token's or GitHub's: fail red, drop nothing.
+    # A 422 is the PR's (a conflict, or a stale read of BEHIND); any other failure is the token's
+    # or GitHub's: fail red, drop nothing.
     if ! out="$(GH_TOKEN="$MQ_TOKEN" gh api -X PUT "repos/$REPO/pulls/$pr/update-branch" 2>&1)"; then
       if grep -q "HTTP 422" <<<"$out"; then
-        # 422 also means "already up to date" or a moved head (stale BEHIND): drop only a real conflict.
-        if [ "$(gh pr view "$pr" --repo "$REPO" --json mergeStateStatus --jq .mergeStateStatus)" = "DIRTY" ]; then
+        # GitHub computes the merge state lazily: give a real conflict up to 60 s to read DIRTY.
+        merge_state=""
+        for attempt in $(seq 6); do
+          merge_state="$(gh pr view "$pr" --repo "$REPO" --json mergeStateStatus --jq .mergeStateStatus)"
+          case "$merge_state" in DIRTY|CLEAN|HAS_HOOKS|UNSTABLE) break ;; esac
+          sleep 10
+        done
+        if [ "$merge_state" = "DIRTY" ]; then
           drop "$pr" "GitHub refused to update its branch from dev: it conflicts; merge dev into it by hand" || echo "::error::#$pr: drop failed"
           continue
         fi
-        echo "#$pr: update refused (HTTP 422) but not conflicting; the next queue step looks again"
-        exit 0
+        if [ "$merge_state" = "BEHIND" ] || [ "$merge_state" = "UNKNOWN" ]; then
+          # Still behind, still refused, not known to conflict. Not retried (a 422 that repeats
+          # would loop): taken out with the reason, so it does not hold the line. drop() skips it
+          # if the head moved meanwhile (a stale read of BEHIND).
+          drop "$pr" "GitHub refused to update its branch from dev (HTTP 422: $(tail -c 200 <<<"$out" | tr -cd '[:print:]')) and it still reads $merge_state; merge dev into it by hand" || echo "::error::#$pr: drop failed"
+          continue
+        fi
+        echo "#$pr: update refused (HTTP 422), but it now reads $merge_state (no update needed); next PR"
+        continue
       fi
       echo "::error::#$pr: branch update failed, not a conflict (token permissions?): $(tail -c 300 <<<"$out"). No PR was taken out."; exit 1
     fi
@@ -125,7 +138,14 @@ while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
         --jq "[.[] | select(.headSha == \"$head\") | if .conclusion == \"action_required\" then \"action_required\" else .status end]"
     }
     # Poll once per step (job timeout 20 min): a later PR in the same step exits instead.
-    if [ -n "${polled:-}" ]; then echo "#$pr: no CI run yet; the next queue step looks again"; exit 0; fi
+    if [ -n "${polled:-}" ]; then
+      # Already polled once in this step: start a fresh step for this PR rather than wait for an
+      # unrelated event. Bounded: that step polls once, then drops or proceeds.
+      if ! gh workflow run merge-queue.yml --repo "$REPO" --ref dev; then
+        echo "::error::#$pr: no CI run yet, and dispatching merge-queue.yml failed"; exit 1
+      fi
+      echo "#$pr: no CI run yet; merge-queue.yml dispatched to look again"; exit 0
+    fi
     polled=1
     runs="$(list_runs)"
     for attempt in $(seq 12); do

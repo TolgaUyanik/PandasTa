@@ -63,10 +63,10 @@ fine-grained token (Contents, Pull requests, Workflows: read/write) as `MERGE_QU
 requires no approving review, so a merged PR that edits the queue could still reach the token: read
 every change under `.github/` before merging it. On #226 an update made with GITHUB_TOKEN started a
 pull_request run that waited for approval, and the PR stayed blocked although a dispatched run
-passed `tests`. A rejected token fails the step red and drops nothing (only a conflict, HTTP 422,
-takes a PR out): renew it. `auto-merge-guard.yml` switches auto-merge off on any PR whose base is
-not `dev` (best effort: it runs after the fact). A cancelled `queue` job on a CI run is expected:
-its concurrency group keeps one waiting step and cancels older ones.
+passed `tests`. A rejected token fails the step red and drops nothing (only an HTTP 422 on the
+update takes a PR out): renew it. `auto-merge-guard.yml` switches auto-merge off on any PR whose
+base is not `dev` (best effort: it runs after the fact). A cancelled `queue` job on a CI run is
+expected: its concurrency group keeps one waiting step and cancels older ones.
 
 ## Architecture
 
