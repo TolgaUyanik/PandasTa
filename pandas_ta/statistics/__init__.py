@@ -16,3 +16,4 @@ from .normalize import normalize
 from .covariance import covariance
 from .beta import beta
 from .cusum import cusum
+from .trend_scan import trend_scan
