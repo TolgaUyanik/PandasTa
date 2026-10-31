@@ -1094,6 +1094,12 @@ class AnalysisIndicators(BasePandasObject):
         result = mom(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def ovn_split(self, length=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ovn_split(open_=open_, close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def pfe(self, length=None, smooth=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = pfe(close=close, length=length, smooth=smooth, offset=offset, **kwargs)
@@ -1682,9 +1688,19 @@ class AnalysisIndicators(BasePandasObject):
         result = cusum(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def entlz(self, length=None, base=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = entlz(close=close, length=length, base=base, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def entropy(self, length=None, base=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = entropy(close=close, length=length, base=base, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def ffd(self, d=None, threshold=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ffd(close=close, d=d, threshold=threshold, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def kpss(self, length=None, offset=None, **kwargs):
@@ -2348,6 +2364,14 @@ class AnalysisIndicators(BasePandasObject):
         result = donchian(high=high, low=low, lower_length=lower_length, upper_length=upper_length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def garman_klass(self, length=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = garman_klass(open_=open_, high=high, low=low, close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def har_park(self, short_length=None, medium_length=None, long_length=None, fit_window=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
@@ -2445,6 +2469,13 @@ class AnalysisIndicators(BasePandasObject):
         result = tf_median_absdiff_20(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def volvol(self, length=None, natr_length=None, mamode=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = volvol(high=high, low=low, close=close, length=length, natr_length=natr_length, mamode=mamode, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def pdist(self, drift=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         high = self._get_column(kwargs.pop("high", "high"))
@@ -2464,6 +2495,14 @@ class AnalysisIndicators(BasePandasObject):
         low = self._get_column(kwargs.pop("low", "low"))
         close = self._get_column(kwargs.pop("close", "close"))
         result = range_profile(high=high, low=low, close=close, lookback=lookback, ob_os_level=ob_os_level, bins=bins, min_range_pct=min_range_pct, require_coherent_bars=require_coherent_bars, emit_osc=emit_osc, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def rogers_satchell(self, length=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rogers_satchell(open_=open_, high=high, low=low, close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def roll_spread(self, length=None, offset=None, **kwargs):
@@ -2495,6 +2534,14 @@ class AnalysisIndicators(BasePandasObject):
     def ui(self, length=None, scalar=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = ui(close=close, length=length, scalar=scalar, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def yang_zhang(self, length=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = yang_zhang(open_=open_, high=high, low=low, close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     # Volume
@@ -2611,6 +2658,12 @@ class AnalysisIndicators(BasePandasObject):
         low = self._get_column(kwargs.pop("low", "low"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = pocket_pivot(close=close, open_=open_, high=high, low=low, volume=volume, length=length, max_offset_pct=max_offset_pct, lookback=lookback, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def pvcorr(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = pvcorr(close=close, volume=volume, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def pvi(self, length=None, initial=None, signed=True, offset=None, **kwargs):

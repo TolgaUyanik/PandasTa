@@ -14,6 +14,7 @@ from .mfi import mfi
 from .nvi import nvi
 from .obv import obv
 from .pocket_pivot import pocket_pivot
+from .pvcorr import pvcorr
 from .pvi import pvi
 from .pvol import pvol
 from .pvr import pvr
