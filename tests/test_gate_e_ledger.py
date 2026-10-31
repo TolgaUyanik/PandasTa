@@ -17,7 +17,8 @@ What is pinned, in order of how much it would hurt to lose:
   `pfe`: 233 indicators, 563 default columns) -- and a grandfathered indicator
   loses its exemption the moment its default columns grow. `pfe`,
   `kalman_trend` and `range_compress_run` were all merged with Gate E owed;
-  this is the test that would have stopped them.
+  this is the test that would have stopped them (reaching `main`; on the way
+  to `dev` it reports them as owed, see below).
 * Each row still describes its code: the LF-normalised sha1 of the module file,
   AND an output fingerprint of every column on a fixed synthetic frame, which
   catches an edit to a helper the module imports (`pfe` imports `ema`,
@@ -42,13 +43,30 @@ What is pinned, in order of how much it would hurt to lose:
 
 Each of these was broken on purpose on 2026-10-28 and failed; the breaks are
 listed in PR #196.
+
+Owed, not failed, on the way to `dev` (owner, 2026-11-01): contributors cannot run
+Gate E, so ci.yml (PRs into `dev`, pushes to it, manual runs off `main`) and
+gate-e-guard.yml (PRs into `dev`) set GATE_E_PENDING_OK=1. Then a
+measurement that is OWED -- no row for an indicator that needs one, or a row whose
+module, output or columns moved since its run -- is a skip whose reason starts
+"Gate E owed", and the owner records it later. Toward `main` (a release PR, a push
+to `main`) and on any local run the variable is not `1` and these fail as before, so
+a release still needs every row. A deleted row counts as owed too (its indicator
+then has no row). Strict everywhere: a waived STRUCK column (ALLOWED_WAIVERS)
+whose code or output moved or whose row was deleted, a STRUCK row without its waiver, a hand-edited
+verdict, missing Gate B/D tests. A manual CI run relaxes unless it is on `main`.
+Until the owner records it, `dev` may carry an unmeasured column that Gate E would
+strike; if its run is STRUCK, the column is reverted (or waived by the owner)
+before the release, and the release PR into `main` fails until then.
 """
 import hashlib
 import importlib.util
 import json
+import os
 import re
 from functools import lru_cache
 from pathlib import Path
+from typing import NoReturn, Optional
 
 import pytest
 
@@ -77,6 +95,15 @@ ALLOWED_WAIVERS = {
 GRANDFATHERED_COUNT = 233
 GRANDFATHERED_COLUMNS = 563
 GRANDFATHERED_SHA1 = "1b16434916bc4fb85889e2b72bc0960afcedb3dc"
+PENDING_OK = os.environ.get("GATE_E_PENDING_OK") == "1"
+
+
+def _owed(message: str, row: Optional[dict] = None) -> NoReturn:
+    """A measurement is owed: a skip under GATE_E_PENDING_OK=1 (see the docstring), else a failure.
+    Never a skip for a waived STRUCK column: its waiver covers one exact measurement."""
+    if PENDING_OK and not (row and (row["indicator"], row["column"]) in ALLOWED_WAIVERS):
+        pytest.skip(f"Gate E owed (the owner records it later): {message}")
+    pytest.fail(message)
 
 
 def _row_id(row):
@@ -108,10 +135,17 @@ def test_grandfathered_list_is_frozen():
 
 def test_every_indicator_that_needs_a_row_has_one():
     missing = _needs_a_row() - {r["indicator"] for r in ROWS}
-    assert not missing, (
-        f"no Gate E ledger row for {sorted(missing)} (new to Category, or a grandfathered "
-        "indicator whose default columns grew). Run Gate E (CLAUDE.md, 'Gate E harness'), "
-        "then `python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`")
+    if missing:
+        _owed(f"no Gate E ledger row for {sorted(missing)} (new to Category, or a grandfathered "
+              "indicator whose default columns grew). Run Gate E (CLAUDE.md, 'Gate E harness'), "
+              "then `python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`")
+
+
+def test_every_waived_column_keeps_its_row():
+    """Strict in both modes: deleting a waived row would otherwise turn its edit into "owed"."""
+    have = {(r["indicator"], r["column"]) for r in ROWS}
+    gone = sorted(k for k in ALLOWED_WAIVERS if k not in have)
+    assert not gone, f"waived STRUCK rows {gone} were removed from the ledger; restore them or ask the owner"
 
 
 @pytest.mark.parametrize("indicator", sorted(CATEGORY - set(GRANDFATHERED)))
@@ -139,16 +173,19 @@ def test_row_names_the_module_that_defines_the_indicator(row):
 @pytest.mark.parametrize("row", LIVE, ids=_row_id)
 def test_row_still_describes_its_module(row):
     path = gl.module_path(row["module"])
-    assert gl.lf_sha1(path) == row["module_sha1"], (
-        f"{path.relative_to(REPO)} changed after Gate E run {row['run']}; re-run Gate E and re-record it")
+    if gl.lf_sha1(path) != row["module_sha1"]:
+        _owed(f"{path.relative_to(REPO)} changed after Gate E run {row['run']}; re-run Gate E and re-record it", row)
 
 
 @pytest.mark.parametrize("row", LIVE, ids=_row_id)
 def test_row_output_has_not_moved(row):
-    now = gl.fingerprint(_output(row["indicator"])[row["column"]])
-    assert gl.fingerprints_match(now, row["output_fp"]), (
-        f"{_row_id(row)} output moved since Gate E run {row['run']} ({row['output_fp']} -> {now}); "
-        "a helper it imports may have changed. Re-run Gate E and re-record it")
+    out = _output(row["indicator"])
+    if row["column"] not in out.columns:
+        _owed(f"{_row_id(row)} is no longer in the default output; re-run Gate E and re-record it", row)
+    now = gl.fingerprint(out[row["column"]])
+    if not gl.fingerprints_match(now, row["output_fp"]):
+        _owed(f"{_row_id(row)} output moved since Gate E run {row['run']} ({row['output_fp']} -> {now}); "
+              "a helper it imports may have changed. Re-run Gate E and re-record it", row)
 
 
 @pytest.mark.parametrize("row", ROWS, ids=_row_id)
@@ -173,7 +210,9 @@ def test_struck_rows_carry_the_waiver_for_this_exact_measurement(row):
 @pytest.mark.parametrize("indicator", sorted({r["indicator"] for r in LIVE}))
 def test_ledger_columns_are_the_default_output(indicator):
     recorded = {r["column"] for r in LIVE if r["indicator"] == indicator}
-    assert recorded == _columns(indicator)
+    if recorded != _columns(indicator):
+        _owed(f"{indicator}'s ledger columns {sorted(recorded)} are not its default output "
+              f"{sorted(_columns(indicator))}; re-run Gate E and re-record it")
 
 
 @pytest.mark.parametrize("row", ROWS, ids=_row_id)
@@ -249,3 +288,18 @@ def test_record_refuses_a_waiver_on_a_run_with_nothing_struck(tmp_path):
 def test_a_nan_per_frame_median_is_read_not_raised():
     assert gl.expected_verdict(gl.to_float("0.5"), gl.to_float("")) == "SHIP"
     assert gl.expected_verdict(gl.to_float("0.95"), gl.to_float("")) == "STRUCK"
+
+
+def test_owed_fails_unless_pending_ok(monkeypatch):
+    """The switch itself: owed is a failure without GATE_E_PENDING_OK=1, a skip with it, and a
+    failure for a waived STRUCK column either way."""
+    plain = {"indicator": "x", "column": "X_1"}
+    waived = {"indicator": "pfe", "column": "PFE_10_5"}
+    monkeypatch.setitem(globals(), "PENDING_OK", False)
+    with pytest.raises(pytest.fail.Exception):
+        _owed("owed", plain)
+    monkeypatch.setitem(globals(), "PENDING_OK", True)
+    with pytest.raises(pytest.skip.Exception):
+        _owed("owed", plain)
+    with pytest.raises(pytest.fail.Exception):
+        _owed("owed", waived)
