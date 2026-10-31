@@ -78,8 +78,8 @@ read then cannot also coincide.
 
 ## Gate E (measured 2026-11-01)
 
-Run `is21-crsi-d7238138`, `pandas_ta_src_sha1` `51291e75b0a8f24bb6d5bcb35db2b3a46a4baf1f` (the
-pre-revert tree, three columns), 89 ALTPORT-1 BIST daily frames, 687 comparators
+**First run**, `is21-crsi-d7238138`, `pandas_ta_src_sha1` `51291e75b0a8f24bb6d5bcb35db2b3a46a4baf1f`
+(the pre-revert tree, three columns), 89 ALTPORT-1 BIST daily frames, 687 comparators
 (`compute_all` 329 + `ml_features` manifest `1d` 358), canary `AKBNK.IS, BIENY.IS, AGHOL.IS,
 SASA.IS bit-equal`.
 
@@ -88,6 +88,19 @@ SASA.IS bit-equal`.
 | `CRSI_3_2_100` (composite) | 0.9265 | `log_return` | 389,860 | 0.9257 (100% of 89 frames >= 0.90) | **STRUCK** -- reverted |
 | `CRSI_STREAK_2` | 0.8362 | `increasing` | 398,669 | 0.8421 (0% of 89 frames >= 0.90) | **DISCLOSE_GAP** -- shipped |
 | `CRSI_PCTRANK_100` | 0.9717 | `log_return` | 389,860 | 0.9769 (100% of 89 frames >= 0.90) | **STRUCK** -- reverted |
+
+**Confirmation run**, `is21-crsi-81723757`, `pandas_ta_src_sha1` `8455c2a68f1588ec60e8de4173a93265edbe0d57`
+(the post-revert tree, one column), same 89 frames and 687 comparators, same canary, launched
+by the issue-solver against the committed `pandas_ta/momentum/crsi.py` as it ships today:
+
+| column | max \|rho\| | against | n | perframe max median \|rho\| | verdict |
+|---|---|---|---|---|---|
+| `CRSI_STREAK_2` | 0.8362321121401246 | `increasing` | 398,669 | 0.8420626737909467 (0% of 89 frames >= 0.90) | **DISCLOSE_GAP** -- shipped |
+
+Identical to the first run's `CRSI_STREAK_2` row to full precision -- the revert touched only
+the composite/pctrank code, not the streak computation, as the design decisions section above
+already noted. Recorded in `docs/gate_e_ledger.csv` (`measured` 2026-11-01, run
+`is21-crsi-81723757`, superseding the first run's row for the same column).
 
 Applying CLAUDE.md's `r3-perframe-0.90` bands: `CRSI_3_2_100` and `CRSI_PCTRANK_100` are both
 at or above the 0.90 pooled threshold, with their respective top comparator (`log_return`) at
