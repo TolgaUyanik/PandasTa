@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The merge queue for `dev`: one step for the PR at the head of the line. Run by
-# .github/workflows/merge-queue.yml (push to dev, a PR queued, its own re-dispatch) and ci.yml (job `queue`, when a
-# PR's CI finishes); merge-queue.yml's header says what it does and why.
+# .github/workflows/merge-queue.yml (push to dev, a PR queued, a PR opened by the owner, its own
+# re-dispatch) and ci.yml (job `queue`, when a PR's CI finishes); merge-queue.yml's header says
+# what it does and why.
 # Needs REPO and GH_TOKEN (the job's token: pull-requests and actions write, contents read).
 # MQ_TOKEN (environment secret MERGE_QUEUE_TOKEN, the owner's token) is used only for branch
 # updates; ci.yml's job has none and dispatches merge-queue.yml (which sets MQ_REQUIRED=1) to
@@ -31,6 +32,26 @@ queued() {
               elif any($t[]; .status != "COMPLETED") then "PENDING"
               else ($t | sort_by(.startedAt) | last | .conclusion) end)] | @tsv'
 }
+# Auto-queue (auto-queue.yml): turn auto-merge on, with the owner's token, for one PR into dev
+# that the repository owner opened (the owner's own PRs and the issue-solver's, which it opens
+# as the owner). Once, when the PR opens: switching auto-merge off afterwards sticks. With the
+# owner's token, so the merge is the owner's push and starts the push workflows (GITHUB_TOKEN's
+# would not). The PR is checked here, on dev, not trusted from the dispatch.
+if [ -n "${MQ_ENQUEUE:-}" ]; then
+  if [[ ! "$MQ_ENQUEUE" =~ ^[0-9]+$ ]]; then echo "::error::enqueue request is not a PR number"; exit 1; fi
+  if [ -z "${MQ_TOKEN:-}" ]; then echo "::error::enqueue needs MQ_TOKEN (merge-queue.yml only)"; exit 1; fi
+  IFS=$'\t' read -r author base cross draft pstate already < <(gh pr view "$MQ_ENQUEUE" --repo "$REPO" \
+    --json author,baseRefName,isCrossRepository,isDraft,state,autoMergeRequest \
+    --jq '[.author.login, .baseRefName, .isCrossRepository, .isDraft, .state, (.autoMergeRequest != null)] | @tsv')
+  if [ "$author" = "$owner" ] && [ "$base" = "dev" ] && [ "$cross" = "false" ] && [ "$draft" = "false" ] \
+     && [ "$pstate" = "OPEN" ] && [ "$already" = "false" ]; then
+    GH_TOKEN="$MQ_TOKEN" gh pr merge "$MQ_ENQUEUE" --repo "$REPO" --auto --merge
+    echo "#$MQ_ENQUEUE: auto-merge switched on (opened by $owner)"
+  else
+    echo "#$MQ_ENQUEUE: not auto-queued (author $author, base $base, fork $cross, draft $draft, $pstate, queued $already)"
+  fi
+fi
+
 for attempt in 1 2 3 4 5 6; do
   rows="$(queued)"
   grep -q $'\tUNKNOWN\t' <<<"$rows" || break
