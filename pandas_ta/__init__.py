@@ -52,7 +52,7 @@ Category = {
     "momentum": [
         "ao", "apo", "bias", "bop", "brar", "cci", "cdvo", "cfo", "cg", "cmo",
         "coppock", "cti", "dm", "er", "eri", "fisher", "gapm", "imi", "inertia", "kalman_rsi", "kdj", "kst", "lrsi", "macd", "macd_area_divergence",
-        "mom", "pfe", "pgo", "po", "ppo", "pressure_pulse", "psl", "pvo", "qqe", "roc", "rsi", "rsi_divergence", "rsx", "rvgi",
+        "mom", "ovn_split", "pfe", "pgo", "po", "ppo", "pressure_pulse", "psl", "pvo", "qqe", "roc", "rsi", "rsi_divergence", "rsx", "rvgi",
         "slope", "smi", "squeeze", "squeeze_pro", "stc", "stoch", "stochrsi", "td_seq", "trix",
         "trixh", "tsi", "uo", "vwmacd", "wavetrend", "willr",
         "pzo", "szo", "wpo", "stc_tv"
@@ -71,7 +71,7 @@ Category = {
     "performance": ["log_return", "percent_return", "trend_return", "max_return"],
     # Statistics
     "statistics": [
-        "entropy", "kpss", "kurtosis", "mad", "median", "median_ad_hl2", "quantile", "skew", "stdev",
+        "entlz", "entropy", "ffd", "kpss", "kurtosis", "mad", "median", "median_ad_hl2", "quantile", "skew", "stdev",
         "tf_centroid_20", "variance", "zscore",
         "rolling_sum", "normalize", "covariance", "cusum", "trend_scan"
     ],
@@ -92,14 +92,12 @@ Category = {
     ],
     # Volatility
     "volatility": [
-        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "corwin_schultz", "cvi", "donchian", "har_park", "hwc", "kc",
-        "massi", "natr", "pdist", "range_compress_run", "range_profile", "roll_spread", "rvi", "tf_median_absdiff_20", "thermo", "true_range", "ui"
+        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "corwin_schultz", "cvi", "donchian", "garman_klass", "har_park", "hwc", "kc", "massi", "natr", "pdist", "range_compress_run", "range_profile", "rogers_satchell", "roll_spread", "rvi", "tf_median_absdiff_20", "thermo", "true_range", "ui", "volvol", "yang_zhang",
     ],
 
     # Volume, "vp" or "Volume Profile" is unique
     "volume": [
-        "ad", "adosc", "amihud", "aobv", "avwap_z", "bw_mfi", "cmf", "efi", "eom", "kvo", "maxvol_adv", "mfi", "nvi", "obv", "pocket_pivot", "pvi",
-        "pvol", "pvr", "pvt", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "weis_wave",
+        "ad", "adosc", "amihud", "aobv", "avwap_z", "bw_mfi", "cmf", "efi", "eom", "kvo", "maxvol_adv", "mfi", "nvi", "obv", "pocket_pivot", "pvcorr", "pvi", "pvol", "pvr", "pvt", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "volcv", "weis_wave",
         "vzo", 
         # `up_and_down_volume` and `volume_delta` are deliberately NOT here.
         # They REQUIRE a second (lower-timeframe) frame, which `df.ta.strategy()`
