@@ -22,3 +22,4 @@ from .tf_median_absdiff_20 import tf_median_absdiff_20
 from .thermo import thermo
 from .true_range import true_range
 from .ui import ui
+from .volvol import volvol

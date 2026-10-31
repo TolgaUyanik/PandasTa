@@ -2461,6 +2461,13 @@ class AnalysisIndicators(BasePandasObject):
         result = tf_median_absdiff_20(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def volvol(self, length=None, natr_length=None, mamode=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = volvol(high=high, low=low, close=close, length=length, natr_length=natr_length, mamode=mamode, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def pdist(self, drift=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         high = self._get_column(kwargs.pop("high", "high"))
