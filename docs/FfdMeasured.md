@@ -14,7 +14,7 @@ access to the parent repo in this worktree).** Gate E ran 2026-10-31 (run
 disclosed below. Recorded in `docs/gate_e_ledger.csv` via `docs/gate_e_ledger.py record`.
 
 Shipped: `pandas_ta/statistics/ffd.py`, one column `FFD_<d>_<threshold>` (default
-`_0.4_0.0001`). Tests: `tests/test_ffd.py` (30). Every number below is printed by
+`_0.4_0.0001`). Tests: `tests/test_ffd.py` (34). Every number below is printed by
 `python docs/measure_ffd_proxy.py`, except the suite counts in Gate F. Environment:
 pandas 2.3.3, numpy 2.5.4, Python 3.12. Measured 2026-10-31.
 

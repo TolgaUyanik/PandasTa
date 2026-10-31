@@ -172,7 +172,7 @@ REGISTERED = {
 #: in the ledger), -> 247 by max_return (#12, Gate E SHIP,
 #: 0.6716, in the ledger), -> 248 by tf_median_absdiff_20 (#118, volatility;
 #: Gate E SHIP, 0.7422, in the ledger), -> 249 by ffd (#13, statistics;
-#: Gate E PENDING, run by the issue-solver launcher after this session; see
+#: Gate E DISCLOSE_GAP, 0.8494 vs Dist_to_SMA_200_pct, in the ledger; see
 #: docs/FfdMeasured.md). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
