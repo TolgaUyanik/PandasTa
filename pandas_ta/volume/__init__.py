@@ -23,6 +23,7 @@ from .tod_profile import tod_profile
 from .tri_dir_pressure import tri_dir_pressure
 from .vfi import vfi
 from .vol_delta import vol_delta
+from .volcv import volcv
 from .vp import vp
 from .weis_wave import weis_wave
 from .up_and_down_volume import up_and_down_volume

@@ -18,3 +18,4 @@ from .covariance import covariance
 from .beta import beta
 from .cusum import cusum
 from .ffd import ffd
+from .trend_scan import trend_scan

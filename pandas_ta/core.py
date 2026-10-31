@@ -1750,6 +1750,11 @@ class AnalysisIndicators(BasePandasObject):
         result = tf_centroid_20(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def trend_scan(self, horizons=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = trend_scan(close=close, horizons=horizons, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def variance(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = variance(close=close, length=length, offset=offset, **kwargs)
@@ -2722,6 +2727,11 @@ class AnalysisIndicators(BasePandasObject):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = vol_delta(open_=open_, high=high, low=low, close=close, volume=volume, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def volcv(self, length=None, offset=None, **kwargs):
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = volcv(volume=volume, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def up_and_down_volume(self, lower=None, anchor=None, **kwargs):

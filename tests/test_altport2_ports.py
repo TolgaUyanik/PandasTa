@@ -176,11 +176,15 @@ REGISTERED = {
 #: statistics; Gate E DISCLOSE_GAP, 0.8494 vs Dist_to_SMA_200_pct, in the ledger;
 #: see docs/FfdMeasured.md), -> 251 by ovn_split (#14, momentum;
 #: Gate E pending, run by issue-solver after this session), -> 252 by volvol (#15, volatility;
-#: Gate E SHIP, 0.6408 vs natr, in the ledger). Pinned, not
+#: Gate E SHIP, 0.6408 vs natr, in the ledger), -> 257 by volcv (#19, volume; Gate E
+#: pending, run by issue-solver after this session; see
+#: docs/VolcvMeasured.md), -> 258 by trend_scan (#20, statistics;
+#: Gate E DISCLOSE_GAP 0.8804 (TSCAN_T) / SHIP 0.2909 (TSCAN_L), in the
+#: ledger; see docs/TrendScanMeasured.md). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
-CATEGORY_TOTAL = 256
-CATEGORY_BUCKETS = {"trend": 59, "volatility": 27, "volume": 26}
+CATEGORY_TOTAL = 258
+CATEGORY_BUCKETS = {"trend": 59, "volatility": 27, "volume": 27}
 
 #: Gate E, re-measured on the SHIPPED columns over 89 BIST_100 daily frames /
 #: 408,253 bars against 496 comparators. See docstring item 4.

@@ -73,7 +73,7 @@ Category = {
     "statistics": [
         "entlz", "entropy", "ffd", "kpss", "kurtosis", "mad", "median", "median_ad_hl2", "quantile", "skew", "stdev",
         "tf_centroid_20", "variance", "zscore",
-        "rolling_sum", "normalize", "covariance", "cusum"
+        "rolling_sum", "normalize", "covariance", "cusum", "trend_scan"
     ],
     # Trend
     "trend": [
@@ -97,8 +97,7 @@ Category = {
 
     # Volume, "vp" or "Volume Profile" is unique
     "volume": [
-        "ad", "adosc", "amihud", "aobv", "avwap_z", "bw_mfi", "cmf", "efi", "eom", "kvo", "maxvol_adv", "mfi", "nvi", "obv", "pocket_pivot", "pvcorr", "pvi",
-        "pvol", "pvr", "pvt", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "weis_wave",
+        "ad", "adosc", "amihud", "aobv", "avwap_z", "bw_mfi", "cmf", "efi", "eom", "kvo", "maxvol_adv", "mfi", "nvi", "obv", "pocket_pivot", "pvcorr", "pvi", "pvol", "pvr", "pvt", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "volcv", "weis_wave",
         "vzo", 
         # `up_and_down_volume` and `volume_delta` are deliberately NOT here.
         # They REQUIRE a second (lower-timeframe) frame, which `df.ta.strategy()`
