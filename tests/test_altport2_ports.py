@@ -183,8 +183,8 @@ REGISTERED = {
 #: ledger; see docs/TrendScanMeasured.md). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
-CATEGORY_TOTAL = 258
-CATEGORY_BUCKETS = {"trend": 59, "volatility": 27, "volume": 27}
+CATEGORY_TOTAL = 259
+CATEGORY_BUCKETS = {"trend": 60, "volatility": 27, "volume": 27}
 
 #: Gate E, re-measured on the SHIPPED columns over 89 BIST_100 daily frames /
 #: 408,253 bars against 496 comparators. See docstring item 4.
