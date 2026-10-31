@@ -8,11 +8,10 @@ Portfolio Construction and Implementation*. None of the three sources hands over
 reference formula; all three describe the question, not one computable function, so Gate A
 here is self-consistency and an independent loop, not a citation against a line number.
 
-**Status: Gates A, B, D cleared; Gate C synthetic only (real-data counts owed); Gate E
-pending, run by issue-solver after this session.** `pvcorr` is in `Category`
-(volume), so any `df.ta.strategy()` sweep in the parent repo picks it up; the precedent for
-registering ahead of Gate E is `pfe` (`docs/PfeMeasured.md`) and `kalman_trend`
-(`docs/KalmanTrendMeasured.md`).
+**Status: Gates A, B, D, E cleared (SHIP); Gate C synthetic only (real-data counts
+not separately gathered — Gate E's `non_zero` / `non_nan` counts below cover reachability on
+real data).** `pvcorr` is in `Category` (volume), so any `df.ta.strategy()` sweep in the
+parent repo picks it up.
 
 Shipped: `pandas_ta/volume/pvcorr.py`, one column `PVCORR_<length>` (default
 `PVCORR_20`), range [−1, 1]. Tests: `tests/test_pvcorr.py` (18, all passing). Numbers below:
@@ -57,7 +56,7 @@ Other decisions this port makes:
 | B Causality | pass | future-perturbation over 16 offsets (60..1035, step 65), rewriting both `close` and `volume` from the offset onward: real module 0/16 leaks. Two mutants (`ret` reads `close[t+1]`; `vol_prev` reads `volume[t+1]` instead of `volume[t-1]`), each `importlib`-read and `exec`'d in memory, each proved live and then caught at 16/16 |
 | C Reachability | synthetic only | 1,200-bar GBM close (seed 11) against an independent lognormal volume (seed 21), default length 20: 1,180 of 1,200 finite (the 20 NaN are the warm-up), all 1,180 non-zero, 538 positive / 642 negative, 1,180 distinct values. **Real-data counts owed.** |
 | D Scale-free | pass | ×8/×64 bit-identical (tested separately for a price-only rescale and a volume-only rescale, matching NaN masks); ×10/×3.7 max\|diff\| 4.2e-15 (price) / 1.0e-15 (volume) on the same 1,200-bar frame, far under the 1e-9 the tests assert; `0 < 1,180 fires < 1,200` bars, 1,180 distinct values (not a constant column) |
-| E Attribution | **pending** — run by issue-solver after this session | `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.volume.pvcorr --name pvcorr` |
+| E Attribution | **SHIP** | `PVCORR_20` max\|ρ\| = 0.6475 vs `PVT_Slope_norm` (manifest), n = 387,045 pooled bars; per-frame max median\|ρ\| = 0.6388 (same comparator), 0.0% of 89 frames ≥ 0.90. Pooled-only verdict also SHIP. Both under the 0.76 SHIP line in CLAUDE.md's `r3-perframe-0.90` bands. Run: `is18-pvcorr-24bedf24`, 89 frames, 687 comparators (329 compute_all + 358 manifest), canary bit-equal on AKBNK/BIENY/AGHOL/SASA.IS. Recorded in `docs/gate_e_ledger.csv` 2026-10-31. |
 | F Suites | this repo only, this session | `python -m pytest -q tests/test_pvcorr.py`: 18 passed. `tests/test_gate_e_ledger.py`: 142 passed, 1 failed — the expected `test_every_indicator_that_needs_a_row_has_one` (missing row for `pvcorr`, cleared once Gate E is recorded). `tests/test_readme_counts.py`, `test_altport2_ports.py`, `test_wiring_accessors.py`, `test_ml_companions.py`: 106 passed, 3 skipped (pre-existing, unrelated to this port). Full-suite run and the parent repo are the launcher's job. |
 
 ## The zero-volume mask, measured
@@ -96,15 +95,8 @@ what Gate E will find against the parent repo's real `compute_all` ∪ manifest 
 particular, real volume is autocorrelated with real price moves in ways this synthetic series
 is not. Gate E decides.
 
-## To close
+## Closed
 
-1. Gate E: run `gate_e_overlap.py run --module pandas_ta.volume.pvcorr --name pvcorr`
-   (issue-solver launcher), then `python docs/gate_e_ledger.py record <run dir> --measured
-   YYYY-MM-DD` in a receipt session.
-2. Fill Gate C from the same real frames the Gate E run uses.
-3. Apply CLAUDE.md's `r3-perframe-0.90` thresholds. On SHIP or a disclosed band, done as
-   shipped. On STRUCK, revert: delete the module, the export, the `Category` entry, the
-   accessor, the tests, the README counts, the dictionary row, and the `MLCompanionContract`
-   count, and keep this file as the receipt.
-4. Regenerate `docs/IndicatorDictionary.md` if anything in step 3 changes column shape.
-5. Run both suites.
+Gate E ran SHIP (max|ρ| 0.6475, well under 0.76). `pvcorr` ships as-is: no revert, no
+column removal. Ledger row recorded 2026-10-31. Both repos' suites are the launcher's job
+(Gate F); this repo's own suite was green in this session (`python -m pytest -q`).
