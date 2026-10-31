@@ -46,7 +46,8 @@ to either branch is refused, so every change goes through a PR. `guard` can be r
 only once the workflow file is on it, because `pull_request_target` reads the workflow from the base.
 
 **Merging into `dev`: the merge queue.** GitHub's native merge queue is not available on this
-repository, so `.github/workflows/merge-queue.yml` builds one from auto-merge. Queue a PR with
+repository, so `.github/workflows/merge-queue.yml` (logic in `.github/scripts/merge-queue.sh`)
+builds one from auto-merge. Queue a PR with
 `gh pr merge <N> --auto --merge`; PRs go roughly in the order auto-merge was switched on. The queue
 runs on each push to `dev`, when a PR into `dev` is queued (`auto-merge-guard.yml`), and when a PR's
 CI finishes (`ci.yml` job `queue`), and takes the head of the line, reading only the `tests` check:
