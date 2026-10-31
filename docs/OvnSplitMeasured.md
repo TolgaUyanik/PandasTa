@@ -1,8 +1,8 @@
 # ovn_split — measured
 
-> **Status: Gates A, B, D pass; C synthetic only; E PENDING, run by issue-solver after this
-> session.** `ovn_split` is in `Category`, so any `df.ta.strategy()` sweep picks it up; merging
-> before Gate E lands is the owner's call, per the `pfe` / `kalman_trend` precedent.
+> **Status: Gates A-F pass. SHIP.** All three columns clear the `r3-perframe-0.90` bands (none
+> STRUCK); `INTSUM_21` lands in `DISCLOSE_GAP` and is disclosed below, not removed. Recorded in
+> `docs/gate_e_ledger.csv` (measured 2026-10-31).
 
 Columns `OVNSUM_21`, `INTSUM_21`, `OVNINTDIFF_21`: rolling sums, over a trailing 21-bar window,
 of the two legs each bar's move splits into -- the OVERNIGHT leg (yesterday's close to today's
@@ -34,10 +34,16 @@ BIST data and must not be read as one:
 If the real yfinance BIST `open` repeats the prior `close` often (the Quantpedia-cited failure
 mode), the OVERNIGHT leg collapses toward zero on those bars and the real signal is pushed
 entirely into the INTRADAY leg and the difference column -- a distortion, not a crash: no NaN,
-no exception, just an overnight-leg value of exactly 0 on the affected bar. **This needs
-re-measuring on real BIST frames before the owner relies on `OVNSUM_21` specifically.** The
-launcher's Gate E run has the real data; it is asked, in "To close" below, to also report the
-real `open == prev close` tie rate, not just the overlap numbers.
+no exception, just an overnight-leg value of exactly 0 on the affected bar. **Still not measured
+in this receipt session**: the launcher's Gate E run (`gate_e_overlap.py`) produced overlap/
+correlation numbers (used above), not an `open == prior close` single-bar tie-rate diagnostic --
+that script does not compute it, and this worktree has no BIST OHLC access to compute it
+independently (same constraint as the build session; `../Backtesting` is off-limits per this
+session's rules). The real-data exact-zero counts in Gate C above are the only real-data signal
+this session has on data quality, and they point at the INTRADAY leg (`INTSUM_21`), not the
+OVERNIGHT leg the risk names -- so they do not close this risk either way. **Flagged to the
+owner, unresolved**: before relying on `OVNSUM_21` or `INTSUM_21` specifically, run the tie-rate
+check the issue asked for.
 
 ## Decisions the issue left open
 
@@ -94,10 +100,10 @@ Environment: this worktree's Python/pandas/numpy (`docs/IndicatorDictionary.md` 
 |---|---|
 | A | **Against an independent reference loop**: per-bar overnight/intraday legs computed by a plain Python loop from the formula, then summed over the trailing window, on a 1,200-bar overnight/intraday walk (seed 14). Max\|diff\| at length 21 / 9 / 2: OVNSUM **1.39e-17 / 2.08e-17 / 8.67e-18**, INTSUM **4.16e-17 / 4.16e-17 / 1.39e-17** (n 1,179 / 1,191 / 1,198) -- floating-point noise, not a formula mismatch. **Hand-computed closed forms**: a frame where `open == close` every bar (zero intraday leg, only the overnight leg moves) reads `INTSUM` exactly 0 on every valid bar and `OVNSUM` equal to the independently-summed overnight series; the symmetric case (`open == prior close` every bar) reads `OVNSUM` exactly 0. A flat-price frame (open == close == constant) reads both sums exactly 0, not NaN. |
 | B | Future-perturbation: replace the open/close tail from offset J onward with an unrelated walk, assert bars `< J` are bit-identical with matching NaN masks, over 32 offsets (J = 60..1145, step 35). The real module leaks at **0 of 32**. Two one-bar look-ahead mutants (`importlib` source read, `exec`'d in memory) -- the overnight leg reading tomorrow's open, and the rolling-sum window reading one bar ahead -- are each shown to change the output live, then caught at **32 of 32** offsets each. |
-| C | **Synthetic only; real-data counts owed to Gate E's run.** 1,200-bar overnight/intraday walk (seed 14, sigma_overnight 0.4%, sigma_intraday 1.1%, tick 0.01), length 21: **OVNSUM_21** 1,179 non-NaN, 1,179 distinct, range [-0.05423, 0.05490]; **INTSUM_21** 1,179 non-NaN, 1,179 distinct, range [-0.14785, 0.16189]; **OVNINTDIFF_21** 1,179 non-NaN, 1,179 distinct, range [-0.17637, 0.14936]. A composite-frame test (50 bars overnight-only move, then 50 bars intraday-only move, length 10) demonstrates `0 < fires < n` for all three columns and that `OVNINTDIFF_10` changes sign between the two regimes (`tests/test_ovn_split.py::test_column_is_not_constant_on_a_composite_frame`). |
+| C | **Synthetic**: 1,200-bar overnight/intraday walk (seed 14, sigma_overnight 0.4%, sigma_intraday 1.1%, tick 0.01), length 21: **OVNSUM_21** 1,179 non-NaN, 1,179 distinct, range [-0.05423, 0.05490]; **INTSUM_21** 1,179 non-NaN, 1,179 distinct, range [-0.14785, 0.16189]; **OVNINTDIFF_21** 1,179 non-NaN, 1,179 distinct, range [-0.17637, 0.14936]. A composite-frame test (50 bars overnight-only move, then 50 bars intraday-only move, length 10) demonstrates `0 < fires < n` for all three columns and that `OVNINTDIFF_10` changes sign between the two regimes (`tests/test_ovn_split.py::test_column_is_not_constant_on_a_composite_frame`). **Real data** (Gate E's run, 89 ALTPORT-1 BIST frames, 398,849 pooled bars): non-NaN / non-zero counts from `overlap_max.csv` -- **OVNSUM_21** 396,980 non-NaN, 396,962 non-zero (18 exact zeros, 0.0045% of non-NaN); **INTSUM_21** 396,980 non-NaN, 349,861 non-zero (47,119 exact zeros, 11.87% of non-NaN); **OVNINTDIFF_21** 396,980 non-NaN, 396,970 non-zero (10 exact zeros, 0.0025%). `0 < fires < n` holds for all three on real data. **`INTSUM_21`'s exact-zero rate is a real-data finding, not yet explained**: a 21-bar SUM landing on exactly 0.0 (rather than near-zero) requires either every bar in the window to individually be exactly 0 (`close == open` all 21 bars -- e.g. a suspended/untraded BIST line) or an exact floating-point cancellation, which is not the single-bar `open == prior close` tie the issue's risk section asks about (that tie would zero the OVERNIGHT leg, `OVNSUM_21`, which instead shows the LOWEST exact-zero rate of the three, 0.0045%). This cuts the other way from the risk's hypothesis and is flagged here, unexplained, rather than attributed to a mechanism this session did not verify. |
 | D | Each leg is `LOG(price ratio)`, so a positive rescale of `open`/`close` cancels before the log. Measured, not assumed: **x8 and x64 (powers of two) are bit-identical** on all three columns with matching NaN masks. **x10 and x3.7 are within 2.33e-15 absolute** (floating-point multiplication roundoff before the log, not a real difference) with matching NaN masks -- well under the 1e-10 tolerance the test asserts. `0 < fires < n`: see Gate C's distinct-value counts (all three columns vary; none is constant). |
-| E | **PENDING.** Run by issue-solver (`gate_e_overlap.py run --module pandas_ta.momentum.ovn_split`) after this session; recorded in `docs/gate_e_ledger.csv` by the receipt session. Pre-screen below is informal, NOT Gate E. |
-| F | **This repo only**, CI's two `--deselect`s (`test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`, the known break; `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`, needs `../AlternativeRepos`): the only failure in this worktree's full run is `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, naming exactly `{'ovn_split'}` -- expected, and it clears once the Gate E row is recorded. Parent repo (`Backtesting`) not run from this worktree; the launcher runs both suites in clean worktrees separately. |
+| E | **Measured** (`gate_e_overlap.py run --module pandas_ta.momentum.ovn_split`, 89 ALTPORT-1 BIST frames, 398,849 pooled bars, 687 comparators = 329 `compute_all` + 358 `ml_features` manifest `1d`). Per column, max\|rho\|, comparator, n, per-frame max median\|rho\|, verdict: **`OVNSUM_21`** 0.5789 vs `brar_BR_26` (compute_all, n 396,399), per-frame max median 0.5816 -- **SHIP**. **`INTSUM_21`** 0.8368 vs `rvgi_RVGIs_14_4` (manifest, n 396,980), per-frame max median 0.8308 -- **DISCLOSE_GAP** (0.80 <= rho < 0.90; not STRUCK, not removed). **`OVNINTDIFF_21`** 0.6675 (rho -0.6675) vs `rvgi_RVGIs_14_4` (manifest, n 396,980), per-frame max median 0.6687 -- **SHIP**. No column crossed the STRUCK line (pooled >= 0.90, or a top-5 comparator's per-frame median >= 0.90): all `perframe_pct_frames_ge_090` are 0.0 except `INTSUM_21` at 2.25% (2 of 89 frames). Recorded in `docs/gate_e_ledger.csv`, run `is14-ovn_split-09ffca39`, measured 2026-10-31. |
+| F | **This repo only**, CI's two `--deselect`s (`test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`, the known break; `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`, needs `../AlternativeRepos`): full suite green after this session's edits (see "Reproduce"/run log). Parent repo (`Backtesting`) not run from this worktree; the launcher runs both suites in clean worktrees separately. |
 
 ## Pre-screen (NOT Gate E)
 
@@ -124,21 +130,22 @@ result.
 
     python docs/measure_ovn_split_proxy.py
 
-## To close
+## Closed (2026-10-31, receipt session)
 
-1. Run Gate E (`../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module
-   pandas_ta.momentum.ovn_split --name ovn_split`), then `python docs/gate_e_ledger.py record
-   <run dir> --measured YYYY-MM-DD [--waiver "#14"]`.
-2. Apply CLAUDE.md's bands (`r3-perframe-0.90`: STRUCK >= 0.90, DISCLOSE_GAP 0.80-0.90, DISCLOSE
-   0.76-0.80, SHIP < 0.76) **per column** -- `OVNSUM_21`, `INTSUM_21` and `OVNINTDIFF_21` can land
-   in different bands. On any STRUCK, delete that column (or the whole module if all three
-   strike); on all three STRUCK, delete the module, export, `Category` entry, accessor and
-   tests, and keep this file as the receipt (a measured revert closes issue #14 exactly as well
-   as a ship).
-3. Fill Gate C's real-data counts from the same Gate E run.
-4. **Measure the real yfinance BIST `open == prev close` tie rate** on the 89-frame universe --
-   the issue's "Risk, check first", not done here (see the section above). If it is material
-   (the synthetic probe above suggests it becomes so above roughly 70% of bars), flag it to the
-   owner even if Gate E itself ships: a high tie rate means `OVNSUM_21` is measuring data
-   staleness as much as any real overnight return.
-5. Both repos' suites (the launcher runs these in clean worktrees).
+1. **Gate E measured.** Run `is14-ovn_split-09ffca39`, 89 ALTPORT-1 BIST frames, 687 comparators,
+   recorded in `docs/gate_e_ledger.csv` (`--measured 2026-10-31`). Numbers in the Gate E row above.
+2. **Bands applied per column.** `OVNSUM_21` SHIP, `INTSUM_21` DISCLOSE_GAP (disclosed above and
+   in the Gate E row; not STRUCK, not removed), `OVNINTDIFF_21` SHIP. Nothing crossed the STRUCK
+   line, so no column or the module was removed -- `ovn_split` ships as built.
+3. **Gate C's real-data counts filled** from the same Gate E run (non-NaN / non-zero per column,
+   above).
+4. **Still open, carried forward, not a gate blocker**: the issue's "Risk, check first" --
+   the real yfinance BIST `open == prev close` tie rate -- remains unmeasured. `gate_e_overlap.py`
+   does not compute it, and this session has no BIST OHLC access to compute it independently
+   (`../Backtesting` off-limits by this session's own rules). The real-data exact-zero counts
+   above are a data-quality signal but point at the INTRADAY leg, not the OVERNIGHT leg the risk
+   names, so they neither confirm nor close the risk. Flagged to the owner as an open follow-up;
+   it does not block this issue's Gates A-F or its Done-when, which name Gate E's overlap numbers,
+   not this diagnostic.
+5. Both repos' suites: this repo's full `pytest -q` run below; the launcher runs both in clean
+   worktrees.
