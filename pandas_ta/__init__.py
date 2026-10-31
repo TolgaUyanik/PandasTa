@@ -52,7 +52,7 @@ Category = {
     "momentum": [
         "ao", "apo", "bias", "bop", "brar", "cci", "cdvo", "cfo", "cg", "cmo",
         "coppock", "cti", "dm", "er", "eri", "fisher", "gapm", "imi", "inertia", "kalman_rsi", "kdj", "kst", "lrsi", "macd", "macd_area_divergence",
-        "mom", "pfe", "pgo", "po", "ppo", "pressure_pulse", "psl", "pvo", "qqe", "roc", "rsi", "rsi_divergence", "rsx", "rvgi",
+        "mom", "ovn_split", "pfe", "pgo", "po", "ppo", "pressure_pulse", "psl", "pvo", "qqe", "roc", "rsi", "rsi_divergence", "rsx", "rvgi",
         "slope", "smi", "squeeze", "squeeze_pro", "stc", "stoch", "stochrsi", "td_seq", "trix",
         "trixh", "tsi", "uo", "vwmacd", "wavetrend", "willr",
         "pzo", "szo", "wpo", "stc_tv"
