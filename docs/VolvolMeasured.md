@@ -59,7 +59,9 @@ Build session (`python -m pytest -q`, this worktree, not a clean checkout): the 
 `tests/test_volvol.py` (11 tests) passed in isolation; 142 passed alongside the one expected
 `tests/test_gate_e_ledger.py` failure (no ledger row yet).
 
-Receipt session (after `docs/gate_e_ledger.py record`, this worktree): full suite run, see below.
+Receipt session (after `docs/gate_e_ledger.py record`, this worktree): Gate F (both repos' suites,
+clean worktrees) is the launcher's job per `CLAUDE.md`, not re-run here; see its report, not this
+file.
 
 ## Closed
 
