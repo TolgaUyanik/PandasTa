@@ -4,7 +4,8 @@
 # PR's CI finishes); merge-queue.yml's header says what it does and why.
 # Needs REPO and GH_TOKEN (the job's token: pull-requests write, contents and actions read).
 # MQ_TOKEN (environment secret MERGE_QUEUE_TOKEN, the owner's token) is used only for branch
-# updates; ci.yml's job has none and leaves updates to merge-queue.yml, which sets MQ_REQUIRED=1.
+# updates; ci.yml's job has none and dispatches merge-queue.yml (which sets MQ_REQUIRED=1) to
+# update a branch, so it also needs actions: write.
 set -euo pipefail
 owner="${REPO%/*}"; name="${REPO#*/}"
 
@@ -37,7 +38,9 @@ for attempt in 1 2 3 4 5 6; do
 done
 if [ -z "$rows" ]; then echo "queue empty"; exit 0; fi
 
-drop() {   # $1 PR, $2 reason
+drop() {   # $1 PR, $2 reason; skipped if the PR's head moved since this step read it (stale data)
+  now_head="$(gh pr view "$1" --repo "$REPO" --json headRefOid --jq .headRefOid)" || return 1
+  if [ "$now_head" != "$head" ]; then echo "#$1: head moved since this step read it; not dropping"; return 0; fi
   gh pr merge "$1" --repo "$REPO" --disable-auto || return 1
   gh pr comment "$1" --repo "$REPO" --body "Taken out of the merge queue: $2. Fix it, then queue it again with \`gh pr merge $1 --auto --merge\`." || return 1
   echo "#$1 dropped: $2"
@@ -66,7 +69,13 @@ while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
       if [ "${MQ_REQUIRED:-}" = "1" ]; then
         echo "::error::MQ_TOKEN is empty: is MERGE_QUEUE_TOKEN set in the merge-queue environment?"; exit 1
       fi
-      echo "::notice::#$pr is behind dev; this job has no owner token, so merge-queue.yml updates it (next push to dev or queueing)"
+      # No owner token in a PR's CI: hand the update to merge-queue.yml, which runs on `dev`
+      # (the only ref its environment admits). A dispatch is the one GITHUB_TOKEN event that
+      # starts a workflow; its concurrency group keeps at most one pending run.
+      if ! gh workflow run merge-queue.yml --repo "$REPO" --ref dev; then
+        echo "::error::#$pr is behind dev, and dispatching merge-queue.yml failed"; exit 1
+      fi
+      echo "#$pr is behind dev; merge-queue.yml dispatched to update it"
       exit 0
     fi
     # A rejected token (expired, revoked) must not take every PR out: fail red, drop nothing.
@@ -78,9 +87,14 @@ while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
     # run passed `tests`. Expected (GitHub's rules, not yet measured here): the owner's update
     # starts pull_request CI like a push. Refused on a conflict GitHub had not computed yet: drop
     # it, so it does not hold the line. The same if the update is accepted but never lands.
-    if ! GH_TOKEN="$MQ_TOKEN" gh api -X PUT "repos/$REPO/pulls/$pr/update-branch" --silent; then
-      drop "$pr" "updating its branch from dev failed (a conflict, or the token; see the merge-queue run log); merge dev into it by hand" || echo "::error::#$pr: drop failed"
-      continue
+    # Only a 422 (GitHub refuses the merge: a conflict) is the PR's fault; any other failure is
+    # the token's or GitHub's: fail red, drop nothing.
+    if ! out="$(GH_TOKEN="$MQ_TOKEN" gh api -X PUT "repos/$REPO/pulls/$pr/update-branch" 2>&1)"; then
+      if grep -q "HTTP 422" <<<"$out"; then
+        drop "$pr" "GitHub refused to update its branch from dev (HTTP 422: $(tail -c 200 <<<"$out")); merge dev into it by hand" || echo "::error::#$pr: drop failed"
+        continue
+      fi
+      echo "::error::#$pr: branch update failed, not a conflict (token permissions?): $(tail -c 300 <<<"$out"). No PR was taken out."; exit 1
     fi
     # The update is asynchronous: report only once the head commit has moved.
     now="$head"
@@ -99,24 +113,28 @@ while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
     #   waiting for approval -> drop (the queue cannot approve);
     #   queued / running     -> wait;
     #   all ended            -> drop (they left no `tests` check);
-    #   none, head < 10 min  -> wait (CI not registered yet); none, older -> drop (never started).
-    runs="$(gh run list --repo "$REPO" --workflow ci.yml --branch "$ref" --limit 20 --json headSha,status \
-              --jq "[.[] | select(.headSha == \"$head\") | .status]")"
+    #   none                 -> poll up to 3 minutes for one to appear, then drop (never started).
+    # (Polling here, not a later run: if CI never starts, no CI end ever runs the queue again.)
+    list_runs() {
+      gh run list --repo "$REPO" --workflow ci.yml --branch "$ref" --limit 20 --json headSha,status,conclusion \
+        --jq "[.[] | select(.headSha == \"$head\") | if .conclusion == \"action_required\" then \"action_required\" else .status end]"
+    }
+    runs="$(list_runs)"
+    for attempt in $(seq 12); do
+      [ "$(jq 'length' <<<"$runs")" != "0" ] && break
+      sleep 15
+      runs="$(list_runs)"
+    done
+    if [ "$(jq 'length' <<<"$runs")" = "0" ]; then
+      drop "$pr" "no CI run started for $head within 3 minutes; push to it, or re-run CI, then queue it again" || echo "::error::#$pr: drop failed"
+      continue
+    fi
     if [ "$(jq 'map(select(. == "waiting" or . == "action_required")) | length' <<<"$runs")" != "0" ]; then
       drop "$pr" "its CI run for $head waits for approval; approve it in the Actions tab" || echo "::error::#$pr: drop failed"
       continue
     fi
     if [ "$(jq 'map(select(. != "completed")) | length' <<<"$runs")" != "0" ]; then
       echo "#$pr: a CI run for $head is still running; waiting"; exit 0
-    fi
-    if [ "$(jq 'length' <<<"$runs")" = "0" ]; then
-      committed="$(gh api "repos/$REPO/commits/$head" --jq .commit.committer.date)"
-      age=$(( $(date -u +%s) - $(date -u -d "$committed" +%s) ))
-      if [ "$age" -lt 600 ]; then
-        echo "::notice::#$pr: no CI run for $head yet (head is ${age} s old); waiting"; exit 0
-      fi
-      drop "$pr" "no CI run started for $head within 10 minutes; push to it, or re-run CI, then queue it again" || echo "::error::#$pr: drop failed"
-      continue
     fi
     drop "$pr" "CI ran on $head but left no \`tests\` check (cancelled before it started?); re-run CI on it" || echo "::error::#$pr: drop failed"
     continue
