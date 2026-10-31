@@ -45,6 +45,15 @@ requires the checks, **admins included**, with the branch up to date with its ba
 to either branch is refused, so every change goes through a PR. `guard` can be required on a branch
 only once the workflow file is on it, because `pull_request_target` reads the workflow from the base.
 
+**Merging into `dev`: the merge queue.** GitHub's native merge queue is not available on this
+repository, so `.github/workflows/merge-queue.yml` builds one from auto-merge. Queue a PR with
+`gh pr merge <N> --auto --merge`; PRs go in the order auto-merge was switched on. On each push to
+`dev` (and when a PR is queued) the workflow takes the head of the line: behind `dev`, it updates
+the branch and dispatches `ci.yml` on it (a GITHUB_TOKEN branch update does not trigger
+`pull_request`, `workflow_dispatch` is exempt); conflicting or red, it switches auto-merge off with a
+comment and moves to the next. One PR is tested at a time. `.github/workflows/auto-merge-guard.yml`
+switches auto-merge off on any PR whose base is not `dev`: a merge into `main` stays a human act.
+
 ## Architecture
 
 **One indicator, one module.** `pandas_ta/<category>/<name>.py` defines a single function named after

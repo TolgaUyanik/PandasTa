@@ -1,0 +1,124 @@
+# Merge queue for `dev`, built from auto-merge + this workflow.
+#
+# GitHub's native merge queue is not available on this repository, and branch protection on
+# `dev` is strict (a PR must be up to date with `dev` before it merges). Without help, every
+# merge leaves the other green PRs behind, and someone has to update each one and wait for a
+# second CI run before merging it.
+#
+# How to queue a PR: `gh pr merge <N> --auto --merge` (or "Enable auto-merge" in the web UI).
+# The order of the queue is the order in which auto-merge was switched on.
+#
+# What this workflow does, every time it runs, for the queued PR at the head of the line:
+#   - behind `dev`        -> update its branch from `dev`, then start CI on it (see below);
+#   - conflicts with dev  -> switch auto-merge off with a comment, and look at the next PR;
+#   - its checks failed   -> switch auto-merge off with a comment, and look at the next PR;
+#   - otherwise           -> nothing: its CI is running, or GitHub is about to merge it.
+# Once the head PR merges, the push to `dev` runs this workflow again for the next one.
+#
+# Why CI is started by hand: a branch update made with GITHUB_TOKEN does not trigger
+# `pull_request` workflows (GitHub's rule against workflow loops). `workflow_dispatch` is
+# exempt, so the job dispatches ci.yml on the PR branch; its `tests` check lands on the new
+# head commit, which is what branch protection reads.
+#
+# One PR is tested at a time: slower than a native queue, but it never merges an untested tree.
+name: Merge queue
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    types: [auto_merge_enabled]
+    branches: [dev]
+  # Runs from the default branch's copy only (GitHub's rule), so it starts working once this
+  # file is on `main`: it moves the queue on as soon as a queued PR's CI fails.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+
+# One queue step at a time; a second trigger waits instead of racing the first.
+concurrency:
+  group: merge-queue
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # update a PR branch from dev
+  pull-requests: write   # switch auto-merge off, comment
+  actions: write         # dispatch ci.yml on the updated branch
+
+jobs:
+  advance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Move the queue on
+        run: |
+          set -euo pipefail
+          owner="${REPO%/*}"; name="${REPO#*/}"
+
+          # Queued PRs into dev, oldest auto-merge first. mergeStateStatus is computed lazily
+          # and reads UNKNOWN right after a push, so ask again until it settles.
+          queued() {
+            gh api graphql -F owner="$owner" -F name="$name" -f query='
+              query($owner:String!,$name:String!){repository(owner:$owner,name:$name){
+                pullRequests(states:OPEN,baseRefName:"dev",first:100){nodes{
+                  number headRefName isCrossRepository mergeStateStatus
+                  autoMergeRequest{enabledAt}
+                  commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}}' \
+              --jq '[.data.repository.pullRequests.nodes[] | select(.autoMergeRequest != null)]
+                    | sort_by(.autoMergeRequest.enabledAt) | .[]
+                    | [.number, .headRefName, .isCrossRepository, .mergeStateStatus,
+                       (.commits.nodes[0].commit.statusCheckRollup.state // "NONE")] | @tsv'
+          }
+          for attempt in 1 2 3 4 5 6; do
+            rows="$(queued)"
+            grep -q $'\tUNKNOWN\t' <<<"$rows" || break
+            sleep 10
+          done
+          if [ -z "$rows" ]; then echo "queue empty"; exit 0; fi
+
+          drop() {   # $1 PR, $2 reason
+            gh pr merge "$1" --repo "$REPO" --disable-auto
+            gh pr comment "$1" --repo "$REPO" --body "Taken out of the merge queue: $2. Fix it, then queue it again with \`gh pr merge $1 --auto --merge\`."
+            echo "#$1 dropped: $2"
+          }
+
+          # The rows come in on fd 3, so no gh call inside the loop can read them from stdin.
+          while IFS=$'\t' read -r pr ref cross state checks <&3; do
+            echo "#$pr: merge state $state, checks $checks"
+            if [ "$cross" = "true" ]; then
+              drop "$pr" "this workflow cannot update a branch from a fork; update it from dev by hand"
+              continue
+            fi
+            case "$state" in
+              DIRTY) drop "$pr" "it conflicts with dev"; continue ;;
+              UNKNOWN) echo "#$pr: merge state still UNKNOWN; the next run retries"; exit 0 ;;
+            esac
+            if [ "$checks" = "FAILURE" ] || [ "$checks" = "ERROR" ]; then
+              drop "$pr" "its checks failed"
+              continue
+            fi
+            if [ "$state" = "BEHIND" ]; then
+              # Fails if dev changed a workflow file (GITHUB_TOKEN may not write those): the
+              # error is the job's log, and the PR stays queued for a manual update.
+              gh api -X PUT "repos/$REPO/pulls/$pr/update-branch" --silent
+              # The update is asynchronous; dispatch only once the branch has the new commit.
+              for attempt in 1 2 3 4 5 6; do
+                sleep 5
+                [ "$(gh pr view "$pr" --repo "$REPO" --json mergeStateStatus --jq .mergeStateStatus)" != "BEHIND" ] && break
+              done
+              gh workflow run ci.yml --repo "$REPO" --ref "$ref"
+              echo "#$pr: updated from dev, CI dispatched on $ref"
+            elif [ "$checks" = "NONE" ]; then
+              # Up to date but no check on its head (an earlier dispatch failed): start CI.
+              gh workflow run ci.yml --repo "$REPO" --ref "$ref"
+              echo "#$pr: no checks on its head, CI dispatched on $ref"
+            else
+              echo "#$pr: waiting (CI running, or GitHub merges it)"
+            fi
+            exit 0
+          done 3<<<"$rows"
+          echo "no queued PR left to advance"
