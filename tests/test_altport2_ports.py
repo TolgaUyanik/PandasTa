@@ -171,11 +171,13 @@ REGISTERED = {
 #: 0.7767, in the ledger), -> 246 by gapm (Gate E SHIP, 0.3738,
 #: in the ledger), -> 247 by max_return (#12, Gate E SHIP,
 #: 0.6716, in the ledger), -> 248 by tf_median_absdiff_20 (#118, volatility;
-#: Gate E SHIP, 0.7422, in the ledger). Pinned, not
+#: Gate E SHIP, 0.7422, in the ledger), -> 249 by volvol (#15, volatility;
+#: Gate E pending -- the launcher runs it after this session, see
+#: docs/VolvolMeasured.md). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
-CATEGORY_TOTAL = 248
-CATEGORY_BUCKETS = {"trend": 59, "volatility": 23, "volume": 25}
+CATEGORY_TOTAL = 249
+CATEGORY_BUCKETS = {"trend": 59, "volatility": 24, "volume": 25}
 
 #: Gate E, re-measured on the SHIPPED columns over 89 BIST_100 daily frames /
 #: 408,253 bars against 496 comparators. See docstring item 4.
