@@ -1003,6 +1003,12 @@ class AnalysisIndicators(BasePandasObject):
         result = coppock(close=close, length=length, fast=fast, slow=slow, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def crsi(self, rsi_length=None, streak_length=None, pctrank_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = crsi(close=close, rsi_length=rsi_length, streak_length=streak_length,
+                       pctrank_length=pctrank_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def cti(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = cti(close=close, length=length, offset=offset, **kwargs)
