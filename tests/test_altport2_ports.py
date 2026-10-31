@@ -166,7 +166,7 @@ REGISTERED = {
 #: -> 241 by adxr (Gate E DISCLOSE_GAP, 0.8838, in the ledger), -> 242 by
 #: tf_centroid_20 (statistics; Gate E measured, SHIP, 0.5943 vs
 #: ATR_Ratio_5_20_Pctl, see docs/TfCentroid20Measured.md), -> 243 by
-#: median_ad_hl2 (statistics, #119), -> 244 by kpss (#157, Gate E SHIP,
+#: median_ad_hl2 (statistics, #119; Gate E SHIP, 0.4989, in the ledger), -> 244 by kpss (#157, Gate E SHIP,
 #: 0.2256, in the ledger), -> 245 by cusum (#16, Gate E DISCLOSE,
 #: 0.7767, in the ledger), -> 246 by gapm (Gate E SHIP, 0.3738,
 #: in the ledger), -> 247 by max_return (#12, Gate E SHIP,

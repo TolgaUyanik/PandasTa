@@ -26,9 +26,9 @@ What these tests pin, in order of how much it would hurt to lose them:
 * CORRECTNESS against an independent loop written from the TSFEL formula
   text, not from the module, and a constant-log-return hand check.
 * BOUND: a median of absolute values is non-negative by construction.
-* Wiring: the accessor and the column name `MEDABSDIFF_20`; `Category` entry
-  is withheld on purpose until Gate E has a ledger row (see
-  `docs/TfMedianAbsdiff20Measured.md`).
+* Wiring: the accessor, the column name `MEDABSDIFF_20`, and its
+  `Category['volatility']` entry (registered after Gate E SHIP, 0.7422 vs
+  natr; ledger row from run `is118-tf_median_absdiff_20-register`).
 """
 import importlib
 import types

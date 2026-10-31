@@ -7,7 +7,8 @@ price-action / SMC indicators and oriented toward **machine-learning feature gen
 **248 indicators** registered in `Category`, across 9 categories — that is the number
 that matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two other
 counts are true of the same package and are easy to confuse with it: **256** are callable
-as `df.ta.<name>()` (`Category` plus `beta`, `hwma` and `vp`), and `drawdown` and `ma` are
+as `df.ta.<name>()` (`Category` plus `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`,
+`up_and_down_volume`, `volume_delta` and `vp`), and `drawdown` and `ma` are
 importable as `ta.<name>()` without being either. All of them are in the dictionary; the
 three counts are emitted by its generator, and `tests/test_readme_counts.py` fails if this
 section drifts from the package. Every indicator returns a `Series` or `DataFrame`
@@ -159,8 +160,8 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 
 Present but outside `Category`, so skipped by `df.ta.strategy()`: `beta`, `drawdown`,
 `hwma`, `vp`, `ma` (moving-average selector — `help(ta.ma)`), and the two lower-timeframe
-functions `up_and_down_volume` / `volume_delta`, and the four TA-Lib ports
-`beta`, `ht_trendline`, `mama` and `sarext`. `beta`, `hwma`, `vp`,
+functions `up_and_down_volume` / `volume_delta`, and the three TA-Lib ports
+`ht_trendline`, `mama` and `sarext`. `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `vp`,
 `up_and_down_volume` and `volume_delta` are reachable as `df.ta.<name>()`; `drawdown` and
 `ma` only as `ta.drawdown()` / `ta.ma()`. `beta` is a TALIB-1 port and needs a BENCHMARK
 series a single-frame sweep cannot supply, which is the same reason as the two volume
