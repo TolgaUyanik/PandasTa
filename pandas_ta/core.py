@@ -1943,6 +1943,13 @@ class AnalysisIndicators(BasePandasObject):
                       dbl_mode=dbl_mode, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def dx(self, length=None, scalar=None, mamode=None, drift=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = dx(high=high, low=low, close=close, length=length, scalar=scalar, mamode=mamode, drift=drift, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def equal_highs_lows(self, left=None, right=None, tol_mode=None, atr_length=None, atr_mult=None, pct_tol=None, lookback_pivots=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
