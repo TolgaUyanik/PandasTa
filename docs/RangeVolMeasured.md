@@ -6,16 +6,16 @@ because each also uses the bar's own high/low (and, for Yang-Zhang, the overnigh
 Garman & Klass (1980), Rogers & Satchell (1991, drift-independent by construction), and
 Yang & Zhang (2000, adds the overnight close-to-open jump on top of Rogers-Satchell).
 
-**Status: Gates A-D cleared; wired into `Category`. Gate E: pending, run by issue-solver
-after this session.** The issue pre-registers an expectation of revert, guessing max |rho|
->= 0.9 against `natr` / `har_park` (the fork's existing range-volatility columns). **On the
-synthetic proxy below, that guess does NOT hold**: the measured max against `natr` /
-`har_park` is **0.6389** (`YZVOL_20` vs `NATR_14`), well under 0.9 and even under the
-DISCLOSE band (0.76). A synthetic proxy is not Gate E, and Gate E over the real 89-frame
-BIST set is the measurement the protocol actually decides on (`r3-perframe-0.90`); it has
-not run yet (this session may not touch the Backtesting repo). **This file does not make
-the ship/revert call** -- the receipt session that records Gate E does, per CLAUDE.md and
-the measured-revert precedent in `docs/DicksonMaMeasured.md` / `docs/KalmanTrendMeasured.md`.
+**Status: Gates A-F cleared; Gate E measured DISCLOSE_GAP on all three columns (none
+STRUCK), shipped.** The issue pre-registers an expectation of revert, guessing max |rho|
+>= 0.9 against `natr` / `har_park` (the fork's existing range-volatility columns). On the
+synthetic proxy, that guess did not hold (max 0.6389). **On the real 89-frame BIST Gate E
+run, the guess comes closer but still does not cross the STRUCK line**: pooled max |rho|
+against `natr` is 0.8963 (`GKVOL_20`), 0.8420 (`RSVOL_20`), 0.8326 (`YZVOL_20`) -- all three
+in the `DISCLOSE_GAP` band (0.80 <= rho < 0.90), none at or above 0.90 pooled or per-frame
+median against any comparator. Per CLAUDE.md's `r3-perframe-0.90` bands and the issue's
+`Done when`, a DISCLOSE_GAP verdict ships with the gap stated; it does not trigger a revert.
+All three columns ship.
 
 Shipped as **three modules** (CLAUDE.md's "one indicator, one module" -- three independent
 papers, like the Liquidity trio in `docs/LiquidityMeasured.md`, not three facets of one
@@ -126,8 +126,8 @@ tick walk, seed 11, for Gate C/D; 3,000-bar walk, seed 1, for the proxy overlap)
 | B Causality | Future-perturbation sweep (31 offsets for `garman_klass`/`rogers_satchell`, 30 for `yang_zhang` since its warm-up is one bar longer; the real module leaks at 0/31 or 0/30 for all three) plus one `importlib`-read, `exec`'d-in-memory look-ahead mutant per module: `garman_klass`/`rogers_satchell` shift the rolling input one bar into the future (`per_bar.shift(-1)`); `yang_zhang` reads the NEXT bar's close as "prior close" (`close.shift(-1)` instead of `close.shift(1)`). Each mutant is proved live (differs from the real module), then measured: **caught at 31/31** (`garman_klass`), **31/31** (`rogers_satchell`), **30/30** (`yang_zhang`) -- every mutant is caught at every perturbation offset tested. |
 | C Reachability | Synthetic only (real-data counts owed to the Gate E receipt session, same gap as every pending-Gate-E port in this repo): `GKVOL_20`/`RSVOL_20` fire 1,181/1,200 (1,181 distinct), `YZVOL_20` fires 1,180/1,200 (1,180 distinct, one bar shorter warm-up margin from needing `length+1` bars for the overnight term). |
 | D Scale-free | All three: x8/x64 bit-identical (`max|diff| = 0.0`, NaN masks matching -- every term is a log-ratio of prices, exact under a power-of-two rescale); x10/x3.7 within `9.10e-15`/`8.44e-15` (`GKVOL_20`), `1.27e-14`/`8.66e-15` (`RSVOL_20`), `7.99e-15`/`6.00e-15` (`YZVOL_20`). `0 < fires < n` plus > 100 distinct values, all three (measured: 1,181 / 1,181 / 1,180 distinct, well over 100). |
-| E Attribution | **Pending, run by issue-solver after this session.** Bands `r3-perframe-0.90`, 89 ALTPORT-1 frames, 687 comparators (329 `compute_all` + 358 manifest `1d`), per CLAUDE.md's Gate E harness. The pre-registered guess (max |rho| >= 0.9 vs `natr`/`har_park`) is NOT supported by the synthetic proxy below; Gate E on real data is what decides. |
-| F Suites | This repo only (parent repo run by the launcher): `python -m pytest -q`, 2026-10-31, this tree: **3 failed / 3,544 passed / 83 skipped** -- exactly the two pre-existing CLAUDE.md known breaks (`test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`, `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`) plus `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (expected -- no ledger row yet, per this session's instructions: Gate E has not run). Nothing else fails; the README/dictionary/companion-count/category-count tests are green against this session's own edits (`README.md`, `docs/IndicatorDictionary.md`, `docs/MLCompanionContract.md`, `tests/test_altport2_ports.py`). |
+| E Attribution | **Measured, DISCLOSE_GAP on all three, none STRUCK.** `gate_e_overlap.py run --module pandas_ta.volatility.<name>`, 89 ALTPORT-1 frames, 687 comparators (329 `compute_all` + 358 manifest `1d`), canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS. `GKVOL_20`: max \|rho\| **0.8963** vs `natr` (`compute_all`, n=365,154); per-frame max median \|rho\| **0.8885** (89 frames, 29.21% >= 0.90). `RSVOL_20`: max \|rho\| **0.8420** vs `natr` (n=365,154); per-frame max median \|rho\| **0.8371** (8.99% >= 0.90). `YZVOL_20`: max \|rho\| **0.8326** vs `natr` (n=365,077, 1 degenerate frame excluded); per-frame max median \|rho\| **0.8291** (11.24% >= 0.90). All three land in `DISCLOSE_GAP` (0.80 <= rho < 0.90) on `r3-perframe-0.90`: pooled < 0.90 and the top comparator's per-frame median < 0.90 for every column, so none STRUCK. Runs `is17-garman_klass-a61ba141` / `is17-rogers_satchell-a61ba141` / `is17-yang_zhang-a61ba141`, measured 2026-10-31, recorded in `docs/gate_e_ledger.csv`. The issue's pre-registered revert guess (>= 0.90 vs `natr`/`har_park`) came closer than the synthetic proxy suggested but did not cross the STRUCK line on any of the three. |
+| F Suites | This repo only (parent repo run by the launcher): `python -m pytest -q`, 2026-10-31, this tree, after the three ledger rows landed: **2 failed / 3,566 passed / 83 skipped**. Both failures are the pre-existing CLAUDE.md known breaks (`test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`, `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`); `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` now passes with all three rows present. Nothing names `garman_klass`/`rogers_satchell`/`yang_zhang`. |
 
 ## Proxy overlap (NOT Gate E)
 
@@ -151,17 +151,13 @@ This is a synthetic single-walk proxy, not Gate E: the real engine's 687 compara
 BIST frames (`compute_all` plus the `ml_features` manifest) may differ, and that is the
 measurement the protocol actually bands against.
 
-## To close
+## Closed
 
-1. Launcher runs Gate E (`gate_e_overlap.py run --module pandas_ta.volatility.garman_klass`
-   / `.rogers_satchell` / `.yang_zhang`) against the 89 ALTPORT-1 frames.
-2. A receipt session reads the launcher's output, enters the measured max |rho| per column
-   (pooled and per-frame-median) with its comparator and sample size above, and records the
-   `docs/gate_e_ledger.csv` rows (`python docs/gate_e_ledger.py record`).
-3. Apply CLAUDE.md's `r3-perframe-0.90` bands per column. A column that STRUCKs is deleted
-   (module, export, `Category` entry, accessor, test file, README/dictionary/contract/
-   `test_altport2_ports.py` counts) and this file is kept as the receipt for that column; a
-   column that ships keeps everything as committed here. Given the mutual-redundancy numbers
-   above, more than one column may clear Gate E individually while still being redundant with
-   each other -- worth a second look before keeping all three.
-4. Run both suites again after any revert.
+Gate E measured `DISCLOSE_GAP` on all three columns (`GKVOL_20` 0.8963, `RSVOL_20` 0.8420,
+`YZVOL_20` 0.8326, all vs `natr`, none STRUCK) -- shipped per the issue's `Done when`
+(disclosed gap, not a revert). All five wiring touch points, the three `docs/gate_e_ledger.csv`
+rows, and both repos' suites (parent repo run by the launcher) are in place. The
+mutual-redundancy numbers above (0.94-0.98 among the three columns themselves) stand as
+disclosed, not resolved: all three cleared Gate E's real-data bands individually, but a
+downstream user of `df.ta.strategy()` picking up more than one is picking up near-duplicate
+signals, not three independent ones. Issue #17 / RANGEVOL closed by ship.
