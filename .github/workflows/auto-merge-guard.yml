@@ -1,0 +1,80 @@
+# Auto-merge is for PRs into `dev` ONLY.
+#
+# GitHub's "Allow auto-merge" is one switch for the whole repository; it cannot be limited to
+# a branch. On `dev` it is the merge queue (merge-queue.yml): `gh pr merge <N> --auto --merge`
+# queues a PR, and this workflow's `queue` job runs a queue step so it picks the PR up. Anywhere else, above
+# all a `dev` -> `main` release PR, a merge should stay a deliberate human act.
+#
+# So this workflow switches auto-merge back OFF, with a comment saying why, on any PR whose base
+# is not `dev`. It runs when auto-merge is switched on, and when a PR is edited (retargeting a
+# PR that already has auto-merge on from `dev` to `main` is an `edited` event).
+#
+# Best effort, not enforcement: it acts after auto-merge is on, so a PR into main whose checks
+# are already green can merge before this job runs (and `gh pr merge --auto` on an already
+# mergeable PR merges at once, with no auto_merge_enabled event). It is not a required check
+# and never blocks anything.
+name: Auto-merge guard
+
+on:
+  pull_request:
+    types: [auto_merge_enabled, edited]
+
+permissions:
+  # `gh pr merge --disable-auto` reads the PR's commits first; without contents: read that
+  # query fails ("Resource not accessible by integration") and auto-merge stays on.
+  contents: read
+  pull-requests: write
+
+jobs:
+  guard:
+    name: Auto-merge only into dev
+    # Nothing to do for a PR into dev, or for an edit of a PR that has no auto-merge on.
+    if: >-
+      github.event.pull_request.base.ref != 'dev'
+      && github.event.pull_request.auto_merge != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+      BASE: ${{ github.event.pull_request.base.ref }}
+    steps:
+      - name: Turn auto-merge off (it is for PRs into dev only)
+        run: |
+          gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --disable-auto
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body \
+            "Auto-merge is switched off here: it is allowed only for PRs into \`dev\` (this PR targets \`$BASE\`). Merge it by hand once it is ready."
+
+  queue:
+    name: Start the merge queue
+    # A PR into dev was queued. A fork PR's token is read-only; the next push to dev or CI
+    # completion runs the queue instead.
+    if: >-
+      github.event.action == 'auto_merge_enabled'
+      && github.event.pull_request.base.ref == 'dev'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # One concurrency group across merge-queue.yml, ci.yml and auto-merge-guard.yml.
+    concurrency:
+      group: merge-queue
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      # dev's copy of the queue logic, never the PR's: a PR cannot change how the queue treats
+      # the other PRs before it is reviewed and merged.
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Move the merge queue on
+        run: |
+          if [ ! -f .github/scripts/merge-queue.sh ]; then echo "the merge queue is not on dev yet"; exit 0; fi
+          bash .github/scripts/merge-queue.sh
