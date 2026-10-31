@@ -25,8 +25,8 @@ a CV form (`stdev(natr) / mean(natr)`) would read `0/0 = NaN` on a window where 
 exactly 0, which `natr` itself cannot produce on real price data (true range is 0 only on an
 exact-flat bar) but is reachable on degenerate synthetic input. Stdev has no such failure mode.
 
-**Overlap, per the issue:** guessed (not measured until Gate E runs) to be a second-order function
-of `natr`, since it is literally built on `natr`.
+**Overlap, per the issue:** guessed to be a second-order function of `natr`, since it is literally
+built on `natr` — confirmed by Gate E at pooled max\|ρ\| 0.6408 against `natr` (below).
 
 ## Calculation
 

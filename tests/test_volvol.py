@@ -3,7 +3,7 @@
 of a rolling volatility series (vol-of-vol), issue #15. Sources: Alpha
 Architect "Volatility Anomalies: IVOL and Vol-of-Vol"; Kaufman (2013) ch. 18.
 Measurements and the Gate E result are in `docs/VolvolMeasured.md` (Gate E
-is run by the launcher after this session, not in this session).
+ran SHIP, 0.6408 vs `natr`, recorded in `docs/gate_e_ledger.csv`).
 
 What these tests pin, in order of how much it would hurt to lose them:
 
@@ -24,7 +24,7 @@ What these tests pin, in order of how much it would hurt to lose them:
 * BOUND: a standard deviation is non-negative by construction.
 * Wiring: the accessor, the column name `VOLVOL_20_14`, and its
   `Category['volatility']` entry (wired per issue #15's rules; the Gate E
-  ledger row is recorded by a later session once the launcher runs Gate E).
+  ledger row is recorded in `docs/gate_e_ledger.csv` (SHIP, 0.6408 vs `natr`)).
 """
 import importlib
 import types
