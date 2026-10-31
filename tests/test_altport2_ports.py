@@ -172,8 +172,8 @@ REGISTERED = {
 #: in the ledger), -> 247 by max_return (#12, Gate E SHIP,
 #: 0.6716, in the ledger), -> 248 by tf_median_absdiff_20 (#118, volatility;
 #: Gate E SHIP, 0.7422, in the ledger), -> 249 by trend_scan (#20, statistics;
-#: Gate E PENDING, run by the issue-solver launcher after this session; see
-#: docs/TrendScanMeasured.md). Pinned, not
+#: Gate E DISCLOSE_GAP 0.8804 (TSCAN_T) / SHIP 0.2909 (TSCAN_L), in the
+#: ledger; see docs/TrendScanMeasured.md). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
 CATEGORY_TOTAL = 249
