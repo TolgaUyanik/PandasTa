@@ -25,6 +25,7 @@ from .lrsi import lrsi
 from .macd import macd
 from .macd_area_divergence import macd_area_divergence
 from .mom import mom
+from .ovn_split import ovn_split
 from .pfe import pfe
 from .pgo import pgo
 from .po import po
