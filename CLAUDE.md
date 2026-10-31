@@ -55,14 +55,15 @@ the repository owner opens (the owner's and the issue-solver's) are queued by th
 open (`auto-queue.yml`, then `merge-queue.yml`'s `enqueue` job; open one as a draft to keep it out:
 it is queued when marked ready; a PR whose auto-merge you switch off is queued again if it reopens
 or leaves draft); contributors' PRs, owner PRs that touch `.github/`, and owner PRs with commits by
-others are queued by hand; PRs go roughly in the order auto-merge was switched on. The queue takes
-the head of the line, reading only the `tests` check: behind `dev`, it updates the branch and the
-update's `pull_request` CI follows; conflicting, red, with CI waiting for approval, or with CI that
-never produces `tests`, it switches auto-merge off with a comment and moves to the next. One PR is
-tested at a time. `merge-queue.yml` runs on each push to `dev` and on `workflow_dispatch --ref dev`,
-which `auto-merge-guard.yml` sends when a PR is queued and `auto-queue.yml` sends (with `enqueue`)
-when the owner opens one; `ci.yml`'s `queue` job runs when a PR's CI finishes, has no owner token,
-takes red PRs out, and dispatches `merge-queue.yml` when the next PR needs an update; either runner
+others are queued by hand (checked once, when the PR is queued; commits pushed later are not
+re-checked); PRs go roughly in the order auto-merge was switched on. The queue takes the head of the
+line, reading only the `tests` check: behind `dev`, it updates the branch and the update's
+`pull_request` CI follows; conflicting, red, with CI waiting for approval, or with CI that never
+produces `tests`, it switches auto-merge off with a comment and moves to the next. One PR is tested
+at a time. `merge-queue.yml` runs on each push to `dev` and on `workflow_dispatch --ref dev`, which
+`auto-merge-guard.yml` sends when a PR is queued and `auto-queue.yml` sends (with `enqueue`) when
+the owner opens one; `ci.yml`'s `queue` job runs when a PR's CI finishes, has no owner token, takes
+red PRs out, and dispatches `merge-queue.yml` when the next PR needs an update; either runner
 dispatches it when a later PR still has no CI run. Branch updates use the owner's fine-grained token
 (Contents, Pull requests, Workflows: read/write) as `MERGE_QUEUE_TOKEN` in the `merge-queue`
 environment, which only `dev` may use, so a PR's workflows cannot read it. `dev` requires no

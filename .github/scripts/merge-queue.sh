@@ -5,8 +5,8 @@
 # what it does and why.
 # Needs REPO and GH_TOKEN (the job's token: pull-requests and actions write, contents read);
 # MQ_ENQUEUE (a PR number, merge-queue.yml's `enqueue` job) also needs MQ_TOKEN.
-# MQ_TOKEN (environment secret MERGE_QUEUE_TOKEN, the owner's token) is used only for branch
-# updates; ci.yml's job has none and dispatches merge-queue.yml (which sets MQ_REQUIRED=1) to
+# MQ_TOKEN (environment secret MERGE_QUEUE_TOKEN, the owner's token) is used for branch updates
+# and, in the `enqueue` job, to switch auto-merge on; ci.yml's job has none and dispatches merge-queue.yml (which sets MQ_REQUIRED=1) to
 # update a branch. Either runner also dispatches merge-queue.yml after its one CI poll per step.
 set -euo pipefail
 owner="${REPO%/*}"; name="${REPO#*/}"
@@ -38,9 +38,11 @@ queued() {
 # issue-solver's, which it opens as the owner), then stop. With the owner's token, so the merge is
 # the owner's push and starts the push workflows (GITHUB_TOKEN's would not). Everything is
 # re-checked here, on dev, not trusted from the dispatch. Kept manual: a PR that touches .github/
-# (it could reach MERGE_QUEUE_TOKEN once merged) and a PR with commits by anyone but the owner
-# (and the `claude` co-author of the solver's and the owner's commits) -- a best-effort check,
-# since a commit's author can be set by whoever pushes it.
+# (it could reach MERGE_QUEUE_TOKEN once merged), a PR with commits by anyone but the owner (and
+# the `claude` co-author of the solver's and the owner's commits; a commit with no GitHub login
+# counts as someone else) -- best effort, since a commit's author can be set by whoever pushes
+# it -- and a PR too big to list in one read. Checked once, when the PR is queued: commits pushed
+# later are not re-checked.
 if [ -n "${MQ_ENQUEUE:-}" ]; then
   if [[ ! "$MQ_ENQUEUE" =~ ^[0-9]+$ ]]; then echo "::error::enqueue request is not a PR number"; exit 1; fi
   if [ -z "${MQ_TOKEN:-}" ]; then echo "::error::enqueue needs MQ_TOKEN (merge-queue.yml only)"; exit 1; fi
@@ -48,16 +50,19 @@ if [ -n "${MQ_ENQUEUE:-}" ]; then
     --json author,baseRefName,isCrossRepository,isDraft,state,autoMergeRequest,commits,files \
     --jq '[(.author.login // "-"), .baseRefName, .isCrossRepository, .isDraft, .state,
            (.autoMergeRequest != null),
-           ([.commits[].authors[].login // "-"] | unique | join(",")),
-           ([.files[].path | select(startswith(".github/"))] | length)] | @tsv')" \
+           ([.commits[].authors[] | (.login // "-")] | unique | join(",")),
+           ([.files[].path | select(startswith(".github/"))] | length),
+           ((.files | length) >= 100 or (.commits | length) >= 100)] | @tsv')" \
     || { echo "::error::cannot read #$MQ_ENQUEUE"; exit 1; }
-  IFS=$'\t' read -r eq_author eq_base eq_cross eq_draft eq_state eq_queued eq_logins eq_github <<<"$info"
+  IFS=$'\t' read -r eq_author eq_base eq_cross eq_draft eq_state eq_queued eq_logins eq_github eq_capped <<<"$info"
   others="$(tr ',' '\n' <<<"$eq_logins" | grep -vxF -e "$owner" -e claude | paste -sd, - || true)"
   if [ "$eq_author" != "$owner" ] || [ "$eq_base" != "dev" ] || [ "$eq_cross" != "false" ] || [ "$eq_draft" != "false" ] \
      || [ "$eq_state" != "OPEN" ]; then
     echo "#$MQ_ENQUEUE: not auto-queued (author $eq_author, base $eq_base, fork $eq_cross, draft $eq_draft, $eq_state)"
   elif [ "$eq_queued" = "true" ]; then
     echo "#$MQ_ENQUEUE: already queued"
+  elif [ "$eq_capped" = "true" ]; then
+    echo "::notice::#$MQ_ENQUEUE has 100+ files or commits (beyond what one read lists): not auto-queued; queue it by hand"
   elif [ "$eq_github" != "0" ]; then
     echo "::notice::#$MQ_ENQUEUE touches .github/ ($eq_github files): not auto-queued; read it, then queue it by hand"
   elif [ -n "$others" ]; then
@@ -66,7 +71,9 @@ if [ -n "${MQ_ENQUEUE:-}" ]; then
     GH_TOKEN="$MQ_TOKEN" gh pr merge "$MQ_ENQUEUE" --repo "$REPO" --auto --merge
     # Closes the gap between the check and the switch: a PR retargeted away from dev meanwhile
     # loses auto-merge again (one already merged that way cannot be undone; the window is short).
-    if [ "$(gh pr view "$MQ_ENQUEUE" --repo "$REPO" --json baseRefName --jq .baseRefName)" != "dev" ]; then
+    eq_base_now="$(gh pr view "$MQ_ENQUEUE" --repo "$REPO" --json baseRefName --jq .baseRefName)" \
+      || { echo "::error::#$MQ_ENQUEUE: cannot re-read its base after switching auto-merge on; check it by hand"; exit 1; }
+    if [ "$eq_base_now" != "dev" ]; then
       gh pr merge "$MQ_ENQUEUE" --repo "$REPO" --disable-auto || true
       echo "::error::#$MQ_ENQUEUE was retargeted away from dev during the check; auto-merge switched off"; exit 1
     fi
