@@ -8,8 +8,9 @@ machine, so the recursion is implemented from the task's own description of AFML
 5.1-5.2 (`getWeights_FFD`, `fracDiff_FFD`), not checked line-by-line against the printed
 book.
 
-**Status: Gates A, B, D, E cleared; Gate C synthetic only (real-data counts owed, no
-access to the parent repo in this worktree).** Gate E ran 2026-10-31 (run
+**Status: Gates A-E cleared.** Gate C: 373,840 non-NaN of 398,849 pooled bars (93.7%), all
+non-zero, over 89 ALTPORT-1 frames (Gate E run `is13-ffd-406bc97e`), on top of the synthetic
+count below. Gate E ran 2026-10-31 (run
 `is13-ffd-406bc97e`), verdict `DISCLOSE_GAP` (0.80 ≤ max |ρ| < 0.90, not STRUCK) — shipped,
 disclosed below. Recorded in `docs/gate_e_ledger.csv` via `docs/gate_e_ledger.py record`.
 
@@ -75,7 +76,7 @@ selector is a second indicator's worth of machinery with its own warm-up and tes
 |---|---|
 | A Correctness | weights (before the last one) match the closed-form generalised binomial coefficient `(-1)^k * C(d,k)` two ways, over 4 `(d, threshold)` pairs: a plain product loop (same formula as the module's recursion, independent code path — catches a sign/off-by-one coding bug, not a conceptual mismatch with AFML's own recipe, which this port could not check line-by-line against the printed book), and, for the first 40 weights where it cannot overflow, `math.gamma` directly (a genuinely different numerical codepath). Both to 1e-9. The re-centring is verified to force `sum(w) < 1e-9`; the full convolution matches an independently written plain-Python loop (not `sliding_window_view`) to 1e-9, including a NaN, a zero and a negative close in the window |
 | B Causality | future-perturbation over 8 offsets past the warm-up: real module 0 leaks. Two mutants, each proved live, then caught at 8 of 8: the output write back-dated by one bar, and the anchor read from `usable[-1]` (the END of the series) instead of `usable[0]` — the look-ahead class the task's 🔴 flagged, here as a data-dependent reference rather than a fitted parameter, since `d` itself is never fit |
-| C Reachability | **synthetic only**: 3,000-bar GBM, seed 11, tick 0.05, default `d, threshold`: 2,719 finite, 2,719 nonzero (1,629 pos / 1,090 neg), 2,719 distinct values. Real-data counts owed |
+| C Reachability | Synthetic: 3,000-bar GBM, seed 11, tick 0.05, default `d, threshold`: 2,719 finite, 2,719 nonzero (1,629 pos / 1,090 neg), 2,719 distinct values. Real data (Gate E run, 89 ALTPORT-1 frames): 373,840 non-NaN of 398,849 pooled bars (93.7%), all non-zero |
 | D Scale-free | x8, x64 max diff 0.0 and `Series.equals` True; x10, x3.7 max diff 3.3e-16 / 4.4e-16 (test bound 1e-9), NaN masks match; `0 < 2719 < 3000` fires, > 100 distinct values |
 | E Attribution | **DISCLOSE_GAP.** `FFD_0.4_0.0001` max \|ρ\| = 0.8494 vs `Dist_to_SMA_200_pct` (manifest, n = 373,840); per-frame max median \|ρ\| = 0.8425 (same comparator, 89 frames, 0.0% of frames ≥ 0.90 pooled-only). Run `is13-ffd-406bc97e`, 2026-10-31, 687 comparators (329 `compute_all` + 358 `ml_features` manifest), 89 ALTPORT-1 frames. Band: 0.80 ≤ ρ < 0.90, not STRUCK — shipped |
 | F Suites | this repo: see the commit this file ships with; both repos' suites are run by the launcher in clean worktrees, per this session's rules |
@@ -121,5 +122,5 @@ comparators) over the 89 ALTPORT-1 BIST frames; outputs recorded in
 real-data overlap (0.8494) sits well above the synthetic proxy's 0.7346 ceiling above, which
 undersold it: a fixed-`d` fractional difference of log price tracks a 200-bar distance-to-SMA
 closely on these frames. Disclosed, not struck — the column ships as-is; `ffd` stays
-registered, no module/wiring/test removal needed. Gate C's real-data counts remain owed (no
-parent-repo access in this worktree).
+registered, no module/wiring/test removal needed. Gate C's real-data counts are the same run:
+373,840 non-NaN of 398,849 pooled bars (93.7%), all non-zero, over the 89 frames.
