@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # The merge queue for `dev`: one step for the PR at the head of the line. Run by
-# .github/workflows/merge-queue.yml (push to dev), ci.yml (job `queue`, when a PR's CI finishes)
-# and auto-merge-guard.yml (job `queue`, when a PR into dev is queued); merge-queue.yml's header
-# says what it does and why. Needs REPO, GH_TOKEN (the job's token: pull-requests write) and
-# MQ_TOKEN (secret MERGE_QUEUE_TOKEN: the owner's fine-grained token, used only for branch updates).
+# .github/workflows/merge-queue.yml (push to dev, a PR queued) and ci.yml (job `queue`, when a
+# PR's CI finishes); merge-queue.yml's header says what it does and why.
+# Needs REPO and GH_TOKEN (the job's token: pull-requests write, contents and actions read).
+# MQ_TOKEN (environment secret MERGE_QUEUE_TOKEN, the owner's token) is used only for branch
+# updates; ci.yml's job has none and leaves updates to merge-queue.yml, which sets MQ_REQUIRED=1.
 set -euo pipefail
-if [ -z "${MQ_TOKEN:-}" ]; then echo "::error::MQ_TOKEN is empty: is the MERGE_QUEUE_TOKEN secret set?"; exit 1; fi
 owner="${REPO%/*}"; name="${REPO#*/}"
 
 # Queued PRs into dev, oldest auto-merge first, with the state of the `tests` check runs on the
@@ -62,11 +62,22 @@ while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
       drop "$pr" "its \`tests\` check ended $tests" || echo "::error::#$pr: drop failed"; continue ;;
   esac
   if [ "$state" = "BEHIND" ]; then
-    # With the owner's token, not GITHUB_TOKEN: an update made with GITHUB_TOKEN starts no
-    # normal CI (measured on #226: the pull_request run waited for approval, and the PR stayed
-    # blocked although a dispatched run passed `tests`). This update starts `pull_request`
-    # CI like a push. Refused on a conflict GitHub had not computed yet: drop it, so it does not
-    # hold the line. The same if the update is accepted but never lands.
+    if [ -z "${MQ_TOKEN:-}" ]; then
+      if [ "${MQ_REQUIRED:-}" = "1" ]; then
+        echo "::error::MQ_TOKEN is empty: is MERGE_QUEUE_TOKEN set in the merge-queue environment?"; exit 1
+      fi
+      echo "::notice::#$pr is behind dev; this job has no owner token, so merge-queue.yml updates it (next push to dev or queueing)"
+      exit 0
+    fi
+    # A rejected token (expired, revoked) must not take every PR out: fail red, drop nothing.
+    if ! GH_TOKEN="$MQ_TOKEN" gh api "repos/$REPO" --silent; then
+      echo "::error::MERGE_QUEUE_TOKEN was rejected (expired or revoked?); renew it. No PR was taken out."; exit 1
+    fi
+    # With the owner's token, not GITHUB_TOKEN. Measured on #226: a GITHUB_TOKEN update started a
+    # pull_request run that waited for approval, and the PR stayed blocked although a dispatched
+    # run passed `tests`. Expected (GitHub's rules, not yet measured here): the owner's update
+    # starts pull_request CI like a push. Refused on a conflict GitHub had not computed yet: drop
+    # it, so it does not hold the line. The same if the update is accepted but never lands.
     if ! GH_TOKEN="$MQ_TOKEN" gh api -X PUT "repos/$REPO/pulls/$pr/update-branch" --silent; then
       drop "$pr" "updating its branch from dev failed (a conflict, or the token; see the merge-queue run log); merge dev into it by hand" || echo "::error::#$pr: drop failed"
       continue
@@ -84,18 +95,31 @@ while IFS=$'\t' read -r pr ref head cross draft state tests <&3; do
     fi
     echo "#$pr: updated from dev; its pull_request CI runs, and its end runs the queue again"
   elif [ "$tests" = "NONE" ]; then
-    # Up to date, no `tests` check on its head: wait while a ci.yml run for this head is
-    # unfinished or not yet created; drop it if every run for this head ended without one.
+    # Up to date, no `tests` check on its head. Its ci.yml runs for this head decide:
+    #   waiting for approval -> drop (the queue cannot approve);
+    #   queued / running     -> wait;
+    #   all ended            -> drop (they left no `tests` check);
+    #   none, head < 10 min  -> wait (CI not registered yet); none, older -> drop (never started).
     runs="$(gh run list --repo "$REPO" --workflow ci.yml --branch "$ref" --limit 20 --json headSha,status \
               --jq "[.[] | select(.headSha == \"$head\") | .status]")"
+    if [ "$(jq 'map(select(. == "waiting" or . == "action_required")) | length' <<<"$runs")" != "0" ]; then
+      drop "$pr" "its CI run for $head waits for approval; approve it in the Actions tab" || echo "::error::#$pr: drop failed"
+      continue
+    fi
     if [ "$(jq 'map(select(. != "completed")) | length' <<<"$runs")" != "0" ]; then
       echo "#$pr: a CI run for $head is still running; waiting"; exit 0
     fi
-    if [ "$(jq 'length' <<<"$runs")" != "0" ]; then
-      drop "$pr" "CI ran on $head but left no \`tests\` check (cancelled before it started?); re-run CI on it" || echo "::error::#$pr: drop failed"
+    if [ "$(jq 'length' <<<"$runs")" = "0" ]; then
+      committed="$(gh api "repos/$REPO/commits/$head" --jq .commit.committer.date)"
+      age=$(( $(date -u +%s) - $(date -u -d "$committed" +%s) ))
+      if [ "$age" -lt 600 ]; then
+        echo "::notice::#$pr: no CI run for $head yet (head is ${age} s old); waiting"; exit 0
+      fi
+      drop "$pr" "no CI run started for $head within 10 minutes; push to it, or re-run CI, then queue it again" || echo "::error::#$pr: drop failed"
       continue
     fi
-    echo "#$pr: no CI run for $head yet; waiting"
+    drop "$pr" "CI ran on $head but left no \`tests\` check (cancelled before it started?); re-run CI on it" || echo "::error::#$pr: drop failed"
+    continue
   elif [ "$state" = "BLOCKED" ] && [ "$tests" = "SUCCESS" ]; then
     # Green and up to date, yet blocked by something CI cannot fix (a review, an unresolved
     # conversation): let the next PR through instead of holding the line.

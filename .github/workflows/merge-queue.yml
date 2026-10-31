@@ -9,27 +9,30 @@
 # The queue is worked in the order auto-merge was switched on. The order is soft: a PR that is
 # already up to date and green merges the moment it is queued, ahead of the line.
 #
-# What this workflow does, every time it runs, for the queued PR at the head of the line
-# (only the required `tests` check counts; other checks are ignored):
+# What a queue step does for the queued PR at the head of the line (only the required `tests`
+# check counts; other checks are ignored):
 #   - draft, or green but blocked by something CI cannot fix (a review) -> skip to the next PR;
 #   - conflicts with dev, or `tests` failed -> switch auto-merge off with a comment, next PR;
-#   - behind `dev`  -> update its branch from `dev` (see below); its pull_request CI follows;
-#   - up to date, CI ended with no `tests` check -> switch auto-merge off with a comment;
+#   - behind `dev`  -> update its branch from `dev` (this workflow only; see below);
+#   - up to date, no `tests` yet -> wait for its CI; take it out if CI waits for approval, ended
+#     without a `tests` check, or never started within 10 minutes of its head commit;
 #   - otherwise     -> nothing: its CI is running, or GitHub is about to merge it.
 #
-# The logic is .github/scripts/merge-queue.sh. Three places run it: this workflow on a push to
-# `dev` (a PR merged), ci.yml's `queue` job when a PR's CI finishes, and auto-merge-guard.yml's
-# `queue` job when a PR into dev is queued. The jobs share one concurrency group, so one step
-# runs at a time. (Not via workflow_dispatch of this file: that fires only for workflow files
-# on the default branch, `main`, which gets this file only at a release.)
+# The logic is .github/scripts/merge-queue.sh. Two places run it, in one concurrency group:
+#   - this workflow, on a push to `dev` (a PR merged) and when a PR into dev is queued
+#     (`pull_request_target`, so the workflow and script always come from `dev`, never the PR);
+#   - ci.yml's `queue` job, when a PR's CI finishes. It has no owner token, so it takes red PRs
+#     out but leaves branch updates to this workflow: after it takes a PR out, the next PR that
+#     is behind waits for the next push to `dev` or queueing (or a manual run of this workflow).
 #
-# Branch updates use the owner's token (secret MERGE_QUEUE_TOKEN: a fine-grained token for this
-# repository with Contents, Pull requests and Workflows read/write), not GITHUB_TOKEN. Measured
-# on #226: an update made with GITHUB_TOKEN started a pull_request run that waited for approval,
-# and the PR stayed blocked although a ci.yml run dispatched on the branch passed `tests`. An update made with the owner's token starts normal
-# pull_request CI, like a push. Everything else (comments, auto-merge off) uses GITHUB_TOKEN.
-# When the token expires, updates fail and each PR is taken out of the queue with a comment:
-# renew the token and the secret.
+# Branch updates use the owner's fine-grained token (Contents, Pull requests, Workflows: read and
+# write), stored as the secret MERGE_QUEUE_TOKEN of the `merge-queue` environment, which only the
+# `dev` branch may use: a PR's own workflows cannot read it. Measured on #226: an update made with
+# GITHUB_TOKEN started a pull_request run that waited for approval, and the PR stayed blocked
+# although a ci.yml run dispatched on the branch passed `tests`. Expected, from GitHub's rules and
+# not yet measured here: an update made with the owner's token starts pull_request CI like a push.
+# If the token is rejected (expired, revoked), the step fails red and leaves every PR queued:
+# renew the token and the environment secret.
 #
 # One PR is tested at a time: slower than a native queue, but it never merges an untested tree.
 name: Merge queue
@@ -37,28 +40,39 @@ name: Merge queue
 on:
   push:
     branches: [dev]
-  # Manual retry from the Actions tab; works once this file is on main (see above).
+  pull_request_target:
+    types: [auto_merge_enabled]
+    branches: [dev]
+  # Manual retry from the Actions tab; works once this file is on main (GitHub's rule).
   workflow_dispatch:
 
 permissions:
-  contents: write        # update a PR branch from dev
+  contents: read         # gh pr merge --disable-auto reads the PR's commits
   pull-requests: write   # switch auto-merge off, comment
+  actions: read          # gh run list
 
 jobs:
   advance:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # One concurrency group across merge-queue.yml, ci.yml and auto-merge-guard.yml.
+    # The environment holds MERGE_QUEUE_TOKEN and admits only `dev` (pull_request_target runs
+    # on the base branch, so it qualifies; a PR branch never does).
+    environment: merge-queue
+    # One concurrency group with ci.yml's `queue` job.
     concurrency:
       group: merge-queue
       cancel-in-progress: false
     env:
       GH_TOKEN: ${{ github.token }}
       MQ_TOKEN: ${{ secrets.MERGE_QUEUE_TOKEN }}
+      MQ_REQUIRED: "1"
       REPO: ${{ github.repository }}
     steps:
+      # dev's copy; on pull_request_target the default checkout is the base branch, not the PR.
       - uses: actions/checkout@v4
         with:
+          ref: dev
+          sparse-checkout: .github/scripts
           persist-credentials: false
       - name: Move the merge queue on
         run: bash .github/scripts/merge-queue.sh
