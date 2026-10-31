@@ -44,22 +44,29 @@ so a PR cannot loosen the ledger check it needs loosened. Branch protection on `
 requires the checks, **admins included**, with the branch up to date with its base: a direct push
 to either branch is refused, so every change goes through a PR. `guard` can be required on a branch
 only once the workflow file is on it, because `pull_request_target` reads the workflow from the base.
+⚠ Measured 2026-10-31: no `pull_request_target` run has ever happened here, and `main` has no
+workflows; per GitHub's current rule (not measured here) that event reads the workflow from the
+default branch, `main`, so `guard` does not run for PRs until a release puts it on `main`.
 
 **Merging into `dev`: the merge queue.** GitHub's native merge queue is not available on this
 repository, so `.github/workflows/merge-queue.yml` (logic in `.github/scripts/merge-queue.sh`)
-builds one from auto-merge. Queue a PR with
-`gh pr merge <N> --auto --merge`; PRs go roughly in the order auto-merge was switched on. The queue
-runs on each push to `dev`, when a PR into `dev` is queued (`auto-merge-guard.yml`), and when a PR's
-CI finishes (`ci.yml` job `queue`), and takes the head of the line, reading only the `tests` check:
-behind `dev`, it updates the branch and dispatches `ci.yml` on it (a GITHUB_TOKEN branch update does
-not trigger `pull_request`; `workflow_dispatch` is exempt); conflicting or red, it switches auto-merge
-off with a comment and moves to the next. One PR is tested at a time. If `dev` changed a file under
-`.github/workflows` since a PR branch was cut, GitHub refuses the token's update: that PR is dropped
-with a comment, and `dev` is merged into it by hand. `auto-merge-guard.yml` switches auto-merge off
-on any PR whose base is not `dev` (best effort: it runs after the fact). Keep `guard` out of `dev`'s
-required checks while this queue is in use: it runs on `pull_request_target`, which the token's
-branch update does not trigger, so every updated PR would sit blocked. A cancelled `queue` job on a CI run is
-expected: the queue's concurrency group keeps one waiting step and cancels older ones.
+builds one from auto-merge. Queue a PR with `gh pr merge <N> --auto --merge`; PRs go roughly in the
+order auto-merge was switched on. The queue takes the head of the line, reading only the `tests`
+check: behind `dev`, it updates the branch and the update's `pull_request` CI follows; conflicting,
+red, with CI waiting for approval, or with CI that never produces `tests`, it switches auto-merge
+off with a comment and moves to the next. One PR is tested at a time. `merge-queue.yml` runs on each
+push to `dev` and on `workflow_dispatch --ref dev`, which `auto-merge-guard.yml` sends when a PR is
+queued; `ci.yml`'s `queue` job runs when a PR's CI finishes, has no owner token, takes red PRs out,
+and dispatches `merge-queue.yml` when the next PR needs an update. Branch updates use the owner's
+fine-grained token (Contents, Pull requests, Workflows: read/write) as `MERGE_QUEUE_TOKEN` in the
+`merge-queue` environment, which only `dev` may use, so a PR's workflows cannot read it. `dev`
+requires no approving review, so a merged PR that edits the queue could still reach the token: read
+every change under `.github/` before merging it. On #226 an update made with GITHUB_TOKEN started a
+pull_request run that waited for approval, and the PR stayed blocked although a dispatched run
+passed `tests`. A rejected token fails the step red and drops nothing (only a conflict, HTTP 422,
+takes a PR out): renew it. `auto-merge-guard.yml` switches auto-merge off on any PR whose base is
+not `dev` (best effort: it runs after the fact). A cancelled `queue` job on a CI run is expected:
+its concurrency group keeps one waiting step and cancels older ones.
 
 ## Architecture
 
