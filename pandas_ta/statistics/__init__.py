@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from .entlz import entlz
 from .entropy import entropy
 from .kpss import kpss
 from .kurtosis import kurtosis
