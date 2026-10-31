@@ -2,7 +2,7 @@
 """Tests for `pandas_ta.volatility.tf_median_absdiff_20` -- the rolling
 median absolute daily log return, ported from TSFEL (BSD-3-Clause)
 `features.py median_abs_diff: median(|diff(x)|)`, issue #118. Measurements
-and the open Gate E are in `docs/TfMedianAbsdiff20Measured.md`.
+and the Gate E result (SHIP, 0.7422 vs natr) are in `docs/TfMedianAbsdiff20Measured.md`.
 
 What these tests pin, in order of how much it would hurt to lose them:
 

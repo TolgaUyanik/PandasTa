@@ -20,7 +20,7 @@ recorded a ledger row — `df.ta.tf_median_absdiff_20()` and `ta.tf_median_absdi
 `docs/MLCompanionContract.md`'s counts were reverted to match (the column was not in
 `docs/IndicatorDictionary.md`'s probe table while out of `Category`, same mechanism as `beta` /
 `up_and_down_volume`). This is a narrower fix than a full revert: nothing here says the gates
-failed, only that this session cannot clear Gate E.
+failed, only that that session could not clear Gate E.
 
 Column `MEDABSDIFF_20`: the rolling 20-bar median of the absolute bar-to-bar log return — a
 robust (outlier-resistant) realised-volatility measure, in the same spirit as `natr` but built
@@ -50,7 +50,8 @@ price rescale in floating point, where the two-log-and-subtract form is not (see
 
 Measured on the prototype (2026-10-24, from the issue): Gate E max |ρ| 0.7422 vs `natr`
 (compute_all, n = 397,069), top-5 per-frame max median 0.7337 → SHIP band. That run used
-`ind_screen_r2.py`, not this module; **Gate E must be re-run on the port** per CLAUDE.md.
+`ind_screen_r2.py`, not this module. Gate E was re-run on the port on 2026-10-31 (run
+`is118-tf_median_absdiff_20-register`) and reproduced 0.7422 vs `natr`; see the Gate E row.
 
 ## Gates
 
@@ -96,10 +97,11 @@ removes any of its own members that also sit in the hard-coded `excluded` list (
 loses `long_run`/`short_run`, `momentum` loses `td_seq`) for the rest of the process. Measured:
 running `tests/test_wiring_accessors.py`'s `test_each_previously_broken_category_runs` before
 `tests/test_altport2_ports.py`'s `test_the_category_count_moved_by_exactly_three` in the same
-session drops the live `Category` total from 237 to 234 and makes the pinned-count test fail —
+session drops the live `Category` total from 237 to 234 (measured 2026-10-30 at 237 registered) and makes the pinned-count test fail —
 purely an artifact of invoking those two files in that explicit order; the default alphabetical
 full-suite run (`test_altport2_ports.py` before `test_wiring_accessors.py`) does not hit it, which
-is why the whole-suite number above is clean. Out of scope for this port (unrelated file,
+is why the whole-suite run above is free of this order-dependent failure (its two failures
+are the unrelated pre-existing ones). Out of scope for this port (unrelated file,
 pre-existing on `dev`, not something this session introduced or was asked to fix) — recorded here
 for whoever next touches `strategy()` or `Category`-pinned tests.
 
