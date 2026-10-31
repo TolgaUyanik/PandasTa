@@ -181,7 +181,8 @@ REGISTERED = {
 #: docs/VolcvMeasured.md), -> 258 by trend_scan (#20, statistics;
 #: Gate E DISCLOSE_GAP 0.8804 (TSCAN_T) / SHIP 0.2909 (TSCAN_L), in the
 #: ledger; see docs/TrendScanMeasured.md), -> 260 by crsi (#21, momentum;
-#: Gate E pending, run by issue-solver after this session; see
+#: Gate E STRUCK on 2 of 3 columns (`CRSI_3_2_100`, `CRSI_PCTRANK_100`,
+#: reverted), DISCLOSE_GAP on `CRSI_STREAK_2` (shipped), in the ledger; see
 #: docs/CrsiMeasured.md). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
