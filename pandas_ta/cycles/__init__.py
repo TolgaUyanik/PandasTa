@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from .correlation_cycle import correlation_cycle
 from .dsp import dsp
 from .ht_dcperiod import ht_dcperiod
 from .ht_dcphase import ht_dcphase

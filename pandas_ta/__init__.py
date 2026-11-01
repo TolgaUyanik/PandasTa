@@ -44,7 +44,7 @@ Category = {
     ],
     # Cycles
     "cycles": [
-        "dsp", "ebsw", "ht_dcperiod", "ht_dcphase", "ht_phasor", "ht_sine",
+        "correlation_cycle", "dsp", "ebsw", "ht_dcperiod", "ht_dcphase", "ht_phasor", "ht_sine",
         "ht_trendmode",
         "ht",
     ],
