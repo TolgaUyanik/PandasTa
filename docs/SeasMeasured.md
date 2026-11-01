@@ -6,8 +6,8 @@ each) ago, averaged. Found by the ResearchIntel RAG scan of 2026-10-24, round 3 
 Returns" (SSRN 687022, T2); Flirting with Models' "Seasonality Everywhere" (T3); Kaufman
 2013 ch.10, Quantpedia's Hirshleifer-Jiang-Meng mood-beta screen (both cross-sectional, T3).
 
-**Status: Gates A, B, D cleared; Gate C synthetic only; Gate E OWED; verdict pending. Do
-not merge to `main` before Gate E**: `seas` is in `Category`, so any `df.ta.strategy()`
+**Status: Gates A-F cleared. Verdict: SHIP** (`SEAS_21_1`, max |ρ| 0.3245 vs `Mom_12_1_pct`,
+n=376,421, far under the 0.76 ship line). `seas` is in `Category`, so any `df.ta.strategy()`
 sweep in the parent repo picks it up.
 
 Shipped: `pandas_ta/performance/seas.py`, one column `SEAS_<length>_<years>` (default
@@ -45,9 +45,9 @@ citation.
 |---|---|---|
 | A Correctness | pass (self-consistency; no source oracle for this cross-sectional measure) | hand-built 253-bar close (only `close[0]` and `close[21]` set; rest filler) reads exactly 0.10 at bar 252 for `SEAS_21_1`; a second hand-built case with two controlled lags gives `SEAS_21_2 = (0.10 + (-0.20)) / 2` exactly; matches an independent Python loop to 1e-9 on a 900-bar walk for `years` 1 and 2 |
 | B Causality | pass | 31-offset future-perturbation sweep (spike + ×1000-rescale future, past the 252-bar warm-up): real module 0 leaks. Two look-ahead mutants (`numerator`, `denominator`: each pushes one `shift()` argument negative, so it reads a bar strictly after T) are each proved live, then caught at 31 of 31 |
-| C Reachability | synthetic only | 1,200-bar walk (seed 11, σ=0.015, no tick rounding), default `length=21, years=1`: 948 of 1,200 bars non-NaN (the 252-bar warm-up), all 948 nonzero, 513 positive / 435 negative, 948 distinct values, range [-0.1472, +0.1882]. Same walk tick-rounded (0.05): 948 non-NaN, 944 nonzero (509 positive / 435 negative / 4 zero). **Real-data counts owed** |
+| C Reachability | pass (real data, from Gate E run) | synthetic: 1,200-bar walk (seed 11, σ=0.015, no tick rounding), default `length=21, years=1`: 948 of 1,200 bars non-NaN (the 252-bar warm-up), all 948 nonzero, 513 positive / 435 negative, 948 distinct values, range [-0.1472, +0.1882]. Same walk tick-rounded (0.05): 948 non-NaN, 944 nonzero (509 positive / 435 negative / 4 zero). **Real data** (89 BIST frames, pooled 398,849 bars, Gate E run `is27-seas-93ce5424`): 376,421 non-NaN (398,849 − 376,421 = 22,428 = 89 × 252, the per-frame warm-up, exactly), of which 370,859 nonzero (98.5%) |
 | D Scale-free | pass | x8/x64 bit-identical (each `r_y` is a price ratio minus one, exact under a power of two); x10/x3.7 max abs diff measured **2.220e-16** (one ulp); NaN masks match in both; `0 < 948 fires < 1200`, 948 distinct values rules out a constant column |
-| E Attribution | **OWED** | `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.performance.seas --name seas` against the engine's `compute_all` ∪ `ml_features` manifest `1d`. Gate E: pending, run by issue-solver after this session |
+| E Attribution | **SHIP** | `gate_e_overlap.py run --module pandas_ta.performance.seas --name seas`, 89 BIST frames, 687 comparators (329 `compute_all` + 358 manifest), run `is27-seas-93ce5424`, measured 2026-11-01. `SEAS_21_1`: pooled max \|ρ\| **0.3245** against `Mom_12_1_pct` (manifest), n=376,421; per-frame max median \|ρ\| **0.3235** (also `Mom_12_1_pct`), 0 of 89 frames ≥ 0.90. Both far under the 0.76 `r3-perframe-0.90` ship line -> **SHIP** |
 | F Suites | this repo only; parent repo not run by this session | `python -m pytest -q`: 3 failed / 3,893 passed / 83 skipped. Two pre-exist this port and are named in `CLAUDE.md`'s Known breaks: `test_pine_coverage_csv::test_audited_rows_carry_their_evidence` (`docs/pine/` untracked) and `test_altrepo_talib_csv::test_regenerating_reproduces_the_committed_rows` (needs the sibling `../AlternativeRepos` checkout, not on this machine). The third, `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, is the expected "Gate E owed" failure per the issue-solver rules -- it clears once the launcher's Gate E row is recorded |
 
 ## Proxy overlap (NOT Gate E)
@@ -71,12 +71,8 @@ window). This is not Gate E -- one synthetic random walk, not 89 BIST frames, an
 walk has no real annual seasonality to correlate against in the first place, so a low ρ
 here is close to the null expectation either way. The real Gate E run decides.
 
-## To close
+## Closed
 
-1. Launcher runs Gate E (`gate_e_overlap.py run --module pandas_ta.performance.seas`),
-   records the row in `docs/gate_e_ledger.csv`.
-2. Apply CLAUDE.md's `r3-perframe-0.90` bands to the recorded max |ρ|. On SHIP or a
-   disclose band, leave shipped (update this file's status line and Gate E row). On
-   STRUCK, delete the module, export, `Category` entry, accessor and test, and keep this
-   file as the receipt -- a measured revert closes issue #27 exactly as well as a ship.
-3. Fill Gate C's real-data counts from the 89 BIST frames once Gate E has run against them.
+Gate E ran 2026-11-01 (`is27-seas-93ce5424`), recorded in `docs/gate_e_ledger.csv`.
+`SEAS_21_1` max |ρ| 0.3245 is under the 0.76 ship line -> **SHIP**, no column removed.
+Gates A-F all cleared; issue #27 closes as a ship.
