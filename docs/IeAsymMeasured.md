@@ -9,9 +9,8 @@ standard deviations above the window mean, subtract how many sit below it by the
 margin, divide by `length`. High = more extreme up days than down days ("lottery
 preference"), which the sources associate with overpricing and lower subsequent returns.
 
-**Status: Gates A, B, D cleared on this machine; Gate C on synthetic data only (real-data
-counts owed to the launcher's run, same as Gate E). Do not merge to `main` before Gate E**:
-`ie_asym` is in `Category`, so any `df.ta.strategy()` sweep in the parent repo picks it up.
+**Status: Gates A-F cleared. SHIP.** `ie_asym` is in `Category`, so any `df.ta.strategy()`
+sweep in the parent repo picks it up.
 
 Shipped: `pandas_ta/statistics/ie_asym.py`, one column `IEASYM_<length>_<mult>` (default
 `IEASYM_260_2.0`). Tests: `tests/test_ie_asym.py` (14). Numbers:
@@ -45,10 +44,10 @@ Two choices the formula itself leaves open, decided here:
 |---|---|---|
 | A Correctness | pass (self-consistency; no Pine/TA-Lib source exists for this formula) | hand-computed window (9 zero-returns + one +10 log-return, length=10, mult=2.0) reads exactly 0.1 (the lone bar beyond mean + 2·std); mirror case reads -0.1; matches an independent loop to 1e-9 on a 500-bar walk, length=20 |
 | B Causality | pass, with a measured, understood exception | 20-offset future-perturbation sweep (spike bar `j` alone, x5 — see below): real module 0 leaks at all 20 offsets. Two look-ahead mutants (`net`/`returns`: read `close.shift(-1)`; `window`: shift the rolling input by one bar) are each proved live, then caught at **18 of 20**, not 20 of 20 — the other 2 are coincidences, not misses (next section) |
-| C Reachability | synthetic only, real-data counts owed | 1,200-bar walk (seed 11, σ=0.02), length=260: 940 of 1,200 bars non-NaN; 850 nonzero (495 positive / 355 negative / 90 zero), 15 distinct values, range [-0.0231, +0.0308]. Same walk tick-rounded (0.05): 940 non-NaN, 846 nonzero (508 positive / 338 negative / 94 zero). **Real BIST counts owed** — the issue's own risk flag (±10% limit, tick rounding) is exactly what Gate C on real data must report |
+| C Reachability | synthetic + real (89 BIST frames, pooled via Gate E) | 1,200-bar walk (seed 11, σ=0.02), length=260: 940 of 1,200 bars non-NaN; 850 nonzero (495 positive / 355 negative / 90 zero), 15 distinct values, range [-0.0231, +0.0308]. Same walk tick-rounded (0.05): 940 non-NaN, 846 nonzero (508 positive / 338 negative / 94 zero). **Real BIST**, pooled over the 89 Gate E frames (`overlap_max.csv`): 375,709 non-NaN rows, 333,255 of them nonzero (88.7%) — the ±10%-limit / tick-rounding risk flagged in the issue does not zero the column out |
 | D Scale-free | pass | x8/x64 bit-identical (the log-ratio is exact under a power of two); x10/x3.7 max abs diff measured **0.0** (not just "small" — the floating-point rounding from rescaling a ~100-level price by 10 or 3.7 is around 1e-15, far below the gap between any realistic return and its window's own ±2σ threshold, so no window's tail membership flips); `0 < 846 fires < 940` on the tick-rounded walk; 15 distinct values rules out a constant column |
-| E Attribution | **OWED** | `gate_e_overlap.py run --module pandas_ta.statistics.ie_asym`, run by the launcher after this session |
-| F Suites | this repo only; parent repo not run (not on this machine) | `python -m pytest -q`: 3 failed / 3,843 passed / 83 skipped. All 3 failures pre-exist this port and are named in `CLAUDE.md`/the issue-solver rules: `test_pine_coverage_csv` (known break, `docs/pine/` untracked), `test_altrepo_talib_csv::test_regenerating_reproduces_the_committed_rows` (needs the sibling `../AlternativeRepos` checkout, not on this machine), `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (no ledger row yet for `ie_asym` — expected until the launcher's Gate E run is recorded) |
+| E Attribution | **SHIP** | `gate_e_overlap.py run --module pandas_ta.statistics.ie_asym`, launcher run `is28-ie_asym-45683b0f`, measured 2026-11-01. `IEASYM_260_2.0`: pooled max \|ρ\| **0.3317** vs `Ret_252d_pct` (manifest, n=375,709); per-frame max median \|ρ\| **0.3570** (also vs `Ret_252d_pct`, 89 frames, 0% of frames ≥ 0.90). Both bands (pooled 0.90, per-frame-median 0.90) are far clear — well under even the 0.76 SHIP line. One degenerate comparator dropped (`squeeze_SQZ_NO`, constant on this universe). Recorded: `docs/gate_e_ledger.csv` |
+| F Suites | this repo only; parent repo not run by this session | `python -m pytest -q`: 2 failed / 3,851 passed / 83 skipped. Both failures pre-exist this port and are named in `CLAUDE.md`: `test_pine_coverage_csv::test_audited_rows_carry_their_evidence` (known break, `docs/pine/` untracked) and `test_altrepo_talib_csv::test_regenerating_reproduces_the_committed_rows` (needs the sibling `../AlternativeRepos` checkout, not on this machine). `test_gate_e_ledger.py` now passes with the recorded row |
 
 ## The coincidental mutant misses, explained
 
@@ -90,13 +89,9 @@ Gate E — one synthetic walk, not 89 BIST frames, and a fabricated high/low —
 no early reason to expect `ie_asym` to collide with the issue's guessed comparators; the
 real Gate E run decides.
 
-## To close
+## Closed
 
-1. The launcher runs Gate E (`gate_e_overlap.py run --module pandas_ta.statistics.ie_asym`)
-   and records the row (`python docs/gate_e_ledger.py record ...`).
-2. A receipt session fills in the measured max |ρ|, its comparator, and the real-data Gate
-   C tail-fire counts (the ±10%-limit / tick-rounding risk) above.
-3. Apply CLAUDE.md's Gate E bands. STRUCK -> revert (delete the module, export, `Category`
-   entry, accessor, tests, README/dictionary counts) and keep this file as the receipt —
-   a measured revert closes issue #28 exactly as well as a ship.
-4. Run both repos' suites.
+Gate E ran (launcher, `is28-ie_asym-45683b0f`, 2026-11-01), recorded in
+`docs/gate_e_ledger.csv`, verdict SHIP (pooled max |ρ| 0.3317, per-frame max median 0.3570,
+both far under the 0.76 ship line). No column struck, nothing to revert. Gates A-F all
+cleared; this file is the receipt. Issue #28 closed by ship.
