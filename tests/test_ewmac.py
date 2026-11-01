@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """Tests for `pandas_ta.momentum.ewmac` -- Carver's volatility-normalised EMA
-crossover (issue #29): `(EMA_fast(close) - EMA_slow(close)) / sigma`, one
-column per Carver speed pair (2:8, 4:16, 8:32, 16:64, 32:128, 64:256), with
-`sigma` ONE shared EWMA standard deviation of daily price changes (not
-re-derived per pair). Raw ratio only -- no forecast scalar, no cap, per the
-issue's own Gate A note. Measurements and the open Gate E are in
-`docs/EwmacMeasured.md`.
+crossover (issue #29): `(EMA_fast(close) - EMA_slow(close)) / sigma`. Carver
+gives six speed pairs; Gate E (measured 2026-11-01, `docs/EwmacMeasured.md`)
+STRUCK five of them against existing engine columns (pooled |rho|
+0.9175-0.9945 vs `pgo`, `smi_SMI_5_20_5`, `tsi`, `ICHI_CHIKOU_VS_CLOUD`,
+`Dist_to_SMA_200_pct`) and they were removed. Only **64:256** ships now, at
+DISCLOSE_GAP (0.8744 vs `SMA_200_Slope_pct`). Raw ratio only -- no forecast
+scalar, no cap, per the issue's own Gate A note.
 
 Carver's book gives the family and the pairs, not a line-numbered source
 file, so CORRECTNESS is checked by reassembling the formula from literal
@@ -22,13 +23,12 @@ What these tests pin, in order of how much it would hurt to lose them:
   copy) are each proved live, then caught at 31 of 31.
 * SCALE-FREE: bit-identical under x8 and x64 (EMA and EWMA-std are both
   linear/homogeneous in `close` under exact power-of-two scaling), within
-  1e-9 under x10 and x3.7 with matching NaN masks, and `0 < fires < n` per
-  column (1,198 of 1,200 on the probe walk; the other 2 are the warm-up).
-* CORRECTNESS: a hand-computed 3-bar EMA recursion for the 2:8 pair, and a
-  400-bar random walk reassembled from the literal formula
+  1e-9 under x10 and x3.7 with matching NaN masks, and `0 < fires < n`.
+* CORRECTNESS: a hand-computed 3-bar EMA recursion for the surviving 64:256
+  pair, and a 400-bar random walk reassembled from the literal formula
   (`close.ewm(span=L, adjust=False).mean()`, `close.diff().ewm(span=35,
   adjust=False).std()`) independently of the module's own code path.
-* Wiring: `Category`, the accessor, and all six column names.
+* Wiring: `Category`, the accessor, and the one column name.
 """
 import importlib
 import types
@@ -54,16 +54,18 @@ def _walk(n=1200, seed=11, sigma=0.02, tick=None):
 
 
 def test_hand_computed_three_bar_recursion():
-    # close = [10, 11, 13, ...300 more bars]; fast=2 (alpha=2/3), slow=8
-    # (alpha=2/9); no SMA seed, e0 = close[0], e_t = (1-alpha)*e_{t-1} +
-    # alpha*close_t. Padded past `verify_series`'s 257-bar floor; causality
-    # (proven separately below) guarantees bars >= 3 cannot move bar 2.
+    # close = [10, 11, 13, ...300 more bars]; fast=64 (alpha=2/65), slow=256
+    # (alpha=2/257); no SMA seed, e0 = close[0], e_t = (1-alpha)*e_{t-1} +
+    # alpha*close_t. causality (proven separately below) guarantees bars
+    # >= 3 cannot move bar 2.
     close = Series([10.0, 11.0, 13.0] + [100.0] * 300)
-    fast_e2 = (1 / 3) * ((1 / 3) * 10 + (2 / 3) * 11) + (2 / 3) * 13  # 12.2222...
-    slow_e2 = (7 / 9) * ((7 / 9) * 10 + (2 / 9) * 11) + (2 / 9) * 13  # 10.8395...
+    fast, slow = 64, 256
+    af, as_ = 2 / (fast + 1), 2 / (slow + 1)
+    fast_e2 = (1 - af) * ((1 - af) * 10 + af * 11) + af * 13
+    slow_e2 = (1 - as_) * ((1 - as_) * 10 + as_ * 11) + as_ * 13
     expected_numerator = fast_e2 - slow_e2
 
-    out = ewmac(close)["EWMAC_2_8_35"]
+    out = ewmac(close)["EWMAC_64_256_35"]
     sigma = close.diff().ewm(span=35, adjust=False).std()
     numerator = out * sigma
     assert numerator.iloc[2] == pytest.approx(expected_numerator, abs=1e-9)
@@ -85,28 +87,10 @@ def test_matches_a_formula_reassembled_independently():
         assert np.nanmax(np.abs(expected[m].values - actual[m].values)) < 1e-9
 
 
-def test_sigma_is_shared_not_per_pair():
-    """The six columns must divide by the SAME sigma series, not six
-    independently-derived ones (the Gate A decision in docs/EwmacMeasured.md)."""
-    close = _walk(400)
-    out = ewmac(close)
-    sigma = close.diff().ewm(span=35, adjust=False).std()
-    fast0, slow0 = PAIRS[0]
-    fast1, slow1 = PAIRS[1]
-    fastma0 = close.ewm(span=fast0, adjust=False).mean()
-    slowma0 = close.ewm(span=slow0, adjust=False).mean()
-    fastma1 = close.ewm(span=fast1, adjust=False).mean()
-    slowma1 = close.ewm(span=slow1, adjust=False).mean()
-    recovered0 = out["EWMAC_2_8_35"] * sigma
-    recovered1 = out["EWMAC_4_16_35"] * sigma
-    assert np.nanmax(np.abs((fastma0 - slowma0).values - recovered0.values)) < 1e-9
-    assert np.nanmax(np.abs((fastma1 - slowma1).values - recovered1.values)) < 1e-9
-
-
 def test_default_vol_length_is_35():
     close = _walk(300)
-    assert "EWMAC_2_8_35" in ewmac(close).columns
-    assert "EWMAC_2_8_20" in ewmac(close, vol_length=20).columns
+    assert "EWMAC_64_256_35" in ewmac(close).columns
+    assert "EWMAC_64_256_20" in ewmac(close, vol_length=20).columns
 
 
 # -------------------------------------------------------------- causality
