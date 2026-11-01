@@ -4,17 +4,23 @@ Issue #30 lists a family of Ehlers DSP oscillators "screened and ported one by o
 is the running receipt across sessions: one row per candidate named in the issue, its verdict,
 and why. Per-indicator measurements live in their own `docs/<Name>Measured.md`.
 
-**This session (2026-11-01) shipped one candidate** — Correlation Cycle, as
-`correlation_cycle` (Real/Imag/Angle; market state skipped) — and screened the rest without
-building them. The repo's porting rules cap a single session at 3 new
-`pandas_ta/<category>/*.py` files; "one by one" is read here as literally one indicator fully
-through Gates A–D per session, not the whole family at once. Rows below marked DEFERRED are
-not reverts: nothing was measured and struck, they were not attempted this session for the
-reasons given, and remain open for a future one-by-one session.
+**Session 2026-11-01 shipped one candidate** — Correlation Cycle, as `correlation_cycle`
+(Real/Imag/Angle; market state skipped) — and screened the rest without building them. The
+repo's porting rules cap a single session at 3 new `pandas_ta/<category>/*.py` files; "one by
+one" is read here as literally one indicator fully through Gates A–D per session, not the whole
+family at once. Rows below marked DEFERRED are not reverts: nothing was measured and struck,
+they were not attempted that session for the reasons given, and remain open for a future
+one-by-one session.
+
+**Receipt session (2026-11-01)** ran Gate E on `correlation_cycle`: `CC_IMAG_20` STRUCK
+(pooled |ρ| 0.9353, 100% of 89 BIST frames per-frame median ≥ 0.90, vs `Squeeze_Spread_pct`)
+and reverted; `CC_REAL_20` (0.6626 vs `StochRSI_K_Pctl`) and `CC_ANGLE_20` (0.7235 vs
+`Squeeze_Spread_pct`) SHIP. Ledger row recorded in `docs/gate_e_ledger.csv`. Full numbers:
+`docs/CorrelationCycleMeasured.md`.
 
 | Indicator | Scale-free as published (issue's own note) | Verdict | Reason |
 |---|---|---|---|
-| Correlation Cycle (angle + market state) | yes, built from correlations | **SHIPPED** (Real/Imag/Angle; market state skipped) | `pandas_ta/cycles/correlation_cycle.py`; see `docs/CorrelationCycleMeasured.md`. Market state sub-output skipped: no accessible source (no web, no Pine corpus, no `jesse-ai/jesse`) defines Ehlers' exact trend/cycle classification, and inventing thresholds would not be a port. |
+| Correlation Cycle (angle + market state) | yes, built from correlations | **SHIPPED (partial)**: `CC_REAL_20`, `CC_ANGLE_20` ship; `CC_IMAG_20` Gate E STRUCK and reverted; market state skipped | `pandas_ta/cycles/correlation_cycle.py`; see `docs/CorrelationCycleMeasured.md`. Market state sub-output skipped: no accessible source (no web, no Pine corpus, no `jesse-ai/jesse`) defines Ehlers' exact trend/cycle classification, and inventing thresholds would not be a port. |
 | Reflex / Trendflex | yes, normalised by RMS (issue: "from memory, verify") | DEFERRED | Recursive two-pole filters (SuperSmoother-style, like the fork's own `ssf`), which CLAUDE.md explicitly flags for a negative-index causality bug risk on first implementation; this session's file budget (1 of 3 used) and effort went to the lower-risk, non-recursive Correlation Cycle instead. Issue's own pre-registered guess: "best chance" to ship — worth a dedicated session. |
 | Roofing filter → Stochastic ("Ehlers Stochastic") | yes, bounded | DEFERRED | Composite of a 2-pole highpass and a SuperSmoother lowpass (the Roofing Filter), both recursive, before a rolling stochastic rescale. Same recursive-filter risk as Reflex/Trendflex; not attempted this session. |
 | Decycler oscillator | only as a % of price | DEFERRED | Needs the same recursive highpass machinery as the Roofing Filter, plus the issue's own normalisation choice (% of price) decided at Gate A; not attempted this session. |
@@ -31,7 +37,12 @@ reasons given, and remain open for a future one-by-one session.
 
 ## Gate E ledger note
 
-Only `correlation_cycle` is in `Category` after this session, so it is the only row
-`tests/test_gate_e_ledger.py` expects — and its row is intentionally still missing: Gate E is
-run by the launcher after this session, per the rules this session operated under. That test
-failure is expected, not a regression.
+`correlation_cycle` is the only indicator from this family in `Category`. Its Gate E row
+(`CC_REAL_20`, `CC_ANGLE_20`) is recorded in `docs/gate_e_ledger.csv`, measured 2026-11-01;
+`CC_IMAG_20` was struck and reverted, so it carries no row (a reverted column is not shipped and
+needs none). Reverting `CC_IMAG_20` edited the module file, which invalidates the ledger's
+whole-file `module_sha1` for the two surviving rows too, so
+`tests/test_gate_e_ledger.py::test_row_still_describes_its_module` reports both as owed (a skip
+under CI's `GATE_E_PENDING_OK=1` toward `dev`, a failure locally and toward `main`) until a
+fresh Gate E run on the final two-column module is recorded. See
+`docs/CorrelationCycleMeasured.md`'s Gate E section for the detail.

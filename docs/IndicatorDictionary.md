@@ -54,7 +54,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
-| `correlation_cycle` | C | `length=None` | `CC_REAL_20` SF<br>`CC_IMAG_20` SF<br>`CC_ANGLE_20` SF | 19 | John Ehlers' correlation-based cycle/phase detector (the sibling named in issue #30 of the fork's already-shipped `cti`, Correlation Trend Indicator,… |
+| `correlation_cycle` | C | `length=None` | `CC_REAL_20` SF<br>`CC_ANGLE_20` SF | 19 | John Ehlers' correlation-based cycle/phase detector (the sibling named in issue #30 of the fork's already-shipped `cti`, Correlation Trend Indicator,… |
 | `dsp` | C | `length=None` | `DSP_14` PX | 13 | Detrended Synthetic Price removes the trend component from price data to reveal the cyclical component. It's useful for cycle analysis and… |
 | `ebsw` | C | `length=None`, `bars=None` | `EBSW_40_10` SF | 39 | This indicator measures market cycles and uses a low pass filter to remove noise. Its output is bound signal between -1 and 1 and the maximum length… |
 | `ht` | C | — | `HT_PCT` SF | 6 | The quadrature filter underneath the Hilbert-transform family: a 4-tap FIR that shifts the input by roughly 90 degrees, used to build the in-phase /… |

@@ -45,9 +45,11 @@ def correlation_cycle(close, length=None, offset=None, **kwargs):
         lambda y: _pearson_r(y, sin_wave, sin_sum, sin2_sum, length), raw=True)
     angle = np.degrees(np.arctan2(imag, real))
 
+    # CC_IMAG_<length> is computed above (needed for Angle) but not shipped as
+    # a column: Gate E (docs/CorrelationCycleMeasured.md) struck it, max |rho|
+    # 0.9353 vs Squeeze_Spread_pct on the 89-frame BIST universe.
     df = DataFrame({
         f"CC_REAL_{length}": real,
-        f"CC_IMAG_{length}": imag,
         f"CC_ANGLE_{length}": angle,
     }, index=close.index)
 
@@ -86,8 +88,10 @@ unambiguous (it is the same closed-form sums already shipped and tested in
 what is NOT verified against any source is Ehlers' own convention for which
 end of the window is lag zero, the sign of the sine reference, and the
 "market state" sub-indicator his published version also carries. Those three
-would be invented, not ported, so only Real / Imag / Angle ship; market
-state is skipped (see `docs/EhlersDspMeasured.md`).
+would be invented, not ported; market state is skipped (see
+`docs/EhlersDspMeasured.md`). Imag is also not shipped, but for a measured
+reason, not an invented one: Gate E struck it (max |rho| 0.9353 vs
+`Squeeze_Spread_pct`), so only Real / Angle ship.
 
 Calculation:
     Default Inputs:
@@ -97,11 +101,13 @@ Calculation:
     Imag  = PearsonR(close, sin(2*pi*k/length))   over the trailing window
     Angle = degrees(atan2(Imag, Real))             in (-180, 180]
 
-Real and Imag are Pearson correlation coefficients: unit-free by
-construction (invariant to `close -> close * k` for any k > 0, since a
-correlation coefficient is scale- and location-invariant), bounded in
-[-1, 1]. Angle is a rotation angle, not a price, bounded in (-180, 180].
-See docs/CorrelationCycleMeasured.md.
+Real is a Pearson correlation coefficient: unit-free by construction
+(invariant to `close -> close * k` for any k > 0, since a correlation
+coefficient is scale- and location-invariant), bounded in [-1, 1]. Angle is
+a rotation angle, not a price, bounded in (-180, 180]. Imag is computed
+internally (Angle needs it) but is NOT shipped as a column: measured Gate E
+max |rho| 0.9353 vs `Squeeze_Spread_pct` on the 89-frame BIST universe, over
+CLAUDE.md's 0.90 STRUCK line. See docs/CorrelationCycleMeasured.md.
 
 Args:
     close (pd.Series): Series of 'close's
@@ -112,5 +118,5 @@ Kwargs:
     fillna (value, optional): pd.DataFrame.fillna(value)
 
 Returns:
-    pd.DataFrame: CC_REAL_<length>, CC_IMAG_<length>, CC_ANGLE_<length>
+    pd.DataFrame: CC_REAL_<length>, CC_ANGLE_<length>
 """

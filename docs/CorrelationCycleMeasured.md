@@ -7,26 +7,33 @@ against a cosine and a sine reference wave of one fixed period, producing a Real
 Imaginary part, and an Angle. Found by the ResearchIntel library sweep of 2026-10-24
 (`PandasTaIndicatorCandidates-2026-10-22.md`, Round 3b).
 
-**Status: Gates A, B, D cleared (measured below); Gate C synthetic only; Gate E PENDING —
-run by issue-solver after this session. Do not merge to `main` before Gate E**:
+**Status: Gates A, B, D, F cleared. Gate E measured: `CC_IMAG_20` STRUCK and reverted;
+`CC_REAL_20` and `CC_ANGLE_20` SHIP. The revert's edit to the module file means the ledger
+owes a fresh record for the two surviving columns (see Gate E below) — the verdicts and
+numbers are final, the ledger's self-check on the file hash is not yet.**
 `correlation_cycle` is in `Category`, so any `df.ta.strategy()` sweep in the parent repo
 picks it up.
 
-Shipped: `pandas_ta/cycles/correlation_cycle.py`, three columns `CC_REAL_<length>`,
-`CC_IMAG_<length>`, `CC_ANGLE_<length>` (default `CC_REAL_20`, `CC_IMAG_20`, `CC_ANGLE_20`).
-Tests: `tests/test_correlation_cycle.py` (14). Numbers: `python
+Shipped: `pandas_ta/cycles/correlation_cycle.py`, two columns `CC_REAL_<length>`,
+`CC_ANGLE_<length>` (default `CC_REAL_20`, `CC_ANGLE_20`). `CC_IMAG_<length>` is computed
+internally (Angle needs it) but is not a shipped column — see Gate E below.
+Tests: `tests/test_correlation_cycle.py` (13). Numbers: `python
 docs/measure_correlation_cycle_proxy.py`. Environment: pandas 2.3.3, numpy 1.26.4,
 Python (this worktree's interpreter). Measured 2026-11-01.
 
 ## What ships vs what is skipped
 
 The issue's table lists this row as "Correlation Cycle (angle + market state)". Only
-Real / Imag / Angle ship. **Market state is skipped**, with a one-line reason: per issue #30,
+Real / Angle ship. **Market state is skipped**, with a one-line reason: per issue #30,
 no file in the owner's local Pine corpus mentions Correlation Cycle, so the only possible Gate A
 references are Ehlers' papers or a library's source — and this environment has neither web
 access nor access to the Pine corpus or to `jesse-ai/jesse`'s `correlation_cycle.py`. Inventing
 threshold values for a "trend vs cycle" classifier and calling it Ehlers' market state would not
 be a port. The Pearson-correlation arithmetic itself needs no such citation (see Gate A).
+**Imag is skipped too, for a measured reason**: Gate E struck `CC_IMAG_20` (pooled |ρ| 0.9353,
+100% of 89 frames per-frame median ≥ 0.90, against `Squeeze_Spread_pct`) — see Gate E below. It
+is still computed internally since `Angle = atan2(Imag, Real)` needs it; it is just not shipped
+as a column.
 
 ## Gate A — self-consistency, not a source citation
 
@@ -58,12 +65,41 @@ sinusoid) is pinned.
 
 | Gate | Result | Evidence |
 |---|---|---|
-| A Correctness | pass (self-consistency; no source oracle reachable in this environment) | pure cosine/sine inputs match the closed-form phase identity to 1e-9; Angle == `degrees(atan2(Imag, Real))` elementwise; flat window reads NaN, not an error |
-| B Causality | pass | 31-offset future-perturbation sweep (`test_pfe.py`'s harness shape): real module 0 leaks on `CC_REAL_20`/`CC_IMAG_20`; two mutants (`real_shift`, `imag_shift`, each shifts one rolling window one bar into the future) proven live, then caught 31 of 31 |
-| C Reachability | synthetic only | 3,000-bar tick-rounded walk (seed 1, tick 0.05): 2,981 of 3,000 bars finite per column (19-bar warm-up, `length - 1`), 2,981 distinct values each on `CC_REAL_20` and `CC_IMAG_20`. **Real-data counts owed to Gate E.** |
-| D Scale-free | pass | x8 / x64 bit-identical on all three columns (Real/Imag are Pearson correlation coefficients, provably scale- and location-invariant for `close -> close*k`, `k>0`; Angle inherits it through `atan2`); x10 / x3.7 within 1.5e-11 (measured: Real 9.53e-13 / 1.22e-12, Imag 6.29e-13 / 1.10e-12, Angle 1.49e-11 / 7.26e-12); 2,981 finite of 3,000 satisfies `0 < fires < n`; bounds `\|Real\|, \|Imag\| <= 1 + 1e-9`, `Angle` in `(-180, 180]`, held on the same walk |
-| E Attribution | **PENDING** — run by issue-solver after this session | `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.cycles.correlation_cycle --name correlation_cycle` |
-| F Suites | this repo only, this session | `python -m pytest -q tests/test_correlation_cycle.py`: 14 passed. Full-suite run and parent-repo suite are run by the launcher. |
+| A Correctness | pass (self-consistency; no source oracle reachable in this environment) | pure cosine/sine inputs match the closed-form phase identity to 1e-9 (Real directly, Angle via the circular identity `(angle - expected + 180) mod 360 - 180 == 0`); flat window reads NaN, not an error |
+| B Causality | pass | 31-offset future-perturbation sweep (`test_pfe.py`'s harness shape): real module 0 leaks on `CC_REAL_20`/`CC_ANGLE_20`; two mutants (`real_shift`, `imag_shift`, each shifts one rolling window one bar into the future) proven live, then caught 31 of 31 — `imag_shift` is still live even though `CC_IMAG_20` is no longer shipped, because `CC_ANGLE_20` reads the internal `imag` |
+| C Reachability | measured on real data via Gate E (89 BIST frames); synthetic floor: 3,000-bar tick-rounded walk (seed 1, tick 0.05), 2,981 of 3,000 bars finite per column (19-bar warm-up, `length - 1`), 2,981 distinct values on `CC_REAL_20` | Gate E `n` column: 391,017 (`CC_REAL_20`) / 397,158 (`CC_ANGLE_20`) non-NaN bars pooled over 89 frames |
+| D Scale-free | pass | x8 / x64 bit-identical on `CC_REAL_20`/`CC_ANGLE_20` (Real is a Pearson correlation coefficient, provably scale- and location-invariant for `close -> close*k`, `k>0`; Angle inherits it through `atan2` on Real and the internal Imag); x10 / x3.7 within 1.5e-11 (measured: Real 9.53e-13 / 1.22e-12, Angle 1.49e-11 / 7.26e-12); 2,981 finite of 3,000 satisfies `0 < fires < n`; bounds `\|Real\| <= 1 + 1e-9`, `Angle` in `(-180, 180]`, held on the same walk |
+| E Attribution | **measured 2026-11-01** — SHIP / SHIP / STRUCK, see table below; ledger re-record owed for the two surviving rows after the revert edit (`test_row_still_describes_its_module`) | `gate_e_overlap.py run --module pandas_ta.cycles.correlation_cycle`, recorded in `docs/gate_e_ledger.csv` |
+| F Suites | this repo only, this session | `python -m pytest -q tests/test_correlation_cycle.py`: 13 passed (post-revert). Full-suite run and parent-repo suite are run by the launcher. |
+
+## Gate E — measured 2026-11-01
+
+`gate_e_overlap.py run --module pandas_ta.cycles.correlation_cycle`, run dir
+`is30-correlation_cycle-4c728c83`, recorded in `docs/gate_e_ledger.csv`. 89 BIST frames,
+687 comparators (329 `compute_all` + 358 `ml_features` manifest 1d), `r3-perframe-0.90` bands:
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `CC_REAL_20` | 0.6626 | `StochRSI_K_Pctl` | 391,017 | 0.6606 | SHIP |
+| `CC_IMAG_20` | 0.9353 | `Squeeze_Spread_pct` | 397,158 | 0.9372 | **STRUCK** (100% of 89 frames per-frame median ≥ 0.90) |
+| `CC_ANGLE_20` | 0.7235 | `Squeeze_Spread_pct` | 397,158 | 0.7233 | SHIP |
+
+`CC_IMAG_20` is over the 0.90 STRUCK line both pooled and per-frame (100% of frames), so it is
+reverted: the module still computes `imag` internally (`CC_ANGLE_20` needs it) but no longer
+emits it as a column, and its row is removed from `docs/gate_e_ledger.csv` (a reverted column
+ships no row). `CC_REAL_20` and `CC_ANGLE_20` are under the 0.76 SHIP line and ship as measured,
+with their rows kept in the ledger.
+
+⚠ **Reverting `CC_IMAG_20` edited the module file, which invalidated the ledger's `module_sha1`
+for the two surviving rows too** (`module_sha1` hashes the whole file, not per-column) —
+`tests/test_gate_e_ledger.py::test_row_still_describes_its_module` now reports both
+`CC_REAL_20` and `CC_ANGLE_20` as owed (`PENDING_OK`-gated: a skip under `GATE_E_PENDING_OK=1`
+in CI toward `dev`, a failure here and toward `main`). This is the same "owed" state CLAUDE.md
+defines for any post-measurement code edit, not a new one: a future Gate E run on the final
+two-column module, then `python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`,
+closes it. The SHIP verdicts and numbers above are already measured and are not expected to
+change (the revert only removed a column; it did not touch the Real/Angle calculation), but the
+ledger needs a fresh run against the post-revert file to re-validate that formally.
 
 ## Proxy overlap (NOT Gate E)
 
@@ -79,19 +115,19 @@ columns the issue pre-registered as most likely to restate this family (`ebsw`, 
 | `LRSI_13_0.2` | 0.4784 | −0.6309 | −0.5047 |
 | `HT_SINE` | 0.6631 | −0.1424 | −0.1316 |
 
-Maximum |ρ| on this proxy is **0.7030** (`CC_IMAG_20` vs `CTI_12`), below CLAUDE.md's
-0.76 SHIP line and below the pre-registered "best chance to ship" guess being falsified into a
-revert. One synthetic walk is not Gate E: the owner's `r3-perframe-0.90` bands run over 89 real
-BIST frames against 687 comparators, which this proxy does not reach.
+Maximum |ρ| on this proxy was **0.7030** (`CC_IMAG_20` vs `CTI_12`), below CLAUDE.md's
+0.76 SHIP line — this one synthetic walk missed the real Gate E strike on `CC_IMAG_20`
+(pooled 0.9353, 100% of 89 frames per-frame median ≥ 0.90, against `Squeeze_Spread_pct`, a
+comparator not in this proxy's four-column set). The pre-registered "best chance to ship"
+guess for Correlation Cycle is confirmed half right: `CC_IMAG_20` struck, `CC_REAL_20` and
+`CC_ANGLE_20` ship. One synthetic walk is not Gate E, which is exactly why this proxy is
+labelled NOT Gate E and why the real run (above) is the receipt that governs the verdict.
 
-## To close
+## Closed
 
-1. Run Gate E (`gate_e_overlap.py run --module pandas_ta.cycles.correlation_cycle --name
-   correlation_cycle`) and record the row in `docs/gate_e_ledger.csv`.
-2. Apply CLAUDE.md's `r3-perframe-0.90` bands to the recorded max |ρ|. On SHIP, this file's
-   status line and the Gate E row above are updated. On DISCLOSE / DISCLOSE_GAP, note it in
-   `docs/IndicatorDictionary.md`. On STRUCK, revert the module, its wiring and its tests, and
-   keep this file as the receipt (a measured revert is DONE, not blocked).
-3. Fill Gate C from real BIST frames in the same Gate E run.
-4. Screen the rest of the Ehlers DSP family named in issue #30 one by one; see
-   `docs/EhlersDspMeasured.md` for the full table and why each other candidate is still open.
+Gate E ran 2026-11-01 (table above) and the ledger row is recorded. `CC_IMAG_20` reverted;
+`CC_REAL_20` and `CC_ANGLE_20` ship. `docs/IndicatorDictionary.md` and
+`docs/MLCompanionContract.md` regenerated/updated to drop `CC_IMAG_20`.
+
+Open: screen the rest of the Ehlers DSP family named in issue #30 one by one; see
+`docs/EhlersDspMeasured.md` for the full table and why each other candidate is still open.

@@ -16,8 +16,10 @@ their phase difference -- `test_pure_cosine_matches_closed_form` and
 `test_pure_sine_matches_closed_form` derive and check this directly, not
 against the module's own code). What is NOT checked against any source is
 Ehlers' own window-lag convention or his "market state" sub-output -- the
-module ships Real/Imag/Angle only; market state is skipped
-(`docs/EhlersDspMeasured.md`).
+module ships Real/Angle only; market state is skipped
+(`docs/EhlersDspMeasured.md`). Imag is computed internally (Angle needs it)
+but is not a shipped column: Gate E struck it (max |rho| 0.9353 vs
+`Squeeze_Spread_pct`), recorded in `docs/CorrelationCycleMeasured.md`.
 
 What these tests pin, in order of how much it would hurt to lose:
 
@@ -33,14 +35,15 @@ What these tests pin, in order of how much it would hurt to lose:
   `sin(...)` / `cos(...)` (sine input) -- not asserted by inspecting the
   source, but by what a correlation of two same-frequency sinusoids over an
   exact integer period must equal.
-* SCALE-FREE: Real/Imag are Pearson correlation coefficients, so they are
-  provably invariant to `close -> close * k` for any `k > 0` (correlation is
-  scale- and location-invariant); measured bit-identical under x8 and x64,
-  and within tight tolerance under x10 and x3.7, with matching NaN masks.
-  Angle is a rotation angle, not a price, and inherits the same invariance
-  through Real/Imag. `0 < fires < n` so a constant column cannot pass.
-* BOUNDS: |Real|, |Imag| <= 1 (Cauchy-Schwarz on the Pearson formula);
-  Angle in (-180, 180].
+* SCALE-FREE: Real is a Pearson correlation coefficient, so it is provably
+  invariant to `close -> close * k` for any `k > 0` (correlation is scale-
+  and location-invariant); measured bit-identical under x8 and x64, and
+  within tight tolerance under x10 and x3.7, with matching NaN masks. Angle
+  is a rotation angle, not a price, and inherits the same invariance through
+  Real/Imag (Imag computed internally, not shipped). `0 < fires < n` so a
+  constant column cannot pass.
+* BOUNDS: |Real| <= 1 (Cauchy-Schwarz on the Pearson formula); Angle in
+  (-180, 180].
 * Degenerate window (zero variance) reads NaN, not a ZeroDivisionError or a
   spurious sign.
 * Wiring: `Category`, the accessor, and the column names.
@@ -77,13 +80,18 @@ def test_pure_cosine_matches_closed_form():
     t = np.arange(length - 1, n)
     expected_real = np.cos(2 * np.pi * (t + 1) / length)
     expected_imag = -np.sin(2 * np.pi * (t + 1) / length)
+    expected_angle = np.degrees(np.arctan2(expected_imag, expected_real))
 
     real = out[f"CC_REAL_{length}"].to_numpy()[length - 1:]
-    imag = out[f"CC_IMAG_{length}"].to_numpy()[length - 1:]
+    angle = out[f"CC_ANGLE_{length}"].to_numpy()[length - 1:]
     assert np.allclose(real, expected_real, atol=1e-9)
-    assert np.allclose(imag, expected_imag, atol=1e-9)
+    # (angle - expected) mod 360, mapped to (-180, 180]: a +-180 degree point
+    # can land on either side of atan2's branch cut by float noise alone, a
+    # 360-degree jump that is not a real mismatch.
+    angle_diff = (angle - expected_angle + 180) % 360 - 180
+    assert np.allclose(angle_diff, 0.0, atol=1e-9)
     assert out[f"CC_REAL_{length}"].iloc[:length - 1].isna().all()
-    assert out[f"CC_IMAG_{length}"].iloc[:length - 1].isna().all()
+    assert out[f"CC_ANGLE_{length}"].iloc[:length - 1].isna().all()
 
 
 def test_pure_sine_matches_closed_form():
@@ -95,35 +103,27 @@ def test_pure_sine_matches_closed_form():
     t = np.arange(length - 1, n)
     expected_real = np.sin(2 * np.pi * (t + 1) / length)
     expected_imag = np.cos(2 * np.pi * (t + 1) / length)
+    expected_angle = np.degrees(np.arctan2(expected_imag, expected_real))
 
     real = out[f"CC_REAL_{length}"].to_numpy()[length - 1:]
-    imag = out[f"CC_IMAG_{length}"].to_numpy()[length - 1:]
+    angle = out[f"CC_ANGLE_{length}"].to_numpy()[length - 1:]
     assert np.allclose(real, expected_real, atol=1e-9)
-    assert np.allclose(imag, expected_imag, atol=1e-9)
+    angle_diff = (angle - expected_angle + 180) % 360 - 180
+    assert np.allclose(angle_diff, 0.0, atol=1e-9)
     assert out[f"CC_REAL_{length}"].iloc[:length - 1].isna().all()
-    assert out[f"CC_IMAG_{length}"].iloc[:length - 1].isna().all()
-
-
-def test_angle_matches_atan2_of_real_imag():
-    close = _walk(400)
-    out = correlation_cycle(close)
-    real, imag, angle = (out["CC_REAL_20"], out["CC_IMAG_20"], out["CC_ANGLE_20"])
-    expected = np.degrees(np.arctan2(imag.to_numpy(), real.to_numpy()))
-    m = ~np.isnan(expected)
-    assert np.allclose(angle.to_numpy()[m], expected[m])
+    assert out[f"CC_ANGLE_{length}"].iloc[:length - 1].isna().all()
 
 
 def test_flat_window_reads_nan_not_an_error():
     close = Series([5.0] * 50)
     out = correlation_cycle(close, length=10)
     assert out["CC_REAL_10"].iloc[9:].isna().all()
-    assert out["CC_IMAG_10"].iloc[9:].isna().all()
+    assert out["CC_ANGLE_10"].iloc[9:].isna().all()
 
 
 def test_bounded():
     out = correlation_cycle(_walk(tick=0.05)).dropna()
     assert (out["CC_REAL_20"].abs() <= 1 + 1e-9).all()
-    assert (out["CC_IMAG_20"].abs() <= 1 + 1e-9).all()
     assert (out["CC_ANGLE_20"] > -180 - 1e-9).all() and (out["CC_ANGLE_20"] <= 180 + 1e-9).all()
 
 
@@ -167,7 +167,7 @@ def _leaks(fn):
         pert = close.copy()
         pert.iloc[j:] = other.iloc[j:].values
         out = fn(pert)
-        for col in ("CC_REAL_20", "CC_IMAG_20"):
+        for col in ("CC_REAL_20", "CC_ANGLE_20"):
             a, b = base[col].iloc[:j], out[col].iloc[:j]
             if not (a.isna() == b.isna()).all():
                 hits += 1
@@ -198,7 +198,7 @@ def test_mutant_is_caught(tag):
 def test_power_of_two_scale_is_bit_identical(k):
     close = _walk(tick=0.05)
     base, scaled = correlation_cycle(close), correlation_cycle(close * k)
-    for col in ("CC_REAL_20", "CC_IMAG_20", "CC_ANGLE_20"):
+    for col in ("CC_REAL_20", "CC_ANGLE_20"):
         assert (base[col].isna() == scaled[col].isna()).all()
         m = base[col].notna()
         assert (base[col][m] == scaled[col][m]).all()
@@ -208,7 +208,7 @@ def test_power_of_two_scale_is_bit_identical(k):
 def test_other_scales_within_tolerance(k):
     close = _walk(tick=0.05)
     base, scaled = correlation_cycle(close), correlation_cycle(close * k)
-    for col in ("CC_REAL_20", "CC_IMAG_20", "CC_ANGLE_20"):
+    for col in ("CC_REAL_20", "CC_ANGLE_20"):
         assert (base[col].isna() == scaled[col].isna()).all()
         assert (base[col] - scaled[col]).abs().max() < 1e-9
 
@@ -216,7 +216,7 @@ def test_other_scales_within_tolerance(k):
 def test_columns_are_not_constant():
     out = correlation_cycle(_walk(tick=0.05)).dropna()
     assert out["CC_REAL_20"].nunique() > 100
-    assert out["CC_IMAG_20"].nunique() > 100
+    assert out["CC_ANGLE_20"].nunique() > 100
     assert 0 < len(out) < len(_walk(tick=0.05))
 
 
@@ -229,7 +229,7 @@ def test_name_registration_and_accessor():
                     "close": close, "volume": 1.0})
     assert "correlation_cycle" in ta.Category["cycles"]
     out = df.ta.correlation_cycle()
-    assert list(out.columns) == ["CC_REAL_20", "CC_IMAG_20", "CC_ANGLE_20"]
+    assert list(out.columns) == ["CC_REAL_20", "CC_ANGLE_20"]
     pd.testing.assert_frame_equal(out, correlation_cycle(close))
     custom = df.ta.correlation_cycle(length=10)
-    assert list(custom.columns) == ["CC_REAL_10", "CC_IMAG_10", "CC_ANGLE_10"]
+    assert list(custom.columns) == ["CC_REAL_10", "CC_ANGLE_10"]
