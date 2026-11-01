@@ -93,12 +93,17 @@ Args:
     offset (int): How many periods to offset the result. Default: 0
 
 Kwargs:
-    min_periods (int, optional): Minimum periods to compute. Default: length
+    min_periods (int, optional): Minimum periods to compute. Below `length`,
+        the formula's `length` denominator is NOT used for the resulting
+        partial windows -- the actual (smaller) window size is, so an early
+        bar's value is not directly comparable to a full-window bar's.
+        Default: length
     fillna (value, optional): pd.DataFrame.fillna(value)
     fill_method (value, optional): Type of fill method
 
 Returns:
-    pd.Series: New feature generated, scale-free, in roughly [-1, 1] but in
-        practice much narrower (see docs/IeAsymMeasured.md for measured
-        fire rates and value spread).
+    pd.Series: New feature generated, scale-free, exactly bounded to
+        [-1, 1] by construction (hi, lo in [0, length]), in practice much
+        narrower (see docs/IeAsymMeasured.md for measured fire rates and
+        value spread).
 """

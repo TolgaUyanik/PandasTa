@@ -12,7 +12,10 @@ Run: `python docs/measure_ie_asym.py`
 import numpy as np
 from pandas import Series
 
+from pandas_ta.performance.max_return import max_return
 from pandas_ta.statistics.ie_asym import ie_asym
+from pandas_ta.statistics.skew import skew
+from pandas_ta.volatility.natr import natr
 
 
 def _walk(n=1200, seed=11, sigma=0.02, tick=None):
@@ -57,6 +60,19 @@ def main():
         same_nan = bool((base.isna() == scaled.isna()).all())
         diff = float((base - scaled).abs().max())
         print(f"  x{k}: nan masks match={same_nan}, max abs diff={diff:.3e}")
+
+    print("\nProxy overlap (NOT Gate E) -- the issue's own guessed comparators,"
+          " on the seed=11 walk, no tick rounding:")
+    ie = ie_asym(close).dropna()
+    skw = skew(close).reindex(ie.index)
+    mret = max_return(close).reindex(ie.index)
+    high, low = close * 1.001, close * 0.999
+    ntr = natr(high, low, close).reindex(ie.index)
+    for name, comp in (("skew (SKEW_30)", skw), ("max_return (MAXRET_21)", mret),
+                       ("natr (NATR_14)", ntr)):
+        both = ie.to_frame("ie").join(comp.rename("comp")).dropna()
+        rho = both["ie"].corr(both["comp"], method="spearman")
+        print(f"  {name}: rho={rho:.4f}, n={len(both)}")
 
     print("\nGate A sanity -- hand-computed window (length=10, mult=2.0):")
     hand_up = Series([1.0] * 10 + [1.0 * np.exp(10.0)])

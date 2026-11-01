@@ -26,8 +26,8 @@ What these tests pin, in order of how much it would hurt to lose them:
   NaN masks (measured exactly 0.0 on the probe walk -- the formula only
   ever compares a return to its own window's mean/std, and double-precision
   rounding from rescaling is far smaller than any realistic gap to that
-  threshold), and `0 < fires < n` (850 of 940 non-NaN bars nonzero on a
-  1,200-bar tick-rounded walk; the other 90 are bars where no return in the
+  threshold), and `0 < fires < n` (846 of 940 non-NaN bars nonzero on a
+  1,200-bar tick-rounded walk; the other 94 are bars where no return in the
   window crossed 2 sigma).
 * CORRECTNESS: a hand-computed window (9 zero-returns + one +10 log-return,
   length=10, mult=2.0, reads exactly 0.1 -- the outlier is the lone bar

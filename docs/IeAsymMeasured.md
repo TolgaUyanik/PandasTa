@@ -71,6 +71,25 @@ even though the mutant genuinely read the future. Diagnosed directly: at `j-1 = 
 discrete output space — the issue's own risk note ("the column moves in coarse steps of
 1/n") — not a defect in the mutant or the test.
 
+## Proxy overlap (NOT Gate E)
+
+The issue's own "Guess, not measured" note says Gate E should look first at `skew`, `MAX`
+(`max_return`) and `natr`. Spearman ρ of `IEASYM_260_2.0` against each, on the same
+seed=11, σ=0.02, 1,200-bar synthetic walk used for Gate C/D above (no tick rounding;
+`natr` needs `high`/`low`, synthesised here as `close * 1.001` / `close * 0.999` purely to
+get a cheap synthetic-data signal, not a real OHLC frame):
+
+| comparator | ρ | n |
+|---|---|---|
+| `skew` (`SKEW_30`) | -0.0479 | 940 |
+| `max_return` (`MAXRET_21`) | 0.2647 | 940 |
+| `natr` (`NATR_14`) | 0.0646 | 940 |
+
+All three are far below CLAUDE.md's 0.76 ship line on this synthetic probe. This is not
+Gate E — one synthetic walk, not 89 BIST frames, and a fabricated high/low — but it gives
+no early reason to expect `ie_asym` to collide with the issue's guessed comparators; the
+real Gate E run decides.
+
 ## To close
 
 1. The launcher runs Gate E (`gate_e_overlap.py run --module pandas_ta.statistics.ie_asym`)
