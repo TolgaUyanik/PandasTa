@@ -1713,6 +1713,11 @@ class AnalysisIndicators(BasePandasObject):
         result = kpss(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def ie_asym(self, length=None, mult=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ie_asym(close=close, length=length, mult=mult, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def kurtosis(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = kurtosis(close=close, length=length, offset=offset, **kwargs)
