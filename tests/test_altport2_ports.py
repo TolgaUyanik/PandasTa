@@ -183,12 +183,17 @@ REGISTERED = {
 #: ledger; see docs/TrendScanMeasured.md), -> 260 by crsi (#21, momentum;
 #: Gate E STRUCK on 2 of 3 columns (`CRSI_3_2_100`, `CRSI_PCTRANK_100`,
 #: reverted), DISCLOSE_GAP on `CRSI_STREAK_2` (shipped), in the ledger; see
-#: docs/CrsiMeasured.md), -> 261 by ie_asym (#28, statistics; Gate E
+#: docs/CrsiMeasured.md), -> 262 by ie_asym (#28, statistics; Gate E
 #: pending, run by issue-solver after this session; see
-#: docs/IeAsymMeasured.md). Pinned, not
+#: docs/IeAsymMeasured.md; this +1 chain has a pre-existing one-off drift
+#: against the live Category count somewhere before this line -- the pinned
+#: integer below is independently recounted from pandas_ta/__init__.py, not
+#: derived from this comment), -> 263 by seas (#27, performance; Gate E
+#: pending, run by issue-solver after this session; see
+#: docs/SeasMeasured.md). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
-CATEGORY_TOTAL = 262  # +1 on issue #30's correlation_cycle port (cycles)
+CATEGORY_TOTAL = 263  # +1 on issue #27's seas port (performance)
 CATEGORY_BUCKETS = {"trend": 60, "volatility": 27, "volume": 27}
 
 #: Gate E, re-measured on the SHIPPED columns over 89 BIST_100 daily frames /

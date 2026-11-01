@@ -1692,6 +1692,11 @@ class AnalysisIndicators(BasePandasObject):
             result = trend_return(close=close, trend=trend, log=log, asbool=asbool, offset=offset, trend_reset=trend_reset, **kwargs)
             return self._post_process(result, **kwargs)
 
+    def seas(self, length=None, years=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = seas(close=close, length=length, years=years, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     # Statistics
     def cusum(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))

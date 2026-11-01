@@ -4,9 +4,9 @@ Technical analysis indicators as a pandas extension. Fork of
 [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, extended with
 price-action / SMC indicators and oriented toward **machine-learning feature generation**.
 
-**262 indicators** registered in `Category`, across 9 categories — that is the number
+**263 indicators** registered in `Category`, across 9 categories — that is the number
 that matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two other
-counts are true of the same package and are easy to confuse with it: **270** are callable
+counts are true of the same package and are easy to confuse with it: **271** are callable
 as `df.ta.<name>()` (`Category` plus `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`,
 `up_and_down_volume`, `volume_delta` and `vp`), and `drawdown` and `ma` are
 importable as `ta.<name>()` without being either. All of them are in the dictionary; the
@@ -148,7 +148,7 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 
 **overlap (50)** — `alma` `bpress` `dema` `dema2` `ema` `ema2` `ema_align` `frama` `fwma` `hilo` `hl2` `hlc3` `hma` `iama` `ichimoku` `ichimoku_ml` `jma` `kalman_trend` `kama` `linreg` `linreg_channel` `ma_disparity` `mcgd` `midpoint` `midprice` `mmar` `nadaraya_watson_envelope` `ohlc4` `pwma` `rainbow` `rma` `rma2` `sinwma` `sma` `ssf` `supertrend` `supertrend2` `swma` `t3` `t3_tv` `tema` `tema2` `trima` `vidya` `vwap` `vwma` `wcp` `wilder_rma` `wma` `zlma`
 
-**performance (4)** — `log_return` `max_return` `percent_return` `trend_return` (`cumulative=True` for cumulative)
+**performance (5)** — `log_return` `max_return` `percent_return` `seas` `trend_return` (`cumulative=True` for cumulative)
 
 **statistics (20)** — `covariance` `cusum` `entlz` `entropy` `ffd` `ie_asym` `kpss` `kurtosis` `mad` `median` `median_ad_hl2` `normalize` `quantile` `rolling_sum` `skew` `stdev` `tf_centroid_20` `trend_scan` `variance` `zscore`
 
