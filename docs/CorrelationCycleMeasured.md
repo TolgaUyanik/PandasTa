@@ -7,10 +7,10 @@ against a cosine and a sine reference wave of one fixed period, producing a Real
 Imaginary part, and an Angle. Found by the ResearchIntel library sweep of 2026-10-24
 (`PandasTaIndicatorCandidates-2026-10-22.md`, Round 3b).
 
-**Status: Gates A, B, D, F cleared. Gate E measured: `CC_IMAG_20` STRUCK and reverted;
-`CC_REAL_20` and `CC_ANGLE_20` SHIP. The revert's edit to the module file means the ledger
-owes a fresh record for the two surviving columns (see Gate E below) — the verdicts and
-numbers are final, the ledger's self-check on the file hash is not yet.**
+**Status: Gates A-F all cleared. Gate E measured: `CC_IMAG_20` STRUCK and reverted;
+`CC_REAL_20` and `CC_ANGLE_20` SHIP, re-run against the post-revert module file and recorded
+in the ledger (run `is30-correlation_cycle-19b830f6`, same numbers as the pre-revert-file run,
+see Gate E below) — closed.**
 `correlation_cycle` is in `Category`, so any `df.ta.strategy()` sweep in the parent repo
 picks it up.
 
@@ -69,14 +69,19 @@ sinusoid) is pinned.
 | B Causality | pass | 31-offset future-perturbation sweep (`test_pfe.py`'s harness shape): real module 0 leaks on `CC_REAL_20`/`CC_ANGLE_20`; two mutants (`real_shift`, `imag_shift`, each shifts one rolling window one bar into the future) proven live, then caught 31 of 31 — `imag_shift` is still live even though `CC_IMAG_20` is no longer shipped, because `CC_ANGLE_20` reads the internal `imag` |
 | C Reachability | measured on real data via Gate E (89 BIST frames); synthetic floor: 3,000-bar tick-rounded walk (seed 1, tick 0.05), 2,981 of 3,000 bars finite per column (19-bar warm-up, `length - 1`), 2,981 distinct values on `CC_REAL_20` | Gate E `n` column: 391,017 (`CC_REAL_20`) / 397,158 (`CC_ANGLE_20`) non-NaN bars pooled over 89 frames |
 | D Scale-free | pass | x8 / x64 bit-identical on `CC_REAL_20`/`CC_ANGLE_20` (Real is a Pearson correlation coefficient, provably scale- and location-invariant for `close -> close*k`, `k>0`; Angle inherits it through `atan2` on Real and the internal Imag); x10 / x3.7 within 1.5e-11 (measured: Real 9.53e-13 / 1.22e-12, Angle 1.49e-11 / 7.26e-12); 2,981 finite of 3,000 satisfies `0 < fires < n`; bounds `\|Real\| <= 1 + 1e-9`, `Angle` in `(-180, 180]`, held on the same walk |
-| E Attribution | **measured 2026-11-01** — SHIP / SHIP / STRUCK, see table below; ledger re-record owed for the two surviving rows after the revert edit (`test_row_still_describes_its_module`) | `gate_e_overlap.py run --module pandas_ta.cycles.correlation_cycle`, recorded in `docs/gate_e_ledger.csv` |
+| E Attribution | **measured 2026-11-01** — SHIP / SHIP / STRUCK, see table below; ledger closed on the post-revert module file (run `is30-correlation_cycle-19b830f6`) | `gate_e_overlap.py run --module pandas_ta.cycles.correlation_cycle`, recorded in `docs/gate_e_ledger.csv` |
 | F Suites | this repo only, this session | `python -m pytest -q tests/test_correlation_cycle.py`: 13 passed (post-revert). Full-suite run and parent-repo suite are run by the launcher. |
 
 ## Gate E — measured 2026-11-01
 
-`gate_e_overlap.py run --module pandas_ta.cycles.correlation_cycle`, run dir
-`is30-correlation_cycle-4c728c83`, recorded in `docs/gate_e_ledger.csv`. 89 BIST frames,
-687 comparators (329 `compute_all` + 358 `ml_features` manifest 1d), `r3-perframe-0.90` bands:
+First run `is30-correlation_cycle-4c728c83` (pre-revert-file three-column module) found
+`CC_IMAG_20` STRUCK; the module was then edited to drop it. A second run,
+`is30-correlation_cycle-19b830f6`, against the post-revert two-column module file
+(`pandas_ta_src_sha1` `d4290382a6ffe4adf06f3e69c6d92d423d5fdc17`, `candidate_source_sha1`
+`1015d669f979086eacd0906858be86357b9f8a9b`), reproduced identical `CC_REAL_20`/`CC_ANGLE_20`
+numbers — the revert only removed a column, it did not touch the Real/Angle calculation —
+and is the run recorded in `docs/gate_e_ledger.csv`. 89 BIST frames, 687 comparators (329
+`compute_all` + 358 `ml_features` manifest 1d), `r3-perframe-0.90` bands:
 
 | column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
 |---|---|---|---|---|---|
@@ -90,16 +95,11 @@ emits it as a column, and its row is removed from `docs/gate_e_ledger.csv` (a re
 ships no row). `CC_REAL_20` and `CC_ANGLE_20` are under the 0.76 SHIP line and ship as measured,
 with their rows kept in the ledger.
 
-⚠ **Reverting `CC_IMAG_20` edited the module file, which invalidated the ledger's `module_sha1`
-for the two surviving rows too** (`module_sha1` hashes the whole file, not per-column) —
-`tests/test_gate_e_ledger.py::test_row_still_describes_its_module` now reports both
-`CC_REAL_20` and `CC_ANGLE_20` as owed (`PENDING_OK`-gated: a skip under `GATE_E_PENDING_OK=1`
-in CI toward `dev`, a failure here and toward `main`). This is the same "owed" state CLAUDE.md
-defines for any post-measurement code edit, not a new one: a future Gate E run on the final
-two-column module, then `python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`,
-closes it. The SHIP verdicts and numbers above are already measured and are not expected to
-change (the revert only removed a column; it did not touch the Real/Angle calculation), but the
-ledger needs a fresh run against the post-revert file to re-validate that formally.
+Closed: reverting `CC_IMAG_20` edited the module file, which would have invalidated the
+ledger's `module_sha1` for the two surviving rows (`module_sha1` hashes the whole file, not
+per-column) — that is why the second run above, against the post-revert file, was needed.
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-01` recorded it;
+`tests/test_gate_e_ledger.py::test_row_still_describes_its_module` passes.
 
 ## Proxy overlap (NOT Gate E)
 
