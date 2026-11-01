@@ -15,6 +15,7 @@ from .cti import cti
 from .dm import dm
 from .er import er
 from .eri import eri
+from .ewmac import ewmac
 from .fisher import fisher
 from .gapm import gapm
 from .inertia import inertia
