@@ -13,8 +13,10 @@ at DISCLOSE_GAP.** `ewmac` stays in `Category` (`EWMAC_64_256_35` only), so a
 Shipped: `pandas_ta/momentum/ewmac.py`, one column `EWMAC_64_256_<vol_length>` (default
 `EWMAC_64_256_35`). Tests: `tests/test_ewmac.py` (12). Numbers:
 `python docs/measure_ewmac.py`. Environment: pandas 2.3.3, numpy 1.26.4, Python 3.11.2.
-Measured 2026-11-01 (first run, six columns); Gate E re-run 2026-11-01 (this session,
-record only — the launcher ran the harness, this session applied the bands).
+Measured 2026-11-01 (first run, six columns, STRUCK five, revert); post-revert Gate E
+re-run 2026-11-01 (`is29-ewmac-12231c4c`, launcher-run, this session recorded the row and
+confirmed the surviving column's verdict is unchanged: `EWMAC_64_256_35` 0.8744 vs
+`SMA_200_Slope_pct`, still DISCLOSE_GAP).
 
 ## Gate A decisions (both open questions in the issue)
 
@@ -86,12 +88,15 @@ only covers `pfe` and `kalman_trend`'s pre-ledger columns) — a STRUCK column w
 waiver is reverted per CLAUDE.md's Gate E row and `tests/test_gate_e_ledger.py`'s own rule
 (`test_struck_rows_carry_the_waiver_for_this_exact_measurement`). `docs/gate_e_ledger.csv`'s
 five STRUCK ewmac rows were removed by `docs/measure_ewmac_ledger_fix.py` (the same pattern
-as `docs/measure_crsi_ledger_fix.py` for issue #21); the surviving `EWMAC_64_256_35` row is
-left recorded but now describes code that changed underneath it (editing `ewmac.py` to drop
-five columns changes the module's sha1), so it goes **owed** again — `tests/test_gate_e_ledger.py::test_row_still_describes_its_module[ewmac:EWMAC_64_256_35]`
-fails locally in this session's own `python -m pytest -q` run below, exactly as CRSI's and
-correlation_cycle's revert commits did between their revert and their post-revert Gate E
-re-run. A future session re-running Gate E on this post-revert tree records a fresh row.
+as `docs/measure_crsi_ledger_fix.py` for issue #21).
+
+**Post-revert Gate E re-run (`is29-ewmac-12231c4c`, launcher-run, recorded 2026-11-01).**
+Ran against the post-revert tree (module sha1 `22c33233e0d95e267e06a462cd56a7a82988617a`,
+matching the committed `ewmac.py`): `EWMAC_64_256_35` pooled max |rho| 0.8743751012576435
+against `SMA_200_Slope_pct` (manifest, n=380,693), per-frame max median |rho| 0.868156221984021
+over 89 frames, verdict DISCLOSE_GAP — unchanged from the pre-revert run's figure for this
+column. `docs/gate_e_ledger.py record` accepted the row (`test_row_still_describes_its_module[ewmac:EWMAC_64_256_35]`
+now passes); no further action needed.
 
 ## Gate C — real-data reachability (from the Gate E run)
 
@@ -111,7 +116,7 @@ probe's finding that the warm-up is `sigma`'s, not the (much longer) 256-bar EMA
 | C Reachability | real data (from the Gate E run) | `EWMAC_64_256_35`: 398,669 / 398,849 pooled bars non-NaN (99.95%) across the 89 BIST frames, all non-zero; the 2-bar-per-frame gap is `sigma`'s own EWMA-std warm-up |
 | D Scale-free | pass | x8 / x64 bit-identical (EMA and EWMA-std are both linear/homogeneous in `close` under exact power-of-two floating-point scaling); x10 / x3.7 max abs diff measured at 1.4e-13 / 1.6e-13 (well under the 1e-9 the test asserts), NaN masks matching; `0 < 1,198 fires < 1,200` on the synthetic probe, so a constant column cannot pass |
 | E Attribution | **measured, five STRUCK and reverted, one DISCLOSE_GAP shipped** | see the Gate E table above; `is29-ewmac-177f3161`, recorded in `docs/gate_e_ledger.csv` |
-| F Suites | this repo only; parent repo not run by this session | `python -m pytest -q`: 3 failed / 3,920 passed / 83 skipped. Two pre-exist this port, named in `CLAUDE.md`'s *Known breaks*: `test_pine_coverage_csv::test_audited_rows_carry_their_evidence` (`docs/pine/` untracked) and `test_altrepo_talib_csv::test_regenerating_reproduces_the_committed_rows` (needs the sibling `../AlternativeRepos` checkout, not on this machine). The third, `test_gate_e_ledger.py::test_row_still_describes_its_module[ewmac:EWMAC_64_256_35]`, is the **expected** owed-row failure from this session's revert edit (see Gate E section) — the same state CRSI's and correlation_cycle's revert commits left between their revert and their post-revert Gate E re-run |
+| F Suites | this repo only; parent repo not run by this session | post-revert session: `python -m pytest -q`: 3 failed / 3,920 passed / 83 skipped, the third being the expected owed-row failure (see Gate E section). This receipt session, after the post-revert Gate E re-run was recorded: `python -m pytest -q`: 2 failed / 3,921 passed / 83 skipped — only the two pre-existing known breaks remain, named in `CLAUDE.md`'s *Known breaks*: `test_pine_coverage_csv::test_audited_rows_carry_their_evidence` (`docs/pine/` untracked) and `test_altrepo_talib_csv::test_regenerating_reproduces_the_committed_rows` (needs the sibling `../AlternativeRepos` checkout, not on this machine) |
 
 ## Proxy overlap (superseded by real Gate E, kept for the record)
 
@@ -146,10 +151,10 @@ synthetic one-walk, two-comparator proxy is not a substitute for the real 89-fra
 3. Gate C filled from the same real frames (real reachability counts above).
 4. `docs/IndicatorDictionary.md` and `docs/MLCompanionContract.md` regenerated /
    updated for the one surviving column (601 tagged columns, 246 `SF`, down from 606 / 251).
-5. `docs/gate_e_ledger.csv`'s five STRUCK ewmac rows removed (`docs/measure_ewmac_ledger_fix.py`);
-   the surviving `EWMAC_64_256_35` row is now owed again (module sha1 changed by the revert
-   edit) — a future Gate E re-run on this tree records a fresh row, as CRSI's and
-   correlation_cycle's revert commits did.
-6. Both suites: this repo's `python -m pytest -q` run: 3 failed / 3,920 passed / 83 skipped
-   (two pre-existing known breaks, one expected owed Gate E row — see Gate F above). Parent
-   repo not run by this session.
+5. `docs/gate_e_ledger.csv`'s five STRUCK ewmac rows removed (`docs/measure_ewmac_ledger_fix.py`).
+6. Post-revert Gate E re-run `is29-ewmac-12231c4c` (launcher-run, 2026-11-01) recorded
+   against the post-revert module sha1; `EWMAC_64_256_35` confirmed DISCLOSE_GAP (0.8744 vs
+   `SMA_200_Slope_pct`), unchanged from the pre-revert figure. The owed-row test now passes.
+7. Both suites: this repo's `python -m pytest -q` run: 2 failed / 3,921 passed / 83 skipped
+   (the two pre-existing known breaks only — see Gate F above). Parent repo not run by this
+   session.
