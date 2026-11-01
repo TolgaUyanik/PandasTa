@@ -1036,6 +1036,11 @@ class AnalysisIndicators(BasePandasObject):
         result = eri(high=high, low=low, close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def ewmac(self, vol_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ewmac(close=close, vol_length=vol_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def fisher(self, length=None, signal=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))

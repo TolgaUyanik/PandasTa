@@ -193,7 +193,7 @@ REGISTERED = {
 #: docs/SeasMeasured.md). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
-CATEGORY_TOTAL = 263  # +1 on issue #27's seas port (performance)
+CATEGORY_TOTAL = 264  # +1 on issue #27's seas port (performance), +1 on issue #29's ewmac port (momentum)
 CATEGORY_BUCKETS = {"trend": 60, "volatility": 27, "volume": 27}
 
 #: Gate E, re-measured on the SHIPPED columns over 89 BIST_100 daily frames /
