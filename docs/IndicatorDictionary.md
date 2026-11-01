@@ -26,7 +26,7 @@ window per ticker before concatenating tickers.
 `*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is
 invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
-**262 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
+**263 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
 
 ### How many indicators is that, exactly
 
@@ -34,8 +34,8 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | surface | n | what it means |
 |---|---|---|
-| registered in `Category` | **260** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **268** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| registered in `Category` | **261** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **269** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
@@ -193,7 +193,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `percent_return` | C | `length=None`, `cumulative=False` | `PCTRET_1` SF | 1 | Calculates the percent return of a Series. See also: help(df.ta.percent_return) for additional **kwargs a valid 'df'. |
 | `trend_return` | C | `trend`, `log=True`, `asbool=None`, `trend_reset=0`, `trade_offset=None` | `TR_LOGRET_1` SF<br>`TR_CUMLOGRET_1` SF<br>`TR_Trends` BIN<br>`TR_Trades` BIN<br>`TR_Entries` BIN<br>`TR_Exits` BIN | 1 | Calculates the Returns and Cumulative Returns of a Trend as defined by a sequence of booleans called a 'trend'. One popular example in TA literature… |
 
-## statistics (19)
+## statistics (20)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -202,6 +202,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `entlz` | C | `length=None`, `base=None` | `ENTLZ_20` SF | 20 | AFML ch. 18 "Entropy Features" encodes returns as a symbol sequence (sign, or k quantile bins) and estimates its entropy over a rolling window; low… |
 | `entropy` | C | `length=None`, `base=None` | `ENTP_10` SF | 18 | Introduced by Claude Shannon in 1948, entropy measures the unpredictability of the data, or equivalently, of its average information. A die has… |
 | `ffd` | C | `d=None`, `threshold=None` | `FFD_0.4_0.0001` SF | 281 | A rolling linear filter of log price that keeps more memory than a one-bar return: `FFD_t = sum_{k=0}^{W-1} w_k * y_{t-k}`, where `y = log(close /… |
+| `ie_asym` | C | `length=None`, `mult=None` | `IEASYM_260_2.0` SF | 260 | The empirical form of Jiang, Wu, Zhu and Chen's distribution-based return asymmetry measure (as described in Quantpedia strategy #0664, "Return… |
 | `kpss` | C | `length=None` | `KPSS_100` SF | 99 | The Kwiatkowski-Phillips-Schmidt-Shin statistic of log price over a rolling window, under the trend-stationary null: regress log price on a constant… |
 | `kurtosis` | C | `length=None` | `KURT_30` SF | 29 | Sources: |
 | `mad` | C | `length=None` | `MAD_30` PX | 29 | Sources: |
@@ -351,7 +352,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation needed.
 
-`cdl_doji` `cdl_inside` `cdl_z` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `er` `fisher` `gapm` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `ovn_split` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `kalman_trend` `ma_disparity` `log_return` `max_return` `percent_return` `trend_return` `covariance` `cusum` `entlz` `entropy` `ffd` `kpss` `kurtosis` `median_ad_hl2` `normalize` `skew` `tf_centroid_20` `trend_scan` `zscore` `adx` `adxr` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `dx` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `corwin_schultz` `cvi` `garman_klass` `har_park` `massi` `natr` `range_compress_run` `range_profile` `rogers_satchell` `roll_spread` `rvi` `tf_median_absdiff_20` `ui` `volvol` `yang_zhang` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `pocket_pivot` `pvcorr` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `volcv` `vzo`
+`cdl_doji` `cdl_inside` `cdl_z` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `er` `fisher` `gapm` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `ovn_split` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `kalman_trend` `ma_disparity` `log_return` `max_return` `percent_return` `trend_return` `covariance` `cusum` `entlz` `entropy` `ffd` `ie_asym` `kpss` `kurtosis` `median_ad_hl2` `normalize` `skew` `tf_centroid_20` `trend_scan` `zscore` `adx` `adxr` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `dx` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `corwin_schultz` `cvi` `garman_klass` `har_park` `massi` `natr` `range_compress_run` `range_profile` `rogers_satchell` `roll_spread` `rvi` `tf_median_absdiff_20` `ui` `volvol` `yang_zhang` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `pocket_pivot` `pvcorr` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `volcv` `vzo`
 
 ## Never fires on the probe
 

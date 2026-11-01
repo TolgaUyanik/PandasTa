@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from .entlz import entlz
 from .entropy import entropy
+from .ie_asym import ie_asym
 from .kpss import kpss
 from .kurtosis import kurtosis
 from .mad import mad

@@ -183,10 +183,12 @@ REGISTERED = {
 #: ledger; see docs/TrendScanMeasured.md), -> 260 by crsi (#21, momentum;
 #: Gate E STRUCK on 2 of 3 columns (`CRSI_3_2_100`, `CRSI_PCTRANK_100`,
 #: reverted), DISCLOSE_GAP on `CRSI_STREAK_2` (shipped), in the ledger; see
-#: docs/CrsiMeasured.md). Pinned, not
+#: docs/CrsiMeasured.md), -> 261 by ie_asym (#28, statistics; Gate E
+#: pending, run by issue-solver after this session; see
+#: docs/IeAsymMeasured.md). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
-CATEGORY_TOTAL = 260
+CATEGORY_TOTAL = 261
 CATEGORY_BUCKETS = {"trend": 60, "volatility": 27, "volume": 27}
 
 #: Gate E, re-measured on the SHIPPED columns over 89 BIST_100 daily frames /
