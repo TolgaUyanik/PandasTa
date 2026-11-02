@@ -1755,6 +1755,11 @@ class AnalysisIndicators(BasePandasObject):
         result = median_ad_hl2(high=high, low=low, close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def osap_retskew_21(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = osap_retskew_21(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def quantile(self, length=None, q=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = quantile(close=close, length=length, q=q, offset=offset, **kwargs)
