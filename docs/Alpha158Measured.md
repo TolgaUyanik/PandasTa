@@ -35,8 +35,8 @@ Shipped:
 Environment: pandas 2.3.3, numpy 1.26.4, Python 3.12 (per the Gate E run's `meta.json`
 `stamp.versions`). Gates A/B/D/C-synthetic measured 2026-11-02 on synthetic frames
 generated inside each test module (`_walk`/`_ohlcv` fixtures). Gate E measured
-2026-11-02 by the launcher (`gate_e_overlap.py`), runs `is34-rank-c103a309`,
-`is34-wvma-c103a309`, `is34-vsumd-c103a309`, recorded in `docs/gate_e_ledger.csv`.
+2026-11-02 by the launcher (`gate_e_overlap.py`), runs `is34-rank-c6a49f68`,
+`is34-wvma-c6a49f68`, `is34-vsumd-c6a49f68`, recorded in `docs/gate_e_ledger.csv`.
 
 ## Design decisions made explicitly (not in the issue)
 
@@ -73,7 +73,7 @@ Harness: `gate_e_overlap.py run --module pandas_ta.<category>.<name>`, `compute_
 (329 cols) ∪ `ml_features` manifest `1d` (358 cols) = 687 comparators, 89 frozen
 ALTPORT-1 BIST frames, bands `r3-perframe-0.90`. Three runs, recorded 2026-11-02.
 
-### `rank` (run `is34-rank-c103a309`)
+### `rank` (run `is34-rank-c6a49f68`)
 
 | column | pooled max \|rho\| | against | n | per-frame max median \|rho\| | verdict |
 |---|---|---|---|---|---|
@@ -103,7 +103,7 @@ sha1. A future Gate E re-run on this post-revert tree would record a fresh row; 
 then the two surviving rows describe the current file correctly by direct recomputation,
 not by a new harness run.
 
-### `wvma` (run `is34-wvma-c103a309`)
+### `wvma` (run `is34-wvma-c6a49f68`)
 
 | column | pooled max \|rho\| | against | n | per-frame max median \|rho\| | verdict |
 |---|---|---|---|---|---|
@@ -116,7 +116,7 @@ not by a new harness run.
 **Decision: all five ship unchanged.** The issue's guess ("no obvious shipped
 analogue") holds — nothing approaches DISCLOSE (0.76), let alone STRUCK.
 
-### `vsumd` (run `is34-vsumd-c103a309`)
+### `vsumd` (run `is34-vsumd-c6a49f68`)
 
 | column | pooled max \|rho\| | against | n | per-frame max median \|rho\| | verdict |
 |---|---|---|---|---|---|
@@ -156,7 +156,7 @@ finding is why they were removed, not a reachability failure.
 | B Causality | pass | `tests/test_{rank,wvma,vsumd}.py`: future-perturbation over 31 offsets, two future replacements per offset, plus an `importlib`-read/`exec`'d mutant for each causal path (shift the window one bar forward). `rank`: real module 0/31 leaks, mutant 28/31 post-revert (measured 30/31 pre-revert with 5 columns; 28/31 with the 2 surviving columns — RANK is a discrete count statistic, only `length`+1 possible values, so a single swapped element can coincidentally leave all surviving columns' counts unchanged at one offset even with two different future replacements tried; fewer columns makes this slightly more likely, which is why the number moved). `wvma` (2 mutants: std, mean) and `vsumd` (1 mutant): both 0/31 real, 31/31 mutant, unaffected by `rank`'s revert. |
 | C Reachability | real data (from the Gate E runs) | See table above. All columns non-zero on a large majority of pooled bars; `0 < fires < n` per column holds on real data for all surviving and even all reverted columns. |
 | D Scale-free | pass | `rank`: an order statistic, so invariant to ANY positive rescale of `close`, not merely a power of two — measured bit-identical at x8, x64, x10 AND x3.7 (no ties hit on the test walk); unaffected by the revert (`RANK_5`/`RANK_10`'s code did not change). `wvma`: price axis bit-identical at x8/x64 (the `close/close.shift(1)` ratio cancels any common factor exactly before the rest of the formula runs), within 1e-9 at x10/x3.7; volume axis NOT bit-identical even at x8/x64 — measured max\|diff\| 6.66e-16 / 4.44e-16, because the `+1e-12` floor does not commute exactly with a volume rescale (`k*mean + 1e-12` vs `k*(mean + 1e-12/k)`) — within the same 1e-9 bound for all four factors. `vsumd`: volume-only (no price axis); same `+1e-12`-floor non-commutation as `wvma`, measured max\|diff\| ~1.1e-16 at x8/x64, within 1e-9 for all four factors. `0 < fires < n` holds per column for all three (Gate C numbers above). |
-| E Attribution | **measured, three `rank` columns STRUCK and reverted, all `wvma`/`vsumd` SHIP** | see the Gate E tables above; `is34-rank-c103a309`, `is34-wvma-c103a309`, `is34-vsumd-c103a309`, recorded in `docs/gate_e_ledger.csv` |
+| E Attribution | **measured, three `rank` columns STRUCK and reverted, all `wvma`/`vsumd` SHIP** | see the Gate E tables above; `is34-rank-c6a49f68`, `is34-wvma-c6a49f68`, `is34-vsumd-c6a49f68`, recorded in `docs/gate_e_ledger.csv` |
 | F Suites | this repo only | `python -m pytest -q`: 2 failed, 4047 passed, 83 skipped. Both failures pre-date this change and are named in `CLAUDE.md`'s *Known breaks*: `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (`docs/pine/` untracked) and `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` (needs the sibling `../AlternativeRepos` checkout this worktree does not have). `tests/test_gate_e_ledger.py` is fully green: all 12 surviving ledger rows (`RANK_5`, `RANK_10`, five `WVMA_*`, five `VSUMD_*`) correctly describe the current tree -- `rank`'s two rows were resynced to the post-revert file, `wvma`/`vsumd`'s five each are untouched by the revert. Parent repo's suite is run by the launcher. |
 
 ## Closed
