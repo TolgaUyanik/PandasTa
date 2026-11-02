@@ -1,6 +1,6 @@
 # osap_voltrend_60 — measured (issue #38)
 
-> **Status: Gates A-D cleared. Gate E: pending, run by issue-solver after this session.**
+> **Status: SHIP. Gates A-F cleared.**
 > Gate F (both repos' suites) is run by the launcher in clean worktrees; `python -m
 > pytest -q` in this worktree is reported below for the record.
 
@@ -55,7 +55,7 @@ currently verified only against the issue's own restatement of it).
 | B Causality | pass | Future-perturbation sweep, 28 offsets past the 60-bar warm-up: real module **0 of 28** leaks. One look-ahead mutant (`importlib` source read, the slope's rolling window switched from trailing to `center=True` — reads future bars — `exec`'d in memory) is shown live (differs from the real module), then caught at **28 of 28** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,600-bar synthetic uniform-volume series (seed 11, range [1e4, 1e6]), shipped default (`length=60`): **1,541 of 1,600** bars non-NaN (96.31%) — exactly `n - (length - 1)`, i.e. only the 59-bar warm-up is excluded. 1,541 distinct values among the 1,541 (every fired bar distinct). Range [-0.015995, 0.012922], median 0.000074 |
 | D Scale-free | pass | x8/x64 volume: **bit-identical, 0.0 max\|diff\|** (a ratio of two identically-scaled linear forms of volume). x10/x3.7 volume: max\|diff\| 1.30e-17 — both far under the 1e-9 tolerance the test asserts, with matching NaN masks. The column reads no price, so a price rescaling cannot reach it (no price-axis test is applicable). `0 < 1,541 fires < 1,600` and 1,541 distinct values rule out a constant column |
-| E Attribution | **pending** — run by issue-solver after this session | `gate_e_overlap.py run --module pandas_ta.volume.osap_voltrend_60`. Prototype measurement (not a port, informational only): max \|ρ\| 0.6478 vs `pvo_PVOs_12_26_9` (compute_all, n=393,598), top-5 per-frame max median 0.6532 (`docs/issues/screen/candidates.csv`) |
+| E Attribution | **SHIP** | `gate_e_overlap.py run --module pandas_ta.volume.osap_voltrend_60`, run `is38-osap_voltrend_60-d374bdb9`, 89 ALTPORT-1 frames, 398,849 pooled bars, 329 + 358 = 687 comparators, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). `VOLTREND_60`: max \|ρ\| **0.6478** vs `pvo_PVOs_12_26_9` (`compute_all`, n=393,598), per-frame max median \|ρ\| **0.6532** (also `pvo_PVOs_12_26_9`), 0.0% of frames ≥ 0.90. 0.6478 < 0.76 SHIP line → **SHIP**, matches the prototype's own measurement above |
 | F Suites | this repo only; parent repo (`Backtesting`) and Gate E are run by the launcher in clean worktrees | `python -m pytest -q` (this session, pre-ledger-record): **3 failed, 4127 passed, 83 skipped** — the three failures are the known break (`test_pine_coverage_csv.py`, untracked `docs/pine/` corpus), the sibling-repo dependency (`test_altrepo_talib_csv.py`, needs `../AlternativeRepos`), and `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (resolved by a future receipt session's ledger record); all three are documented pre-existing/expected failures per `CLAUDE.md`, none caused by this port |
 
 ## Wiring
@@ -76,8 +76,7 @@ to match.
 
 ## Receipt
 
-Gate E not yet measured — a later receipt session fills in the real-data overlap number
-and the `docs/gate_e_ledger.csv` row, then updates this file's status line to SHIP /
-DISCLOSE / DISCLOSE_GAP / STRUCK per the bands. Until then this is not closeable as a ship;
-if Gate E comes back STRUCK, the column is reverted and this file is kept as the receipt
-of a measured revert.
+Gate E measured 2026-11-02 by the launcher (run `is38-osap_voltrend_60-d374bdb9`), recorded
+in `docs/gate_e_ledger.csv` by this session. `VOLTREND_60` max \|ρ\| 0.6478 is under the
+0.76 SHIP line, matching the prototype's own pre-port measurement (0.6478 against the same
+comparator) — verdict **SHIP**. Column ships as-is. Issue #38 closed by ship, not revert.
