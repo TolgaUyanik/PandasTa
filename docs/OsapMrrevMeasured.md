@@ -1,8 +1,8 @@
 # osap_mrrev — measured (issue #37)
 
-> **Status: Gates A-D cleared this session.** Gate E is **pending, run by issue-solver
-> after this session**. Gate F (both repos' suites) is run by the launcher in clean
-> worktrees; `python -m pytest -q` in this worktree is reported below for the record.
+> **Status: Gates A-E cleared. SHIP.** Gate F (both repos' suites) is run by the launcher
+> in clean worktrees; `python -m pytest -q` in this worktree is reported below for the
+> record.
 
 A medium-run reversal effect, as asked for by issue #37: the issue names it `MRreversal`
 in the Open Source Asset Pricing (OSAP) SignalDoc (Chen & Zimmermann) catalogue (t-stat
@@ -66,7 +66,7 @@ verified only against the issue's own restatement of it).
 | B Causality | pass | Future-perturbation sweep, 29 offsets past the 378-bar warm-up: real module **0 of 29** leaks. One look-ahead mutant (`importlib` source read, the near-bar reference shifted from `close.shift(252)` to `close.shift(-8)` — an 8-bar read into the future — `exec`'d in memory) is shown live (differs from the real module), then caught at **29 of 29** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,600-bar synthetic geometric walk (seed 17, σ=1.5%/bar), shipped defaults (`near_length=252, far_length=378`): **1,222 of 1,600** bars non-NaN (76.38%) — exactly `n - far_length`, i.e. only the combined 378-bar warm-up is excluded, no wider gap. 1,222 distinct values among the 1,222 (every fired bar distinct). Range [-0.372330, 0.526875], median 0.055086 |
 | D Scale-free | pass | x8/x64: **bit-identical, 0.0 max\|diff\|** (a ratio of two identically-scaled prices). x10/x3.7: max\|diff\| 2.22e-16 — both well under the 1e-9 tolerance the test asserts, with matching NaN masks. `0 < 1,222 fires < 1,600` and 1,222 distinct values rule out a constant column |
-| E Attribution | **pending** — run by issue-solver after this session | — |
+| E Attribution | **SHIP** | `gate_e_overlap.py run --module pandas_ta.momentum.osap_mrrev`, 89 ALTPORT-1 frames, 398,849 pooled bars, 329 + 358 = 687 comparators. `MRREV_252_378` max \|ρ\| **0.5786** vs `Ret_252d_pct_Pctl` (manifest, n=365,207); per-frame max median \|ρ\| **0.5927** (0.0% of frames ≥ 0.90). Both well under the 0.76 ship line. Canary bit-equal (AKBNK, BIENY, AGHOL, SASA.IS). Run `is37-osap_mrrev-75531ea6`, measured 2026-11-02, recorded in `docs/gate_e_ledger.csv` |
 | F Suites | this repo only; parent repo (`Backtesting`) and Gate E are run by the launcher in clean worktrees | `python -m pytest -q` (this session, pre-ledger-record): **3 failed, 4106 passed, 83 skipped** — the three failures are the known break (`test_pine_coverage_csv.py`, untracked `docs/pine/` corpus), the sibling-repo dependency (`test_altrepo_talib_csv.py`, needs `../AlternativeRepos`), and `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (resolved by a future receipt session's ledger record); all three are documented pre-existing/expected failures per `CLAUDE.md`, none caused by this port |
 
 ## Wiring
@@ -83,8 +83,7 @@ updated **615 → 616** (`SF` **260 → 261**) and checked by
 `tests/test_ml_companions.py::test_the_contract_quotes_the_dictionarys_actual_ml_form_counts`.
 `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL` updated to match.
 
-## Receipt (pending)
+## Receipt
 
-Gate E has not run yet. A future receipt session records the launcher's run in
-`docs/gate_e_ledger.csv` and fills in this section with the measured verdict, max\|ρ\| and
-comparator, deciding ship vs. revert per CLAUDE.md's bands.
+Gate E SHIP (0.5786 < 0.76). Column kept, nothing reverted. Ledger row recorded
+2026-11-02 (`is37-osap_mrrev-75531ea6`).
