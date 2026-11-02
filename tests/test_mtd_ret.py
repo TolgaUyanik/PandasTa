@@ -7,17 +7,23 @@ not failed").
 What these pin, in order of how much it would hurt to lose:
 
 * CAUSALITY: rewrite every bar from `j` onward, bars `[0:j]` bit-identical, at
-  30 offsets. The mutant anchors each month on its LAST open instead of its first
-  (`exec`'d in memory), the look-ahead this column is one index away from. It is
-  proved live, then caught at 26 of 30; the other 4 offsets are months' first
-  bars, where no partial month sits behind the cut, so nothing can leak.
+  all 899 offsets. Two mutants (`exec`'d in memory), each proved live: anchoring
+  on the month's LAST open is caught at 858 of 899 (the other 41 offsets are
+  months' first bars, where no partial month sits behind the cut), and anchoring
+  ONE BAR LATE at 42 of 899 (exactly the months' second bars, so a sparse sweep
+  can miss it: 30 evenly spaced offsets caught it once).
+* AN UNSORTED FRAME returns None. "First row" is the earliest bar only on an
+  ascending index; reversed, a bar read a later bar's open.
 * A MISSING FIRST OPEN stays NaN for the month. `transform("first")` would skip
-  it and read a later bar, which the clean-open sweep cannot see.
+  it and read a later bar, which the clean-open sweep cannot see. A ZERO first
+  open is NaN too, not an `inf` that `fillna` cannot clear.
 * CORRECTNESS: a hand-derived frame across a month and year boundary, plus an
   independent per-bar loop.
-* SCALE-FREE: bit-identical under x8/x64, within 1e-9 under x10/x3.7, matching
-  NaN masks, `0 < fires < n` (a fire is a bar above its month's first open).
-* A frame without dates returns None rather than crashing a strategy sweep.
+* SCALE-FREE: bit-identical under x8/x64, within 1e-9 under x10/x3.7, on a frame
+  with one month blanked so the NaN masks have something to match, and
+  `0 < fires < n` (a fire is a bar above its month's first open).
+* A frame without dates returns None, and a real strategy sweep skips the column
+  rather than crashing. Mismatched open/close indexes return None too.
 * Wiring: `Category`, the accessor, and the column name `MTD_RET`.
 """
 import importlib
@@ -85,13 +91,50 @@ def test_missing_first_open_blanks_the_month_and_not_the_next():
     assert out.iloc[2] == 1.0
 
 
-def test_no_datetime_index_returns_none_and_accessor_leaves_frame_alone():
+def test_zero_first_open_blanks_the_month_and_not_the_next():
+    idx = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-02-01"])
+    out = mtd_ret(pd.Series([0.0, 200.0, 50.0], index=idx), pd.Series([100.0] * 3, index=idx))
+    assert out.iloc[:2].isna().all()
+    assert out.iloc[2] == 1.0
+
+
+@pytest.mark.parametrize("order", [[1, 0, 2, 3], [3, 2, 1, 0]], ids=["swap", "reversed"])
+def test_unsorted_index_returns_none(order):
+    idx = pd.to_datetime(["2024-01-31", "2024-02-01", "2024-02-02", "2024-02-05"])
+    s = pd.Series([100.0, 200.0, 210.0, 220.0], index=idx).iloc[order]
+    assert mtd_ret(s, s) is None
+
+
+def test_nat_in_index_returns_none():
+    idx = pd.to_datetime(["2024-01-31", None, "2024-02-01"])
+    s = pd.Series([100.0, 200.0, 210.0], index=idx)
+    assert mtd_ret(s, s) is None
+
+
+@pytest.mark.parametrize("break_close", [
+    lambda c: c.reset_index(drop=True),
+    lambda c: c.set_axis(c.index + pd.Timedelta(hours=1)),
+    lambda c: c.iloc[:-1],
+], ids=["range_index", "shifted_labels", "shorter"])
+def test_close_index_differing_from_open_returns_none(break_close):
+    open_, close = _frame(50)
+    assert mtd_ret(open_, break_close(close)) is None
+
+
+def test_no_datetime_index_returns_none_and_a_strategy_sweep_skips_it():
     open_, close = _frame()
+    sweep = ta.Strategy(name="mtd", ta=[{"kind": "mtd_ret"}])
+
+    dated = pd.DataFrame({"open": open_, "high": close, "low": close, "close": close, "volume": close})
+    dated.ta.strategy(sweep, cores=0, verbose=False)
+    assert "MTD_RET" in dated.columns
+
     open_, close = open_.reset_index(drop=True), close.reset_index(drop=True)
     assert mtd_ret(open_, close) is None
-    df = pd.DataFrame({"open": open_, "close": close})
-    assert isinstance(df.ta.mtd_ret(), pd.DataFrame)
-    assert list(df.columns) == ["open", "close"]
+    undated = pd.DataFrame({"open": open_, "high": close, "low": close, "close": close, "volume": close})
+    assert isinstance(undated.ta.mtd_ret(), pd.DataFrame)
+    undated.ta.strategy(sweep, cores=0, verbose=False)
+    assert "MTD_RET" not in undated.columns
 
 
 def test_offset_shifts_the_series():
@@ -112,17 +155,21 @@ def test_fillna_fills_a_blanked_month():
 _REAL = importlib.import_module("pandas_ta.performance.mtd_ret")
 
 
-def _load_mutant():
+LAST_OPEN = "s.iloc[-1]"
+ONE_BAR_LATE = "s.iloc[min(1, len(s) - 1)]"
+
+
+def _load_mutant(new=LAST_OPEN):
     src = open(_REAL.__file__, encoding="utf-8").read()
     old = "s.iloc[0]"
     assert src.count(old) == 1, "mutation target not unique"
     mod = types.ModuleType("_mtd_ret_mutant")
     mod.__file__ = _REAL.__file__
-    exec(compile(src.replace(old, "s.iloc[-1]"), _REAL.__file__, "exec"), mod.__dict__)
+    exec(compile(src.replace(old, new), _REAL.__file__, "exec"), mod.__dict__)
     return mod
 
 
-OFFSETS = range(100, 850, 25)  # 30 offsets; 4 of them fall on a month's first bar
+OFFSETS = range(1, 900)  # every cut: a one-bar-late anchor leaks only on a month's second bar
 
 
 def _leaks(fn):
@@ -144,31 +191,58 @@ def test_real_module_never_reads_the_future():
     assert _leaks(mtd_ret) == 0
 
 
-def test_mutant_is_caught():
-    mod = _load_mutant()
+def _month_of(index):
+    return index.year * 12 + index.month
+
+
+def test_last_open_mutant_is_caught():
+    mod = _load_mutant(LAST_OPEN)
     open_, close = _frame()
     assert not mod.mtd_ret(open_, close).equals(mtd_ret(open_, close))  # live
     # Offset j on a month's first bar has no partial month behind it, so it cannot leak.
-    month_starts = {j for j in OFFSETS if close.index[j].month != close.index[j - 1].month}
-    assert _leaks(mod.mtd_ret) == len(OFFSETS) - len(month_starts)
-    assert _leaks(mod.mtd_ret) > 0
+    months = _month_of(close.index)
+    month_starts = sum(months[j] != months[j - 1] for j in OFFSETS)
+    assert month_starts > 0
+    assert _leaks(mod.mtd_ret) == len(OFFSETS) - month_starts
+
+
+def test_one_bar_late_mutant_is_caught():
+    mod = _load_mutant(ONE_BAR_LATE)
+    open_, close = _frame()
+    assert not mod.mtd_ret(open_, close).equals(mtd_ret(open_, close))  # live
+    # Only a cut on a month's second bar rewrites that anchor while its first bar stays behind the cut.
+    months = _month_of(close.index)
+    second_bars = sum(j >= 1 and months[j] == months[j - 1] and (j == 1 or months[j - 1] != months[j - 2])
+                      for j in OFFSETS)
+    assert second_bars > 0
+    assert _leaks(mod.mtd_ret) == second_bars
 
 
 # ------------------------------------------------------------ scale-free
 
 
+BLANK_MONTH_BARS = 20  # February 2022 has 20 business days
+
+
+def _frame_with_a_blank_month():
+    open_, close = _frame()
+    open_.loc[open_.index[open_.index >= "2022-02-01"][0]] = np.nan
+    return open_, close
+
+
 @pytest.mark.parametrize("k", [8.0, 64.0])
 def test_power_of_two_price_scale_is_bit_identical(k):
-    open_, close = _frame()
+    open_, close = _frame_with_a_blank_month()
     base, scaled = mtd_ret(open_, close), mtd_ret(open_ * k, close * k)
-    assert (base.isna() == scaled.isna()).all()
-    assert (base == scaled).all()
+    assert base.isna().sum() == BLANK_MONTH_BARS
+    pd.testing.assert_series_equal(base, scaled, check_exact=True)
 
 
 @pytest.mark.parametrize("k", [10.0, 3.7])
 def test_other_scales_within_tolerance(k):
-    open_, close = _frame()
+    open_, close = _frame_with_a_blank_month()
     base, scaled = mtd_ret(open_, close), mtd_ret(open_ * k, close * k)
+    assert base.isna().sum() == BLANK_MONTH_BARS
     assert (base.isna() == scaled.isna()).all()
     assert (base - scaled).abs().max() < 1e-9
 
