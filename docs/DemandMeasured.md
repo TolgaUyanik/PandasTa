@@ -1,9 +1,8 @@
 # demand — measured (issue #33)
 
-> **Status: Gates A-D cleared (this session). Gate E: pending, run by issue-solver after
-> this session.** A later receipt session records the ledger row in
-> `docs/gate_e_ledger.csv` and, if Gate E measures a STRUCK column, reverts it per
-> CLAUDE.md's "Owed, not failed" rule — this file is updated at that point, not before.
+> **Status: Gates A-F cleared.** Gate E ran on 2026-11-02 (launcher run
+> `is33-demand-006099d0`), verdict **SHIP**, recorded in `docs/gate_e_ledger.csv`. Issue #33
+> closes by ship.
 
 Sibbet's Demand Index / Aspray's Demand Oscillator, Kaufman (2013) ch. 12's reading, as
 asked for by issue #33. Module `pandas_ta/volume/demand.py`, column `DEMAND_10_10` (tagged
@@ -72,8 +71,8 @@ now.
 | B Causality | pass | Future-perturbation sweep, 31 offsets: real module **0 of 31** leaks. One look-ahead mutant (`pct_chg = close.pct_change()` → `.shift(-1)`, `importlib` source read, `exec`'d in memory) is shown live (differs from the real module), then caught at **31 of 31** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,200-bar tick-rounded walk (seed 17, σ=1.5%, tick=0.05, length=10, vol_length=10): **1,190 of 1,200** bars non-NaN (99.17%) — the 10 NaN bars are exactly the combined K/volume-SMA warm-up (`max(length, vol_length)`), not a wider gap. 1,170 distinct values among the 1,190. Range [-44.08, 26.64], median exactly 0.0, median\|value\| 0.4630. The unchanged-close guard (decision 3 above) fires on 21 of 1,200 bars |
 | D Scale-free | pass | Price axis (high/low/close together) and volume axis measured **independently**. x8/x64: **bit-identical, 0.0 max\|diff\|** on both axes. x10/x3.7: price max\|diff\| 1.24e-11 / 1.79e-11, volume max\|diff\| 7.11e-15 / 1.42e-14 — both axes, both scales, well under the 1e-9 tolerance the test asserts, with matching NaN masks. `0 < 1,190 fires < 1,200` and 1,170 distinct values rule out a constant column |
-| E Attribution | **pending** — launcher runs `gate_e_overlap.py run --module pandas_ta.volume.demand` after this session; a later receipt session records the row in `docs/gate_e_ledger.csv` and updates this file | Expected neighbours per the issue's own guess: the pressure-family ports (`pressure_pulse`, `tri_dir_pressure`) and `cmf`/`mfi`/`efi`/`vfi` — not measured here, no Gate E harness access from this worktree |
-| F Suites | this repo only; parent repo (`Backtesting`) and Gate E are run by the launcher in clean worktrees | `python -m pytest -q`: **3 failed, 4,063 passed, 83 skipped.** All three pre-exist or are expected for this exact reason: `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (CLAUDE.md's documented known break, `docs/pine/` untracked), `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` (needs the sibling `../AlternativeRepos` checkout, not on this machine), and `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (expected per this session's rules: `demand` has no ledger row yet, since Gate E has not run) |
+| E Attribution | **SHIP** — run `is33-demand-006099d0`, 2026-11-02, 89 ALTPORT-1 frames, 687 comparators (329 compute_all + 358 manifest), pooled n 397,742 | `DEMAND_10_10`: max\|ρ\| **0.4807** vs `Pivot_Band_State` (manifest), per-frame max median\|ρ\| **0.4585** (same comparator), 0/89 frames ≥ 0.90. Well under the 0.76 SHIP line. Recorded in `docs/gate_e_ledger.csv` |
+| F Suites | this repo only; parent repo (`Backtesting`) and Gate E are run by the launcher in clean worktrees | `python -m pytest -q` (this session, pre-ledger-record): **3 failed, 4,063 passed, 83 skipped** — the two pre-existing known breaks plus `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (resolved by this receipt session's ledger record, below) |
 
 ## Wiring
 
@@ -88,14 +87,8 @@ running tag count updated **613 → 614** tagged columns, **258 → 259** `SF`, 
 `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL`/`CATEGORY_BUCKETS` constants updated to
 match.
 
-## What happens next
+## Receipt (2026-11-02)
 
-This is a provisional ship, not a closed issue. The launcher runs Gate E after this session;
-a later receipt session:
-
-- records the run in `docs/gate_e_ledger.csv` (`python docs/gate_e_ledger.py record`);
-- if the verdict is SHIP or DISCLOSE/DISCLOSE_GAP, updates the Gate E row above and this
-  file's status line to "Gates A-F cleared", closing issue #33 by ship;
-- if the verdict is STRUCK, reverts `demand` (module, wiring, tests) per CLAUDE.md's "a
-  measured revert is a success" rule, and updates this file's status line to "measured and
-  reverted" — the receipt stays, the column does not ship.
+Gate E ran SHIP, so `demand` ships as-is. `docs/gate_e_ledger.csv` carries the row
+(`demand:DEMAND_10_10 SHIP 0.4807 vs Pivot_Band_State`). Issue #33 is closed by ship, not by
+revert.
