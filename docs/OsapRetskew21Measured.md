@@ -1,8 +1,8 @@
 # osap_retskew_21 — measured (issue #36)
 
-> **Status: Gates A-D cleared this session.** Gate E: pending, run by issue-solver after this
-> session. Gate F: this repo's own suite run below; the parent repo (`Backtesting`) suite and
-> the Gate E ledger record are the launcher's job.
+> **Status: Gates A-E cleared, SHIP.** Gate E measured 2026-11-02 by the launcher
+> (`gate_e_overlap.py run`, 89 ALTPORT-1 frames, 398,849 bars, canary bit-equal). Gate F: this
+> repo's own suite run below; the parent repo (`Backtesting`) suite is the launcher's job.
 
 Skewness of daily returns (21), per issue #36: Open Source Asset Pricing (Chen & Zimmermann)
 SignalDoc's `ReturnSkew` (Bali-Engle-Murray 2016, OSAP t 4.01) — US monthly cross-sectional
@@ -51,19 +51,17 @@ independent per-window loop built from the same formula over a 1,200-bar synthet
 | B Causality | pass | Future-perturbation sweep, 31 offsets on a 1,200-bar seed-23 walk: real module **0 of 31** leaks. One look-ahead mutant (`ret = close.pct_change().shift(-1)`, `importlib` source read, `exec`'d in memory) shown live (differs from the real module), then caught at **31 of 31** |
 | C Reachability | 1,179 of 1,200 bars non-NaN (98.25%), the exact 21-bar warm-up and nothing wider; 1,178 distinct values. Range [-1.456562, 1.750310], median -0.062604, median\|value\| 0.348199 | `python docs/measure_osap_retskew_21.py` |
 | D Scale-free | pass | `close.pct_change()` is a ratio of two closes, cancels exactly under a uniform price rescale. x8/x64: **bit-identical, 0.0 max\|diff\|**. x10/x3.7: max\|diff\| 1.83e-14 / 2.51e-14 — both far under the 1e-9 tolerance the test asserts, with matching NaN masks. `0 < 1,179 fires < 1,200` and 1,178 distinct values rule out a constant column |
-| E Attribution | **pending, run by issue-solver after this session** | — |
-| F Suites | this repo only; parent repo (`Backtesting`) and Gate E are run by the launcher in clean worktrees | `python -m pytest -q` (this session): **3 failed, 4,084 passed, 83 skipped** |
+| E Attribution | **SHIP**. `OSAP_RETSKEW_21` max \|ρ\| 0.411882 vs `PVT_Slope_norm` (manifest, n=396,970); per-frame max median \|ρ\| 0.394638 (89 frames, 0% ≥ 0.90); 0.411882 < 0.76 ship line | `gate_e_overlap.py run --module pandas_ta.statistics.osap_retskew_21`, launcher run `is36-osap_retskew_21-f46bdcaa`, 89 frames, 398,849 bars, 329+358 comparators, canary bit-equal; recorded `docs/gate_e_ledger.csv` |
+| F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in a clean worktree | `python -m pytest -q` (this session, after the ledger row was recorded): **2 failed, 4,092 passed, 83 skipped** |
 
-Gate F note, all three failures named, none caused by this change:
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` is expected to
-fail here — `osap_retskew_21` has no ledger row yet, which is the owed-not-failed state this
-session's rules describe; a later receipt session records the row after the launcher's Gate E
-run. `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` is the
+Gate F note, both failures named, neither caused by this change nor by this issue:
+`tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` is the
 pre-existing known break (CLAUDE.md "Known breaks" — untracked `docs/pine/` corpus).
 `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` is the
 pre-existing failure that needs the sibling `../AlternativeRepos` checkout (CLAUDE.md,
 deselected by name in CI for this reason) — absent in this worktree, so it fails on a clean
-checkout regardless of this change.
+checkout regardless of this change. `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+now passes: the ledger row for `osap_retskew_21` is recorded in `docs/gate_e_ledger.csv`.
 
 ## Wiring
 
