@@ -5,3 +5,4 @@ from .percent_return import percent_return
 from .trend_return import trend_return
 from .max_return import max_return
 from .seas import seas
+from .mtd_ret import mtd_ret
