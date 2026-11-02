@@ -1743,6 +1743,11 @@ class AnalysisIndicators(BasePandasObject):
         result = kurtosis(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def lot_zeroret_60(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = lot_zeroret_60(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def mad(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = mad(close=close, length=length, offset=offset, **kwargs)

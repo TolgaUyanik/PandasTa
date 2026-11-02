@@ -71,7 +71,7 @@ Category = {
     "performance": ["log_return", "percent_return", "trend_return", "max_return", "seas"],
     # Statistics
     "statistics": [
-        "entlz", "entropy", "ffd", "ie_asym", "kpss", "kurtosis", "mad", "median", "median_ad_hl2", "osap_retskew_21", "quantile", "rank", "skew", "stdev",
+        "entlz", "entropy", "ffd", "ie_asym", "kpss", "kurtosis", "lot_zeroret_60", "mad", "median", "median_ad_hl2", "osap_retskew_21", "quantile", "rank", "skew", "stdev",
         "tf_centroid_20", "variance", "zscore",
         "rolling_sum", "normalize", "covariance", "cusum", "trend_scan"
     ],

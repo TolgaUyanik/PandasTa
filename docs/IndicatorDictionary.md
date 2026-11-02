@@ -26,7 +26,7 @@ window per ticker before concatenating tickers.
 `*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is
 invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
-**273 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
+**274 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
 
 ### How many indicators is that, exactly
 
@@ -34,8 +34,8 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | surface | n | what it means |
 |---|---|---|
-| registered in `Category` | **271** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **279** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| registered in `Category` | **272** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **280** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
@@ -197,7 +197,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `seas` | C | `length=None`, `years=None` | `SEAS_21_1` SF | 252 | Heston-Sadka annual-lag seasonality: the return over the next `length` bars, measured `years` ago, one trading year (252 bars) at a time, averaged. |
 | `trend_return` | C | `trend`, `log=True`, `asbool=None`, `trend_reset=0`, `trade_offset=None` | `TR_LOGRET_1` SF<br>`TR_CUMLOGRET_1` SF<br>`TR_Trends` BIN<br>`TR_Trades` BIN<br>`TR_Entries` BIN<br>`TR_Exits` BIN | 1 | Calculates the Returns and Cumulative Returns of a Trend as defined by a sequence of booleans called a 'trend'. One popular example in TA literature… |
 
-## statistics (22)
+## statistics (23)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -209,6 +209,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `ie_asym` | C | `length=None`, `mult=None` | `IEASYM_260_2.0` SF | 260 | The empirical form of Jiang, Wu, Zhu and Chen's distribution-based return asymmetry measure (as described in Quantpedia strategy #0664, "Return… |
 | `kpss` | C | `length=None` | `KPSS_100` SF | 99 | The Kwiatkowski-Phillips-Schmidt-Shin statistic of log price over a rolling window, under the trend-stationary null: regress log price on a constant… |
 | `kurtosis` | C | `length=None` | `KURT_30` SF | 29 | Sources: |
+| `lot_zeroret_60` | C | `length=None` | `LOT_ZERORET_60` CONST | 60 | Share of zero-return days, as asked for by issue #39: Lesmond, Ogden & Trzcinka (1999, RFS) use the proportion of zero daily returns over a trailing… |
 | `mad` | C | `length=None` | `MAD_30` PX | 29 | Sources: |
 | `median` | C | `length=None` | `MEDIAN_30` PX | 29 | Rolling Median of over 'n' periods. Sibling of a Simple Moving Average. |
 | `median_ad_hl2` | H/L/C | `length=None` | `MEDIANAD_HL2_5` SF | 4 | Source: jesse (MIT), `median_ad.py`: `scipy.stats.median_abs_deviation(hl2, window)`. scipy's function with its default `scale=1.0` is the plain,… |
@@ -384,6 +385,7 @@ or delete* — was followed here, and the answer was that they are fine.
 | `cdl_pattern` | `CDL_3BLACKCROWS` `CDL_3LINESTRIKE` `CDL_3STARSINSOUTH` `CDL_3WHITESOLDIERS` `CDL_ABANDONEDBABY` `CDL_ADVANCEBLOCK` `CDL_BREAKAWAY` `CDL_CONCEALBABYSWALL` `CDL_DARKCLOUDCOVER` `CDL_EVENINGDOJISTAR` `CDL_EVENINGSTAR` `CDL_HIKKAKEMOD` `CDL_IDENTICAL3CROWS` `CDL_KICKING` `CDL_KICKINGBYLENGTH` `CDL_MATHOLD` `CDL_MORNINGDOJISTAR` `CDL_PIERCING` `CDL_RISEFALL3METHODS` `CDL_STICKSANDWICH` `CDL_THRUSTING` `CDL_TRISTAR` `CDL_UNIQUE3RIVER` | none — fixture artifact, 0 of 62 constant on 91,197 real BIST bars (CANDLE-0) |
 | `macd_area_divergence` | `MADIV_TOP_20_60_120` `MADIV_BOT_20_60_120` | — unregistered, file one |
 | `rsi_divergence` | `RSIDIV_BEAR_14_4_4` | — unregistered, file one |
+| `lot_zeroret_60` | `LOT_ZERORET_60` | — unregistered, file one |
 | `band_cross_retest` | `BANDXR_CROSS_UP_EMA_66_288` `BANDXR_CROSS_DN_EMA_66_288` `BANDXR_RETEST_FAST_EMA_66_288` `BANDXR_RETEST_SLOW_EMA_66_288` `BANDXR_GAP_ATR_EMA_66_288` | — unregistered, file one |
 | `flag_breakout` | `FLAG_CONF_BULL_12_0.85_0.15` `FLAG_CONF_BEAR_12_0.85_0.15` | — unregistered, file one |
 | `fvg_sweep_magnet` | `FSME_MAG_BULL_5` `FSME_MAG_BEAR_5` | — unregistered, file one |
