@@ -26,7 +26,7 @@ window per ticker before concatenating tickers.
 `*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is
 invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
-**272 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
+**273 indicators** probed. All of them call cleanly on this environment (pandas 2.3.3).
 
 ### How many indicators is that, exactly
 
@@ -34,8 +34,8 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | surface | n | what it means |
 |---|---|---|
-| registered in `Category` | **270** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **278** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| registered in `Category` | **271** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **279** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
@@ -96,7 +96,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `macd` | C | `fast=None`, `slow=None`, `signal=None` | `MACD_12_26_9` PX<br>`MACDh_12_26_9` PX<br>`MACDs_12_26_9` PX | 33 | The MACD is a popular indicator to that is used to identify a security's trend. While APO and MACD are the same calculation, MACD also returns two… |
 | `macd_area_divergence` | H/L/C | `fast_len=None`, `mid_len=None`, `slow_len=None`, `macd_fast=None`, `macd_slow=None`, `macd_signal=None`, `shrink=None` | `MADIV_TOP_20_60_120` CONST<br>`MADIV_BOT_20_60_120` CONST<br>`MADIV_BULL_AREA_R_20_60_120` ??<br>`MADIV_BEAR_AREA_R_20_60_120` ??<br>`MADIV_BULL_PX_R_20_60_120` ??<br>`MADIV_BEAR_PX_R_20_60_120` ?? | 0 | A SEGMENT-ACCUMULATION divergence detector, structurally different from the classic pivot-pair kind. |
 | `mom` | C | `length=None` | `MOM_10` PX | 10 | Momentum is an indicator used to measure a security's speed (or strength) of movement. Or simply the change in price. |
-| `osap_mrrev` | C | `near_length=None`, `far_length=None` | `MRREV_252_378` SF | 378 | A medium-run reversal effect, as catalogued in the Open Source Asset Pricing (OSAP) SignalDoc (Chen & Zimmermann) under code `MRreversal` (t-stat not… |
+| `osap_mrrev` | C | `near_length=None`, `far_length=None` | `MRREV_252_378` SF | 378 | A medium-run reversal effect, as asked for by issue #37: the issue names it `MRreversal` in the Open Source Asset Pricing (OSAP) SignalDoc (Chen &… |
 | `ovn_split` | O/C | `length=None` | `OVNSUM_21` SF<br>`INTSUM_21` SF<br>`OVNINTDIFF_21` SF | 21 | Splits each bar's move into two legs and sums each over a trailing window: the OVERNIGHT leg (yesterday's close to today's open) and the INTRADAY leg… |
 | `pfe` | C | `length=None`, `smooth=None` | `PFE_10_5` SF | 10 | Hans Hannula's PFE (Technical Analysis of Stocks & Commodities, Jan 1994): the straight-line distance between the first and last bar of a window over… |
 | `pgo` | H/L/C | `length=None` | `PGO_14` SF | 14 | The Pretty Good Oscillator indicator was created by Mark Johnson to measure the distance of the current close from its N-day Simple Moving Average,… |
@@ -322,7 +322,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `wvma` | C/V | `lengths=None` | `WVMA_5` SF<br>`WVMA_10` SF<br>`WVMA_20` SF<br>`WVMA_30` SF<br>`WVMA_60` SF | 60 | qlib Alpha158's `WVMA$d`: the coefficient of variation of the volume-weighted absolute return, `Std(/close/Ref(close,1)-1/ * volume, d) /… |
 | `yang_zhang` | O/H/L/C | `length=None` | `YZVOL_20` SF | 20 | A range-based volatility estimator that adds the OVERNIGHT (close-to-open) jump to Rogers-Satchell, so it uses the full OHLC bar AND the gap at the… |
 
-## volume (30)
+## volume (31)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -341,6 +341,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `mfi` | H/L/C/V | `length=None`, `drift=None` | `MFI_14` SF | 13 | Money Flow Index is an oscillator indicator that is used to measure buying and selling pressure by utilizing both price and volume. |
 | `nvi` | C/V | `length=None`, `initial=None` | `NVI_1` SF | 0 | The Negative Volume Index is a cumulative indicator that uses volume change in an attempt to identify where smart money is active. |
 | `obv` | C/V | — | `OBV` SF | 0 | On Balance Volume is a cumulative indicator to measure buying and selling pressure. |
+| `osap_voltrend_60` | V | `length=None` | `VOLTREND_60` SF | 59 | Volume trend, as asked for by issue #38: the Open Source Asset Pricing (OSAP) SignalDoc (Chen & Zimmermann) catalogues it as `VolumeTrend`… |
 | `pocket_pivot` | O/H/L/C/V | `length=None`, `max_offset_pct=None`, `lookback=None` | `PPIVOT_10_10` BIN<br>`PPIVOT_VOLRATIO_10_10` SF<br>`PPIVOT_MAOFFSET_10_10` SF | 10 | A "pocket pivot" (from "Trade Like an O'Neil Disciple" by Kacher & Morales): today's up-volume exceeds the largest down-volume day of the prior N… |
 | `pvcorr` | C/V | `length=None` | `PVCORR_20` SF | 20 | The rolling Pearson correlation between the bar return and the change in log volume over a window: does a move happen on rising or falling… |
 | `pvi` | C/V | `length=None`, `initial=None` | `PVI_1` SF | 0 | The Positive Volume Index is a cumulative indicator that uses volume change in an attempt to identify where smart money is active. Used in… |
@@ -361,7 +362,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation needed.
 
-`cdl_doji` `cdl_inside` `cdl_z` `correlation_cycle` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `er` `ewmac` `fisher` `gapm` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `osap_mrrev` `ovn_split` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `kalman_trend` `ma_disparity` `log_return` `max_return` `percent_return` `seas` `trend_return` `covariance` `cusum` `entlz` `entropy` `ffd` `ie_asym` `kpss` `kurtosis` `median_ad_hl2` `normalize` `osap_retskew_21` `rank` `skew` `tf_centroid_20` `trend_scan` `zscore` `adx` `adxr` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `dx` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `corwin_schultz` `cvi` `garman_klass` `har_park` `massi` `natr` `range_compress_run` `range_profile` `rogers_satchell` `roll_spread` `rvi` `tf_median_absdiff_20` `ui` `volvol` `wvma` `yang_zhang` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `demand` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `pocket_pivot` `pvcorr` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `volcv` `vsumd` `vzo`
+`cdl_doji` `cdl_inside` `cdl_z` `correlation_cycle` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `er` `ewmac` `fisher` `gapm` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `osap_mrrev` `ovn_split` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `kalman_trend` `ma_disparity` `log_return` `max_return` `percent_return` `seas` `trend_return` `covariance` `cusum` `entlz` `entropy` `ffd` `ie_asym` `kpss` `kurtosis` `median_ad_hl2` `normalize` `osap_retskew_21` `rank` `skew` `tf_centroid_20` `trend_scan` `zscore` `adx` `adxr` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `dx` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `corwin_schultz` `cvi` `garman_klass` `har_park` `massi` `natr` `range_compress_run` `range_profile` `rogers_satchell` `roll_spread` `rvi` `tf_median_absdiff_20` `ui` `volvol` `wvma` `yang_zhang` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `demand` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `osap_voltrend_60` `pocket_pivot` `pvcorr` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `volcv` `vsumd` `vzo`
 
 ## Never fires on the probe
 

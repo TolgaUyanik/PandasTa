@@ -14,6 +14,7 @@ from .maxvol_adv import maxvol_adv
 from .mfi import mfi
 from .nvi import nvi
 from .obv import obv
+from .osap_voltrend_60 import osap_voltrend_60
 from .pocket_pivot import pocket_pivot
 from .pvcorr import pvcorr
 from .pvi import pvi

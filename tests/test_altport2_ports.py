@@ -193,8 +193,8 @@ REGISTERED = {
 #: docs/SeasMeasured.md). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
-CATEGORY_TOTAL = 270  # +1 on issue #27's seas port (performance), +1 on issue #29's ewmac port (momentum), +3 on issue #34's A158GAPS trio (rank/wvma/vsumd), +1 on issue #33's demand port (volume), +1 on issue #36's osap_retskew_21 port (statistics), +1 on issue #37's osap_mrrev port (momentum)
-CATEGORY_BUCKETS = {"trend": 60, "volatility": 28, "volume": 29}
+CATEGORY_TOTAL = 271  # +1 on issue #27's seas port (performance), +1 on issue #29's ewmac port (momentum), +3 on issue #34's A158GAPS trio (rank/wvma/vsumd), +1 on issue #33's demand port (volume), +1 on issue #36's osap_retskew_21 port (statistics), +1 on issue #37's osap_mrrev port (momentum), +1 on issue #38's osap_voltrend_60 port (volume)
+CATEGORY_BUCKETS = {"trend": 60, "volatility": 28, "volume": 30}
 
 #: Gate E, re-measured on the SHIPPED columns over 89 BIST_100 daily frames /
 #: 408,253 bars against 496 comparators. See docstring item 4.

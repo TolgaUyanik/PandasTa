@@ -2717,6 +2717,11 @@ class AnalysisIndicators(BasePandasObject):
         result = obv(close=close, volume=volume, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def osap_voltrend_60(self, length=None, offset=None, **kwargs):
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = osap_voltrend_60(volume=volume, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def pocket_pivot(self, length=None, max_offset_pct=None, lookback=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         open_ = self._get_column(kwargs.pop("open", "open"))
