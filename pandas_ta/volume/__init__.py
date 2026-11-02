@@ -6,6 +6,7 @@ from .aobv import aobv
 from .avwap_z import avwap_z
 from .bw_mfi import bw_mfi
 from .cmf import cmf
+from .demand import demand
 from .efi import efi
 from .eom import eom
 from .kvo import kvo

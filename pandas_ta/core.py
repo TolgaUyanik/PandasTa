@@ -2652,6 +2652,14 @@ class AnalysisIndicators(BasePandasObject):
         result = cmf(high=high, low=low, close=close, volume=volume, open_=open_, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def demand(self, length=None, vol_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = demand(high=high, low=low, close=close, volume=volume, length=length, vol_length=vol_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def efi(self, length=None, mamode=None, offset=None, drift=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
