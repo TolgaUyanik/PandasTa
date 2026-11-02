@@ -8,6 +8,7 @@ from .mad import mad
 from .median import median
 from .median_ad_hl2 import median_ad_hl2
 from .quantile import quantile
+from .rank import rank
 from .skew import skew
 from .stdev import stdev
 from .tf_centroid_20 import tf_centroid_20
