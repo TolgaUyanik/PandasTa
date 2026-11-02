@@ -71,7 +71,7 @@ Category = {
     "performance": ["log_return", "percent_return", "trend_return", "max_return", "seas"],
     # Statistics
     "statistics": [
-        "entlz", "entropy", "ffd", "ie_asym", "kpss", "kurtosis", "mad", "median", "median_ad_hl2", "quantile", "skew", "stdev",
+        "entlz", "entropy", "ffd", "ie_asym", "kpss", "kurtosis", "mad", "median", "median_ad_hl2", "quantile", "rank", "skew", "stdev",
         "tf_centroid_20", "variance", "zscore",
         "rolling_sum", "normalize", "covariance", "cusum", "trend_scan"
     ],
@@ -92,12 +92,12 @@ Category = {
     ],
     # Volatility
     "volatility": [
-        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "corwin_schultz", "cvi", "donchian", "garman_klass", "har_park", "hwc", "kc", "massi", "natr", "pdist", "range_compress_run", "range_profile", "rogers_satchell", "roll_spread", "rvi", "tf_median_absdiff_20", "thermo", "true_range", "ui", "volvol", "yang_zhang",
+        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "corwin_schultz", "cvi", "donchian", "garman_klass", "har_park", "hwc", "kc", "massi", "natr", "pdist", "range_compress_run", "range_profile", "rogers_satchell", "roll_spread", "rvi", "tf_median_absdiff_20", "thermo", "true_range", "ui", "volvol", "wvma", "yang_zhang",
     ],
 
     # Volume, "vp" or "Volume Profile" is unique
     "volume": [
-        "ad", "adosc", "amihud", "aobv", "avwap_z", "bw_mfi", "cmf", "efi", "eom", "kvo", "maxvol_adv", "mfi", "nvi", "obv", "pocket_pivot", "pvcorr", "pvi", "pvol", "pvr", "pvt", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "volcv", "weis_wave",
+        "ad", "adosc", "amihud", "aobv", "avwap_z", "bw_mfi", "cmf", "efi", "eom", "kvo", "maxvol_adv", "mfi", "nvi", "obv", "pocket_pivot", "pvcorr", "pvi", "pvol", "pvr", "pvt", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "volcv", "vsumd", "weis_wave",
         "vzo", 
         # `up_and_down_volume` and `volume_delta` are deliberately NOT here.
         # They REQUIRE a second (lower-timeframe) frame, which `df.ta.strategy()`

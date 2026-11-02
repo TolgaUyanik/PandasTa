@@ -25,6 +25,7 @@ from .vfi import vfi
 from .vol_delta import vol_delta
 from .volcv import volcv
 from .vp import vp
+from .vsumd import vsumd
 from .weis_wave import weis_wave
 from .up_and_down_volume import up_and_down_volume
 from .volume_delta import volume_delta

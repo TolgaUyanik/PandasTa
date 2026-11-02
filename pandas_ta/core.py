@@ -1760,6 +1760,11 @@ class AnalysisIndicators(BasePandasObject):
         result = quantile(close=close, length=length, q=q, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rank(self, lengths=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rank(close=close, lengths=lengths, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def skew(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = skew(close=close, length=length, offset=offset, **kwargs)
@@ -2513,6 +2518,12 @@ class AnalysisIndicators(BasePandasObject):
         result = volvol(high=high, low=low, close=close, length=length, natr_length=natr_length, mamode=mamode, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def wvma(self, lengths=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = wvma(close=close, volume=volume, lengths=lengths, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def pdist(self, drift=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         high = self._get_column(kwargs.pop("high", "high"))
@@ -2764,6 +2775,11 @@ class AnalysisIndicators(BasePandasObject):
     def volcv(self, length=None, offset=None, **kwargs):
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = volcv(volume=volume, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def vsumd(self, lengths=None, offset=None, **kwargs):
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = vsumd(volume=volume, lengths=lengths, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def up_and_down_volume(self, lower=None, anchor=None, **kwargs):
