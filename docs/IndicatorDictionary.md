@@ -213,7 +213,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `median_ad_hl2` | H/L/C | `length=None` | `MEDIANAD_HL2_5` SF | 4 | Source: jesse (MIT), `median_ad.py`: `scipy.stats.median_abs_deviation(hl2, window)`. scipy's function with its default `scale=1.0` is the plain,… |
 | `normalize` | C | `length=None` | `NORM_14` SF | 13 | Where the current value sits inside its own trailing range, on [0, 1]. 0 is the window low, 1 the window high. |
 | `quantile` | C | `length=None`, `q=None` | `QTL_30_0.5` PX | 29 | Sources: |
-| `rank` | C | `lengths=None` | `RANK_5` SF<br>`RANK_10` SF<br>`RANK_20` SF<br>`RANK_30` SF<br>`RANK_60` SF | 59 | qlib Alpha158's `RANK$d = Rank($close, d)`: today's close ranked against the trailing `d` closes, as a fraction in (0, 1] (ties and the current bar… |
+| `rank` | C | `lengths=None` | `RANK_5` SF<br>`RANK_10` SF | 9 | qlib Alpha158's `RANK$d = Rank($close, d)`: today's close ranked against the trailing `d` closes, as a fraction in (0, 1] (ties and the current bar… |
 | `rolling_sum` | C | `length=None` | `SUM_10` PX | 9 | The sliding sum of the last `length` values. |
 | `skew` | C | `length=None` | `SKEW_30` SF | 29 | Sources: |
 | `stdev` | C | `length=None`, `ddof=1` | `STDEV_30` PX | 29 | Sources: |

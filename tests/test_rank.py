@@ -3,17 +3,25 @@
 today's close ranked (percentile, ties/self counted) against the trailing
 `d` closes. Issue #34 (A158GAPS). Measurements in `docs/Alpha158Measured.md`.
 
+Alpha158 gives five windows (5, 10, 20, 30, 60); Gate E measured 2026-11-02
+STRUCK 20/30/60 against `BB_%B`/`zscore`/`Range_Pos_60` and they were
+removed (`STRUCK_LENGTHS` in the module, refused with `ValueError`). Only
+`RANK_5` and `RANK_10` ship, both DISCLOSE_GAP.
+
 What these tests pin, in order of how much it would hurt to lose them:
 
 * CAUSALITY by future-perturbation: rewrite every bar from `j` onward,
   demand bars `[0:j]` bit-identical across ALL columns, over 31 offsets. A
   one-bar look-ahead mutant (`importlib` source read, the window built on
   `np.roll(values, -1)`, `exec`'d in memory) is proved live, then caught at
-  30 of 31 -- not 31 of 31, because RANK is a discrete count statistic (only
+  28 of 31 -- not 31 of 31, because RANK is a discrete count statistic (only
   `length` + 1 possible values per column), so a single swapped element can
   coincidentally leave the count unchanged even with two different future
-  replacements tried per offset. A continuous sum/mean/std does not have
-  this coincidence; this is measured, not a weaker mutant.
+  replacements tried per offset (measured 28/31 with the 2 surviving
+  columns, down from 30/31 with the original 5 before the Gate E revert --
+  fewer columns means a coincidence on all of them is slightly more likely).
+  A continuous sum/mean/std does not have this coincidence; this is
+  measured, not a weaker mutant.
 * SCALE-FREE: `RANK` is an order statistic, so it is invariant under ANY
   positive rescaling of `close`, not merely a power of two -- measured
   bit-identical under x8, x64, x10 AND x3.7 (no ties were hit on the test
@@ -23,8 +31,8 @@ What these tests pin, in order of how much it would hurt to lose them:
 * CORRECTNESS against an independent per-bar loop built from the formula
   (`count(window <= last) / length`), not from the module, plus a
   hand-computed 5-bar window.
-* Wiring: `Category`, the accessor, and the column names `RANK_5` ..
-  `RANK_60`.
+* Wiring: `Category`, the accessor, the column names `RANK_5` / `RANK_10`,
+  and that the three Gate E STRUCK lengths are refused.
 """
 import importlib
 import types
@@ -55,7 +63,7 @@ def test_hand_computed_window():
 
 def test_matches_an_independent_loop():
     close = _walk(400)
-    length = 20
+    length = 25  # not one of the Gate E STRUCK lengths (20, 30, 60)
     c = close.values
     ref = np.full(len(c), np.nan)
     for t in range(length - 1, len(c)):
@@ -67,9 +75,18 @@ def test_matches_an_independent_loop():
 
 
 def test_default_lengths_are_the_alpha158_windows():
-    assert DEFAULT_LENGTHS == (5, 10, 20, 30, 60)
+    """Alpha158 gives five windows (5, 10, 20, 30, 60); Gate E (issue #34,
+    docs/Alpha158Measured.md) STRUCK 20/30/60 against BB_%B/zscore/Range_Pos_60
+    and they were removed -- only 5 and 10 ship."""
+    assert DEFAULT_LENGTHS == (5, 10)
     out = rank(_walk(200))
-    assert list(out.columns) == [f"RANK_{d}" for d in (5, 10, 20, 30, 60)]
+    assert list(out.columns) == [f"RANK_{d}" for d in (5, 10)]
+
+
+@pytest.mark.parametrize("length", [20, 30, 60])
+def test_struck_lengths_are_refused(length):
+    with pytest.raises(ValueError):
+        rank(_walk(200), lengths=[length])
 
 
 def test_bounded_in_zero_one():
@@ -141,13 +158,17 @@ def test_mutant_is_caught():
     mod = _load_mutant(*MUTANT, "shift")
     close = _walk()
     assert not mod.rank(close).equals(rank(close))  # live
-    # Measured 30 of 31, not 31 of 31: RANK is a discrete count statistic
+    # Measured 28 of 31, not 31 of 31: RANK is a discrete count statistic
     # (only `length` + 1 possible values per column), so a single swapped
-    # element can coincidentally leave every one of the 5 columns' counts
+    # element can coincidentally leave every one of the columns' counts
     # unchanged at one offset even with two independent future
     # replacements tried -- a coincidence a continuous sum/mean/std would
-    # not have. Still 30/31, not a near-miss on a handful.
-    assert _leaks(mod.rank) == 30
+    # not have. With only 2 columns left after the Gate E revert (issue #34:
+    # RANK_20/30/60 STRUCK and removed, see docs/Alpha158Measured.md) a
+    # coincidence on both is slightly more likely than it was with 5 -- 28/31
+    # measured here, not 30/31 as before the revert. Still not a near-miss on
+    # a handful.
+    assert _leaks(mod.rank) == 28
 
 
 # ------------------------------------------------------------ scale-free
@@ -186,6 +207,6 @@ def test_name_registration_and_accessor():
                     "close": close, "volume": 1.0})
     assert "rank" in ta.Category["statistics"]
     out = df.ta.rank()
-    assert out.name == "RANK_5-10-20-30-60"
+    assert out.name == "RANK_5-10"
     pd.testing.assert_frame_equal(out, rank(close))
     assert list(df.ta.rank(lengths=[7]).columns) == ["RANK_7"]
