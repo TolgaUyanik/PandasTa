@@ -1694,6 +1694,12 @@ class AnalysisIndicators(BasePandasObject):
         result = log_return(close=close, length=length, cumulative=cumulative, percent=percent, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def mtd_ret(self, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = mtd_ret(open_=open_, close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def percent_return(self, length=None, cumulative=False, percent=False, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = percent_return(close=close, length=length, cumulative=cumulative, percent=percent, offset=offset, **kwargs)
