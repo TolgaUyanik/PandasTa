@@ -1109,6 +1109,11 @@ class AnalysisIndicators(BasePandasObject):
         result = mom(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def osap_mrrev(self, near_length=None, far_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = osap_mrrev(close=close, near_length=near_length, far_length=far_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def ovn_split(self, length=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         close = self._get_column(kwargs.pop("close", "close"))
