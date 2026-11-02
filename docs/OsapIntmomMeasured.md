@@ -1,8 +1,8 @@
 # osap_intmom — measured (issue #40)
 
-> **Status: Gates A-D cleared this session. Gate E: pending, run by issue-solver after
-> this session.** Gate F (both repos' suites) is run by the launcher in clean worktrees;
-> `python -m pytest -q` in this worktree is reported below for the record.
+> **Status: Gates A-E cleared. SHIP (Gate E verdict DISCLOSE).** Gate F (both repos'
+> suites) is run by the launcher in clean worktrees; `python -m pytest -q` in this
+> worktree is reported below for the record.
 
 Intermediate momentum, as asked for by issue #40: the issue names it `IntMom` in the Open
 Source Asset Pricing (OSAP) SignalDoc (Chen & Zimmermann) catalogue (Novy-Marx 2012, OSAP
@@ -72,7 +72,7 @@ verified only against the issue's own restatement of it).
 | B Causality | pass | Future-perturbation sweep, 33 offsets past the 252-bar warm-up: real module **0 of 33** leaks. One look-ahead mutant (`importlib` source read, the near-bar reference shifted from `close.shift(near_length)` to `close.shift(near_length - 134)` — an 8-bar read into the future — `exec`'d in memory) is shown live (differs from the real module), then caught at **33 of 33** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 900-bar synthetic geometric walk (seed 17, σ=1.5%/bar), shipped defaults (`near_length=126, far_length=252`): **648 of 900** bars non-NaN (72.00%) — exactly `n - far_length`, i.e. only the combined 252-bar warm-up is excluded, no wider gap. 648 distinct values among the 648 (every fired bar distinct). Range [-0.372330, 0.362135], median -0.051867 |
 | D Scale-free | pass | x8/x64: **bit-identical, 0.0 max\|diff\|** (a ratio of two identically-scaled prices). x10/x3.7: max\|diff\| 2.22e-16 — both well under the 1e-9 tolerance the test asserts, with matching NaN masks. `0 < 648 fires < 900` and 648 distinct values rule out a constant column |
-| E Attribution | **pending, run by issue-solver after this session** | `gate_e_overlap.py run --module pandas_ta.momentum.osap_intmom`. The *prototype's* screen (same scale-free formula, different harness run) measured DISCLOSE — pooled max \|ρ\| 0.7610 vs `Mom_12_1_pct` (manifest, n=376,421), top-5 per-frame max median 0.7536 (`docs/issues/screen/candidates.csv`) — but that number is not this port's Gate E result and must not be quoted as such |
+| E Attribution | **DISCLOSE** (0.76 ≤ \|ρ\| < 0.80) | Run `is40-osap_intmom-39e78fd0` on `pandas_ta.momentum.osap_intmom`, 89 ALTPORT-1 frames, 398,849 pooled bars, 687 comparators (329 `compute_all` + 358 manifest), canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS. `INTMOM_126_252`: max \|ρ\| **0.7610** vs `Mom_12_1_pct` (manifest, n=376,421); per-frame max median \|ρ\| **0.7536** against the same comparator, over 89 frames, 0.0% of frames ≥ 0.90. Verdict `DISCLOSE` (schema `r3-perframe-0.90`). The *prototype's* earlier screen (same scale-free formula, different harness run, `docs/issues/screen/candidates.csv`) had measured the same 0.7610/0.7536 pair independently — this port's own Gate E run confirms it, not merely repeats it |
 | F Suites | this repo only; parent repo (`Backtesting`) and Gate E are run by the launcher in clean worktrees | `python -m pytest -q` (this session, pre-ledger-record): see below |
 
 ## Wiring
@@ -91,8 +91,8 @@ running tagged-column count updated **618 → 619** (`SF` **262 → 263**) and c
 
 ## Receipt
 
-Gate E: pending, run by issue-solver after this session. A future receipt session records
-the ledger row (`docs/gate_e_ledger.csv`) and fills in the measured number here, deciding
-ship vs. revert per the 0.76/0.80/0.90 bands in `CLAUDE.md`. Until then this column ships
-provisionally (per "Owed, not failed, on the way to `dev`"), and a STRUCK result would
-mean a revert before any release into `main`.
+Gate E ledger row recorded 2026-11-02 (`docs/gate_e_ledger.csv`,
+`osap_intmom:INTMOM_126_252 DISCLOSE 0.7610 vs Mom_12_1_pct`). Verdict DISCLOSE falls in
+the 0.76 ≤ \|ρ\| < 0.80 band (not STRUCK, not DISCLOSE_GAP), so per the issue's "Done
+when" and `CLAUDE.md`'s Gate E row, `INTMOM_126_252` ships with this disclosure rather
+than being reverted.
