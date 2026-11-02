@@ -7,6 +7,7 @@ from .kurtosis import kurtosis
 from .mad import mad
 from .median import median
 from .median_ad_hl2 import median_ad_hl2
+from .osap_retskew_21 import osap_retskew_21
 from .quantile import quantile
 from .rank import rank
 from .skew import skew
