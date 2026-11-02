@@ -1,8 +1,8 @@
 # lot_zeroret_60 — measured (issue #39)
 
-> **Status: Gates A-D cleared this session. Gate E: pending, run by issue-solver after
-> this session.** Gate F (both repos' suites) is run by the launcher in clean worktrees;
-> `python -m pytest -q` in this worktree is reported below for the record.
+> **Status: Gates A-E cleared. Gate E: SHIP (max |ρ| 0.7108 vs ZIGZAG).** Gate F (both
+> repos' suites) is run by the launcher in clean worktrees; `python -m pytest -q` in this
+> worktree is reported below for the record.
 
 Share of zero-return days (60), per issue #39: Lesmond, Ogden & Trzcinka (1999, RFS) use
 the proportion of zero daily returns over a trailing window as a published liquidity
@@ -66,7 +66,7 @@ Matched by `docs/measure_lot_zeroret_60.py` and `tests/test_lot_zeroret_60.py::t
 | B Causality | pass | Future-perturbation sweep, 28 offsets, on a deterministic series with a forced tie every 4th bar (`_ticky`) spliced with a tie-free tail (`_tickless`) past each offset — dense enough that a window reaching into the future reliably changes its own zero-count: real module **0 of 28** leaks. One look-ahead mutant (`importlib` source read, the rolling sum's window switched from trailing to `center=True` — reads future bars — `exec`'d in memory) shown live (differs from the real module), then caught at **28 of 28**. (A first attempt using a plain sparse random walk caught only 3 of 28, pinned by `tests/test_lot_zeroret_60.py::test_a_sparse_random_walk_is_too_weak_a_causality_check` — zero-return events are rare by chance, so most perturbed windows carried the same zero-count in both arms by luck, not by causality; the dense `_ticky`/`_tickless` pair fixes that, see the comment in `docs/measure_lot_zeroret_60.py`.) |
 | C Reachability | 1,540 of 1,600 bars non-NaN (96.25%), exactly `n - length` — the 60-bar warm-up and nothing wider. 3 distinct values among the 1,540 (`0`, `1/60`, `2/60`) on this synthetic walk with 6 forced ties; range [0, 0.033333], median 0, 242 bars with a positive share. The small distinct-value count is a structural property of a bounded count statistic (at most `length + 1` possible values exist at all, system-wide), not evidence of a near-constant column — real-data reachability and variety come from Gate E's pooled measurement, not re-derived here | `python docs/measure_lot_zeroret_60.py` |
 | D Scale-free | pass | `r == 0` reduces to `close[t] == close[t-1]` (dividing an equal nonzero float by itself is always exactly `1.0` under IEEE-754, so the subtraction gives exactly `0.0`), and multiplying two equal float values by the same scalar yields bit-identical results regardless of the scalar — so this column is bit-identical under **any** uniform positive close rescale, not only powers of two. Measured: x8/x64/x10/x3.7 close all **bit-identical, 0.0 max\|diff\|**, matching NaN masks. `0 < 1,540 fires < 1,600` and 3 distinct values (not 1) rule out a constant column |
-| E Attribution | **pending** — run by issue-solver after this session | `gate_e_overlap.py run --module pandas_ta.statistics.lot_zeroret_60` |
+| E Attribution | SHIP — max \|ρ\| 0.7108 vs `ZIGZAG` (`compute_all`, n = 33,246); per-frame max median 0.7243 (84 frames); below the 0.76 ship line | Run `is39-lot_zeroret_60-f8975998`, 89 ALTPORT-1 frames, 398,849 pooled bars, 329 + 358 = 687 comparators, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). `gate_e_overlap.py run --module pandas_ta.statistics.lot_zeroret_60` |
 | F Suites | this repo only; parent repo (`Backtesting`) and Gate E are run by the launcher in clean worktrees | `python -m pytest -q` (this session, pre-ledger-record): **3 failed, 4151 passed, 83 skipped** — the three failures are the known break (`test_pine_coverage_csv.py`, untracked `docs/pine/` corpus), the sibling-repo dependency (`test_altrepo_talib_csv.py`, needs `../AlternativeRepos`), and `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (resolved by a future receipt session's ledger record); all three are documented pre-existing/expected failures per `CLAUDE.md`, none caused by this port |
 
 ## Wiring
@@ -85,6 +85,10 @@ count updated and checked by
 
 ## Receipt
 
-Gate E: pending, run by issue-solver after this session. This section will be filled in
-with the measured max |ρ|, its comparator, the run id, and the ledger row once that run
-completes.
+Gate E: SHIP. Max |ρ| 0.7108 vs `ZIGZAG` (`compute_all`, n = 33,246); per-frame max
+median 0.7243 across 84 frames, 0.0% of frames at |ρ| ≥ 0.90; against the `ml_features`
+manifest, max |ρ| 0.5301 vs `Pct_Up_Days_63` (n = 393,509). Run id
+`is39-lot_zeroret_60-f8975998`, 89 ALTPORT-1 frames, 398,849 pooled bars, 687 comparators
+(329 `compute_all` + 358 manifest), canary bit-equal on AKBNK.IS, BIENY.IS, AGHOL.IS,
+SASA.IS. Under the 0.76 SHIP line (`r3-perframe-0.90` bands) — column ships, nothing
+reverted. Recorded in `docs/gate_e_ledger.csv` on 2026-11-02.
