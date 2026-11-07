@@ -25,6 +25,7 @@ from .tod_profile import tod_profile
 from .tri_dir_pressure import tri_dir_pressure
 from .vfi import vfi
 from .vol_delta import vol_delta
+from .vol_sign_rev import vol_sign_rev
 from .volcv import volcv
 from .vp import vp
 from .vsumd import vsumd
