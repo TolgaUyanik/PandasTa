@@ -303,3 +303,29 @@ def test_owed_fails_unless_pending_ok(monkeypatch):
         _owed("owed", plain)
     with pytest.raises(pytest.fail.Exception):
         _owed("owed", waived)
+
+
+def test_fixed_frame_falls_back_only_when_it_gives_the_indicator_nothing(monkeypatch):
+    """The real accessor, not a stand-in: shrink the fixed frame so `rsi` (14 bars) gets nothing on
+    it -- the accessor hands back its input, as osap_lrrev's 756-bar window does on 600 bars (#35)
+    -- and default_output must re-run it on LONG_FRAME_BARS. At the real FRAME_BARS it is never
+    re-run, so no recorded fingerprint can move."""
+    short = gl.ohlcv(10)
+    assert list(gl._call("rsi", short).columns) == list(short.columns)   # nothing on 10 bars
+
+    at_600 = gl.default_output("rsi")
+    assert list(at_600.columns) == ["RSI_14"]
+    assert len(at_600) == gl.FRAME_BARS
+
+    monkeypatch.setattr(gl, "FRAME_BARS", 10)
+    fell_back = gl.default_output("rsi")
+    assert list(fell_back.columns) == ["RSI_14"]
+    assert len(fell_back) == gl.LONG_FRAME_BARS
+
+
+def test_fixed_frame_keeps_the_short_result_when_both_frames_give_nothing():
+    """long_run needs two input series, so its defaults give nothing on any frame: the FRAME_BARS
+    result comes back unchanged, as before the fallback (its grandfathered columns stay put)."""
+    out = gl.default_output("long_run")
+    assert list(out.columns) == list(gl.ohlcv().columns)
+    assert len(out) == gl.FRAME_BARS
