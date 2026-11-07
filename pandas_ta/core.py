@@ -2810,6 +2810,12 @@ class AnalysisIndicators(BasePandasObject):
         result = vol_delta(open_=open_, high=high, low=low, close=close, volume=volume, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def vol_sign_rev(self, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = vol_sign_rev(close=close, volume=volume, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def volcv(self, length=None, offset=None, **kwargs):
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = volcv(volume=volume, length=length, offset=offset, **kwargs)
