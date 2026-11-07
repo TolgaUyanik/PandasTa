@@ -1,8 +1,9 @@
 # vol_sign_rev — measured (issue #43)
 
-> **Status: Gates A-D cleared this session.** Gate E: pending, run by issue-solver
-> after this session. Gate F (both repos' suites) is run by the launcher in clean
-> worktrees; `python -m pytest -q` in this worktree is reported below for the record.
+> **Status: Gates A-D cleared; Gate E measured by the launcher 2026-11-08 — SHIP.**
+> Ledger row recorded in `docs/gate_e_ledger.csv`. Gate F (both repos' suites) is run by
+> the launcher in clean worktrees; `python -m pytest -q` in this worktree is reported
+> below for the record.
 
 Alpha#12 of Kakushadze's "101 Formulaic Alphas" (2016, Wilmott), as asked for by
 issue #43 and `docs/issues/screen/candidates.csv` (candidate `a101_012`,
@@ -52,7 +53,7 @@ primary source until re-checked.
 | B Causality | pass | Future-perturbation sweep, 45 offsets past the 1-bar warm-up: real module **0 of 45** leaks. One look-ahead mutant (`importlib` source read, the return term's `close.shift(1)` switched to `close.shift(-1)` — a 1-bar read into the future — `exec`'d in memory) is shown live (differs from the real module), then caught at **45 of 45** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 900-bar synthetic geometric-walk close (seed 17, σ=1.5%/bar) with an independent uniform volume stream (seed 23): **899 of 900** bars non-NaN (99.89%) — only the single 1-bar warm-up is excluded. 899 distinct values among the 899 (every fired bar distinct). Range [-0.053186, 0.044516], median 0.000610, median absolute value 0.009586 |
 | D Scale-free | pass | Price: x8/x64 **bit-identical, 0.0 max\|diff\|** (a ratio of two identically-scaled prices). x10/x3.7: max\|diff\| 2.22e-16 — well under the 1e-9 tolerance the test asserts, with matching NaN masks. Volume: x8/x64/x10/x3.7 **all bit-identical, 0.0 max\|diff\|** — `np.sign` of a scaled diff reads only the sign bit, so any positive scalar is exact, not just powers of two. `0 < 899 fires < 900` and 899 distinct values rule out a constant column |
-| E Attribution | pending, run by issue-solver after this session | — |
+| E Attribution | **SHIP** | `VSR`: max\|ρ\| **0.2314** vs `efi_norm` (manifest, n=397,771); per-frame max median \|ρ\| **0.2261** vs `efi_norm`, 0.0% of frames ≥0.90; pooled n=398,760, 687 comparators (329 compute_all + 358 manifest), 0 degenerate columns. Against `compute_all` only: max\|ρ\| 0.2008 vs `aobv_AOBV_SR_2`. Run `is43-vol_sign_rev-345f250e`, 89 ALTPORT-1 frames, 398,849 pooled bars, canary (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS) bit-equal. Recorded in `docs/gate_e_ledger.csv`, measured 2026-11-08 |
 | F Suites | this repo only; parent repo (`Backtesting`) and Gate E are run by the launcher in clean worktrees | `python -m pytest -q` (this session, pre-ledger-record): **3 failed, 4218 passed, 83 skipped** — the 3 failures are all pre-existing/expected: `test_pine_coverage_csv.py` (known break, untracked `docs/pine/` corpus — see CLAUDE.md "Known breaks"), `test_altrepo_talib_csv.py` (needs the sibling `../AlternativeRepos` checkout), `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (this port's row is owed — a future receipt session records it) |
 
 ## Wiring
@@ -66,12 +67,14 @@ primary source until re-checked.
 `tests/test_readme_counts.py`. `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL` and
 `CATEGORY_BUCKETS["volume"]` updated to match (274 → 275, 30 → 31).
 
-## Receipt (pending)
+## Receipt
 
-Gate E has not run yet. A future receipt session records the launcher's run in
-`docs/gate_e_ledger.csv` and fills in this section with the measured verdict, max\|ρ\| and
-comparator, deciding ship vs. revert per CLAUDE.md's bands. The prototype's own Gate E
-screen measurement (issue text, not re-derived this session) was max |ρ| 0.2314 vs
-`efi_norm` (manifest, n=397,771), top-5 per-frame max median 0.2260 → SHIP — that number
-is the prototype's, over a scale-free `delta(close,1) -> one-bar return` form identical to
-this port's, not a guarantee of this port's own re-measurement.
+Gate E ran on the port at commit `04200f8` (`pandas_ta_src_sha1` `8b3a7d60a641f2d9bd388cac847eb034fd03cd1d`),
+run `is43-vol_sign_rev-345f250e`, recorded in `docs/gate_e_ledger.csv` 2026-11-08. Column
+`VSR`: max\|ρ\| **0.2314** vs `efi_norm` (manifest, n=397,771), per-frame max median \|ρ\|
+**0.2261**, verdict **SHIP** (band `r3-perframe-0.90`: pooled and per-frame both well under
+the 0.76 ship line, let alone the 0.90 struck line). This matches the prototype's own
+measurement in the issue text (max |ρ| 0.2314 vs `efi_norm`, top-5 per-frame max median
+0.2260) to 4 decimal places — the port reproduces the prototype's attribution, not just its
+formula. Per the issue's "Done when" and CLAUDE.md's Gate E bands: **shipped**, no
+column removed.
