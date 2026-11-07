@@ -303,3 +303,20 @@ def test_owed_fails_unless_pending_ok(monkeypatch):
         _owed("owed", plain)
     with pytest.raises(pytest.fail.Exception):
         _owed("owed", waived)
+
+
+def test_fixed_frame_falls_back_only_when_600_bars_give_nothing(monkeypatch):
+    """A long-window indicator (osap_lrrev, #35) gets nothing on 600 bars and is run on
+    LONG_FRAME_BARS instead; an indicator that fires on 600 bars is never re-run."""
+    calls = []
+
+    def fake_call(indicator, df):
+        calls.append(len(df))
+        if indicator == "long" and len(df) < gl.LONG_FRAME_BARS:
+            return df                       # what the accessor does with too few bars
+        return df["close"].rename(f"{indicator.upper()}_1").to_frame()
+
+    monkeypatch.setattr(gl, "_call", fake_call)
+    assert list(gl.default_output("short").columns) == ["SHORT_1"] and calls == [600]
+    calls.clear()
+    assert list(gl.default_output("long").columns) == ["LONG_1"] and calls == [600, gl.LONG_FRAME_BARS]

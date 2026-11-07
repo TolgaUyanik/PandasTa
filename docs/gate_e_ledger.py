@@ -107,9 +107,29 @@ def ohlcv(n: int = 600, seed: int = 11) -> pd.DataFrame:
     }, index=pd.date_range("2020-01-01", periods=n, freq="D"))
 
 
+# The fixed frame is 600 bars. An indicator whose default window needs more (osap_lrrev's 756-bar
+# far leg, #35) gets nothing on it: the accessor hands back the input frame unchanged. Only then
+# is the indicator run on LONG_FRAME_BARS, so every row recorded on 600 bars keeps its fingerprint.
+LONG_FRAME_BARS = 2000
+
+
 def default_output(indicator: str, df: pd.DataFrame = None) -> pd.DataFrame:
-    """`df.ta.<indicator>()` at its defaults: the call `df.ta.strategy()` makes."""
-    df = ohlcv() if df is None else df
+    """`df.ta.<indicator>()` at its defaults: the call `df.ta.strategy()` makes. On the fixed frame
+    (df None) it falls back to LONG_FRAME_BARS when 600 bars give the indicator nothing."""
+    if df is not None:
+        return _call(indicator, df)
+    out = _call(indicator, ohlcv())
+    if _added_nothing(out, ohlcv()):
+        out = _call(indicator, ohlcv(LONG_FRAME_BARS))
+    return out
+
+
+def _added_nothing(out: pd.DataFrame, df: pd.DataFrame) -> bool:
+    """The accessor returned its input: too few bars for the indicator's default window."""
+    return list(map(str, out.columns)) == list(map(str, df.columns))
+
+
+def _call(indicator: str, df: pd.DataFrame) -> pd.DataFrame:
     out = getattr(df.ta, indicator)()
     if isinstance(out, tuple):  # ichimoku: the accessor appends only the first frame (core.py)
         out = out[0]
