@@ -1114,6 +1114,11 @@ class AnalysisIndicators(BasePandasObject):
         result = osap_intmom(close=close, near_length=near_length, far_length=far_length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def osap_lrrev(self, near_length=None, far_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = osap_lrrev(close=close, near_length=near_length, far_length=far_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def osap_mrrev(self, near_length=None, far_length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = osap_mrrev(close=close, near_length=near_length, far_length=far_length, offset=offset, **kwargs)
