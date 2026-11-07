@@ -36,6 +36,12 @@ LEDGER = REPO / "docs" / "gate_e_ledger.csv"
 GRANDFATHERED = REPO / "docs" / "gate_e_grandfathered.json"
 SCHEMA = "r3-perframe-0.90"
 N_FRAMES = 89          # ALTPORT-1's frozen BIST daily universe (owner, 2026-10-23)
+# The fixed frame is FRAME_BARS bars. An indicator whose default window needs more (osap_lrrev's
+# 756-bar far leg, #35) gets nothing on it: the accessor hands back the input frame unchanged.
+# Only then is the indicator run on LONG_FRAME_BARS, so every row recorded on FRAME_BARS keeps
+# its fingerprint.
+FRAME_BARS = 600
+LONG_FRAME_BARS = 2000
 N_COMPARATORS = 687    # compute_all 329 + ml_features manifest 1d 358
 
 FIELDS = [
@@ -95,7 +101,7 @@ def src_tree_sha1s() -> set:
     return out
 
 
-def ohlcv(n: int = 600, seed: int = 11) -> pd.DataFrame:
+def ohlcv(n: int = FRAME_BARS, seed: int = 11) -> pd.DataFrame:
     """Tick-rounded GBM daily bars: the fixed frame for column sets and fingerprints."""
     rng = np.random.default_rng(seed)
     close = np.round(100 * np.exp(np.cumsum(rng.normal(0, 0.02, n))), 2)
@@ -107,21 +113,20 @@ def ohlcv(n: int = 600, seed: int = 11) -> pd.DataFrame:
     }, index=pd.date_range("2020-01-01", periods=n, freq="D"))
 
 
-# The fixed frame is 600 bars. An indicator whose default window needs more (osap_lrrev's 756-bar
-# far leg, #35) gets nothing on it: the accessor hands back the input frame unchanged. Only then
-# is the indicator run on LONG_FRAME_BARS, so every row recorded on 600 bars keeps its fingerprint.
-LONG_FRAME_BARS = 2000
-
-
 def default_output(indicator: str, df: pd.DataFrame = None) -> pd.DataFrame:
     """`df.ta.<indicator>()` at its defaults: the call `df.ta.strategy()` makes. On the fixed frame
-    (df None) it falls back to LONG_FRAME_BARS when 600 bars give the indicator nothing."""
+    (df None) it falls back to LONG_FRAME_BARS when FRAME_BARS give the indicator nothing."""
     if df is not None:
         return _call(indicator, df)
-    out = _call(indicator, ohlcv())
-    if _added_nothing(out, ohlcv()):
-        out = _call(indicator, ohlcv(LONG_FRAME_BARS))
-    return out
+    base = ohlcv(FRAME_BARS)
+    out = _call(indicator, base)
+    if not _added_nothing(out, base):
+        return out
+    long_df = ohlcv(LONG_FRAME_BARS)
+    long_out = _call(indicator, long_df)
+    # Nothing on either frame (long_run needs two input series): the FRAME_BARS result, unchanged,
+    # as before the fallback existed.
+    return out if _added_nothing(long_out, long_df) else long_out
 
 
 def _added_nothing(out: pd.DataFrame, df: pd.DataFrame) -> bool:

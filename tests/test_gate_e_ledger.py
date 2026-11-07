@@ -305,18 +305,27 @@ def test_owed_fails_unless_pending_ok(monkeypatch):
         _owed("owed", waived)
 
 
-def test_fixed_frame_falls_back_only_when_600_bars_give_nothing(monkeypatch):
-    """A long-window indicator (osap_lrrev, #35) gets nothing on 600 bars and is run on
-    LONG_FRAME_BARS instead; an indicator that fires on 600 bars is never re-run."""
-    calls = []
+def test_fixed_frame_falls_back_only_when_it_gives_the_indicator_nothing(monkeypatch):
+    """The real accessor, not a stand-in: shrink the fixed frame so `rsi` (14 bars) gets nothing on
+    it -- the accessor hands back its input, as osap_lrrev's 756-bar window does on 600 bars (#35)
+    -- and default_output must re-run it on LONG_FRAME_BARS. At the real FRAME_BARS it is never
+    re-run, so no recorded fingerprint can move."""
+    short = gl.ohlcv(10)
+    assert list(gl._call("rsi", short).columns) == list(short.columns)   # nothing on 10 bars
 
-    def fake_call(indicator, df):
-        calls.append(len(df))
-        if indicator == "long" and len(df) < gl.LONG_FRAME_BARS:
-            return df                       # what the accessor does with too few bars
-        return df["close"].rename(f"{indicator.upper()}_1").to_frame()
+    at_600 = gl.default_output("rsi")
+    assert list(at_600.columns) == ["RSI_14"]
+    assert len(at_600) == gl.FRAME_BARS
 
-    monkeypatch.setattr(gl, "_call", fake_call)
-    assert list(gl.default_output("short").columns) == ["SHORT_1"] and calls == [600]
-    calls.clear()
-    assert list(gl.default_output("long").columns) == ["LONG_1"] and calls == [600, gl.LONG_FRAME_BARS]
+    monkeypatch.setattr(gl, "FRAME_BARS", 10)
+    fell_back = gl.default_output("rsi")
+    assert list(fell_back.columns) == ["RSI_14"]
+    assert len(fell_back) == gl.LONG_FRAME_BARS
+
+
+def test_fixed_frame_keeps_the_short_result_when_both_frames_give_nothing():
+    """long_run needs two input series, so its defaults give nothing on any frame: the FRAME_BARS
+    result comes back unchanged, as before the fallback (its grandfathered columns stay put)."""
+    out = gl.default_output("long_run")
+    assert list(out.columns) == list(gl.ohlcv().columns)
+    assert len(out) == gl.FRAME_BARS
