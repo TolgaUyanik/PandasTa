@@ -1,8 +1,8 @@
 # a101_048 — measured (issue #41)
 
-> **Status: Gates A-D cleared this session.** Gate E: pending, run by issue-solver
-> after this session. Gate F (both repos' suites) is run by the launcher in clean
-> worktrees; `python -m pytest -q` in this worktree is reported below for the record.
+> **Status: Gates A-E cleared, SHIP.** Gate F (both repos' suites) is run by the
+> launcher in clean worktrees; `python -m pytest -q` in this worktree is reported
+> below for the record.
 
 Autocorrelation-scaled return: Kakushadze's (2016, Wilmott, "101 Formulaic Alphas")
 Alpha101 `#48`, without its cross-sectional `IndNeutralize` wrapper (this fork has no
@@ -52,7 +52,7 @@ derivation above rests on the published operator definitions and the issue's own
 | B Causality | pass | Future-perturbation sweep, 30 offsets past the 252-bar warm-up: real module **0 of 30** leaks. One look-ahead mutant (`importlib` source read, the autocorrelation's lag term shifted from `d.shift(1)` to `d.shift(-1)` — a 1-bar read into the future — `exec`'d in memory) is shown live (differs from the real module), then caught at **30 of 30** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic geometric walk (seed 11, σ=1.5%/bar), shipped default (`length=250`): **1,249 of 1,500** bars non-NaN (83.27%) — exactly `n - 251`, i.e. only the combined 251-bar warm-up (the length-250 rolling window plus the 1-bar lag inside the correlation) is excluded, no wider gap. 1,249 distinct values among the 1,249 (every fired bar distinct). Range [-0.090597, 0.055777], median 0.000102 |
 | D Scale-free | pass | x8/x64: **bit-identical, 0.0 max\|diff\|** (every term is a ratio of identically-scaled prices, or a correlation coefficient, which is scale-invariant by definition). x10/x3.7: max\|diff\| 5.53e-16 / 6.41e-16 — both well under the 1e-9 tolerance the test asserts, with matching NaN masks. `0 < 1,249 fires < 1,500` and 1,249 distinct values rule out a constant column |
-| E Attribution | pending, run by issue-solver after this session | — |
+| E Attribution | pass, SHIP | `A101_048_250` max\|ρ\| **0.18508758245795856** vs `log_return` (`compute_all`, n=376,510); per-frame max median \|ρ\| **0.22218441969553263** (against `Ret_1d_pct`, 89 frames); 687 comparators (329 `compute_all` + 358 `ml_features` manifest); canary `AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS` bit-equal. Well under the 0.76 SHIP line. Run `is41-a101_048-397b0bdf`, recorded in `docs/gate_e_ledger.csv` 2026-11-08 |
 | F Suites | this repo only; parent repo (`Backtesting`) and Gate E are run by the launcher in clean worktrees | `python -m pytest -q` (this session, pre-ledger-record): **3 failed, 4238 passed, 83 skipped** — the 3 failures are all pre-existing/expected: `test_pine_coverage_csv.py` (known break, untracked `docs/pine/` corpus — see CLAUDE.md "Known breaks"), `test_altrepo_talib_csv.py` (needs the sibling `../AlternativeRepos` checkout), `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (this port's row is owed — a future receipt session records it) |
 
 ## Wiring
@@ -70,13 +70,18 @@ test_the_contract_quotes_the_dictionarys_actual_ml_form_counts` re-derives and p
 the updated `Counter`. `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL` updated to match
 (275 → 276).
 
-## Receipt (pending)
+## Receipt
 
-Gate E has not run yet. A future receipt session records the launcher's run in
-`docs/gate_e_ledger.csv` and fills in this section with the measured verdict, max\|ρ\| and
-comparator, deciding ship vs. revert per CLAUDE.md's bands. The issue's own 2026-10-24
-prototype screen (`a101_048` in `docs/issues/screen/candidates.csv`) measured the
-PROTOTYPE (not this port) at max\|ρ\| 0.1851 vs `log_return` on `compute_all` (n=376,510),
-top-5 per-frame max median 0.2222 → SHIP — stated here as the issue's own prior evidence
-only, not re-asserted as this port's result until the launcher's run on the actual module
-confirms it.
+Launcher's Gate E run `is41-a101_048-397b0bdf` (meta.json): `pandas_ta.momentum.a101_048`,
+89 frames, 398,849 pooled bars, 687 comparators (329 `compute_all` + 358 `ml_features`
+manifest), canary `AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS` bit-equal, `pandas_ta_src_sha1`
+`f1edc2f65760ad994b6cb74eb3d144ef59e1d9a4` matching this tree at record time.
+
+`A101_048_250`: max\|ρ\| **0.18508758245795856** vs `log_return` (`compute_all`, n=376,510);
+per-frame max median \|ρ\| **0.22218441969553263** vs `Ret_1d_pct` (89 frames); verdict
+**SHIP** (schema `r3-perframe-0.90`), both pooled and per-frame-only. 0.1851 is also this
+port's measured max against `Ret_1d_pct` and `percent_return`, matching the issue's own
+2026-10-24 prototype screen (`a101_048` in `docs/issues/screen/candidates.csv`: max\|ρ\|
+0.1851 vs `log_return`, n=376,510, top-5 per-frame max median 0.2222 → SHIP) — confirmed
+on the actual module, not just the prototype. Recorded in `docs/gate_e_ledger.csv`,
+measured 2026-11-08. **Ship. No columns struck.**
