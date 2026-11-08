@@ -97,7 +97,7 @@ Category = {
 
     # Volume, "vp" or "Volume Profile" is unique
     "volume": [
-        "ad", "adosc", "amihud", "aobv", "avwap_z", "bw_mfi", "cmf", "demand", "efi", "eom", "kvo", "maxvol_adv", "mfi", "nvi", "obv", "osap_voltrend_60", "pocket_pivot", "pvcorr", "pvi", "pvol", "pvr", "pvt", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "vol_sign_rev", "volcv", "vsumd", "weis_wave",
+        "a101_058", "ad", "adosc", "amihud", "aobv", "avwap_z", "bw_mfi", "cmf", "demand", "efi", "eom", "kvo", "maxvol_adv", "mfi", "nvi", "obv", "osap_voltrend_60", "pocket_pivot", "pvcorr", "pvi", "pvol", "pvr", "pvt", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "vol_sign_rev", "volcv", "vsumd", "weis_wave",
         "vzo", 
         # `up_and_down_volume` and `volume_delta` are deliberately NOT here.
         # They REQUIRE a second (lower-timeframe) frame, which `df.ta.strategy()`
