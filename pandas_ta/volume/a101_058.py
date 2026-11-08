@@ -57,8 +57,10 @@ future-perturbation and by a mutant that shifts the final write index
 `.shift()` by `-rank_length` positions). A single-bar lookahead inside the
 correlation step was tried first and rejected as the mutant: `ts_rank`'s
 6-bucket output sometimes absorbs a 1-bar perturbation without changing
-bucket (11/15 offsets caught), a quantisation artefact of the final rank
-step rather than a causality gap -- see the test module's docstring.
+bucket, so it is caught at only 18 of 30 offsets (`python
+docs/measure_a101_058.py`'s `rejected_mutant`), a quantisation artefact of
+the final rank step rather than a causality gap -- see the test module's
+docstring.
 
 SCALE-FREE. `corr` is a correlation coefficient (scale-invariant by
 definition, for both inputs independently); `decay_linear` is a weighted

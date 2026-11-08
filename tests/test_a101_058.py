@@ -17,10 +17,12 @@ What these pin, in order of how much it would hurt to lose:
   -ranked.shift(-rank_length)`, `exec`'d in memory) is proved live, then
   caught at every offset. (A single-bar lookahead inside the correlation
   step was tried first and rejected: `ts_rank`'s 6-bucket output sometimes
-  absorbs a 1-bar perturbation without changing bucket, catching only 11/15
-  offsets -- a quantisation artefact of the final rank step, not a causality
-  gap. Shifting the whole write index by `rank_length` bars widens the
-  affected window enough to be caught every time.)
+  absorbs a 1-bar perturbation without changing bucket, catching only 18 of
+  30 offsets -- re-derivable via `rejected_mutant` in
+  `docs/measure_a101_058.py` -- a quantisation artefact of the final rank
+  step, not a causality gap. Shifting the whole write index by
+  `rank_length` bars widens the affected window enough to be caught every
+  time.)
 * CORRECTNESS: a hand-derived 8-bar example at `corr_length=2,
   decay_length=1, rank_length=2` (a 2-point Pearson correlation is always
   exactly +-1, decided by direction alone, and `decay_length=1` is the

@@ -85,8 +85,24 @@ def main():
         ranked = Series(_ts_rank(decayed.to_numpy(dtype=float), 6), index=decayed.index)
         return -ranked.shift(-6)
 
+    def rejected_mutant(h, l, c, v):
+        # A single-bar lookahead inside the correlation step -- tried FIRST
+        # as the Gate B mutant and rejected because ts_rank's 6-bucket
+        # quantisation absorbs a 1-bar perturbation often enough to not be
+        # caught every time. Kept here, run, not just described, so the
+        # "caught N of M" claim in docs/A101058Measured.md is re-derivable.
+        from pandas_ta.overlap.wma import wma
+        from pandas_ta.utils._pine import correlation as _rolling_pearson
+        from pandas_ta.volume.a101_058 import _ts_rank
+        typical = (h + l + c) / 3
+        corr_series = _rolling_pearson(typical, v, 4).shift(-1)  # 1-bar lookahead
+        decayed = wma(corr_series, length=8, asc=True)
+        ranked = Series(_ts_rank(decayed.to_numpy(dtype=float), 6), index=decayed.index)
+        return -ranked
+
     print(f"real-module leaks: {leaks(a101_058)} of {len(list(offsets))}")
     print(f"mutant leaks: {leaks(mutant)} of {len(list(offsets))}")
+    print(f"rejected single-bar-corr-lookahead mutant leaks: {leaks(rejected_mutant)} of {len(list(offsets))}")
 
 
 if __name__ == "__main__":
