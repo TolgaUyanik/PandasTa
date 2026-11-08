@@ -1,9 +1,8 @@
 # a101_043 — measured (issue #46)
 
-> **Status: Gates A-D cleared. Gate E: pending, run by issue-solver after
-> this session.** Gate F (both repos' suites) is run by the launcher in
-> clean worktrees; `python -m pytest -q` in this worktree is reported below
-> for the record.
+> **Status: Gates A-E cleared, SHIP.** Gate F (both repos' suites) is run by
+> the launcher in clean worktrees; `python -m pytest -q` in this worktree is
+> reported below for the record.
 
 Relative-volume rank x 7-day reversal rank: Kakushadze's (2016, Wilmott, "101
 Formulaic Alphas") Alpha101 `#43`, per issue #46's own instruction. Module
@@ -64,7 +63,7 @@ product of the two ranks.
 | B Causality | pass | Future-perturbation sweep (close and volume both rewritten from `j` onward), 35 offsets past the 38-bar warm-up: real module **0 of 35** leaks (`python docs/measure_a101_043.py`). A weaker mutant was tried first and rejected as a quantisation artefact of `ts_rank`'s bucketed output, not a causality gap: a 1-bar look-ahead on `d7` alone is a real look-ahead (proved live: output differs from the real module) but caught only **25 of 35** -- `ts_rank`'s output absorbs a 1-bar perturbation often enough at this window size to miss it at 10 of the 35 offsets. The mutant actually shipped shifts the whole write index `rev_rank_length=8` bars into the future (`result = (vrank * revrank).shift(-rev_rank_length)`, `importlib` source read, `exec`'d in memory): shown live (differs from the real module), then caught at **35 of 35** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic walk (seed 11, sigma=1.5%/bar close, sigma=1.95%/bar volume), shipped defaults: **1,462 of 1,500** bars non-NaN (97.47%) -- exactly `n - 38`, the `max(adv_length+vol_rank_length-2, delta_length+rev_rank_length-1) = 38`-bar warm-up, no wider gap. **104 distinct values** observed on this walk (not a constant column, and well short of the `20*8=160` cells the two rank grids could in principle populate) |
 | D Scale-free | pass | x8/x64 on EITHER close OR volume independently: **bit-identical, 0.0 max\|diff\|** (`relvol` never reads `close`; `-d7`/`revrank` never read `volume`; `ts_rank` is an order statistic invariant to a positive rescale of its own input). x10/x3.7 on either input: **also 0.0 max\|diff\|**, exact rather than merely within the 1e-9 tolerance the test asserts -- no tie-breaking or floating-point drift flips a rank bucket on this 1,500-bar walk. `0 < 1,462 fires < 1,500` and `104 > 1` distinct values rule out a constant column |
-| E Attribution | pending, run by issue-solver after this session | -- |
+| E Attribution | SHIP | `A101_043_20_20_7_8` max \|rho\| **0.4953** vs `Volume_Ratio_20_Pctl` (manifest, n = 392,768), per-frame max median \|rho\| **0.4823** (89 frames, 0.0% >= 0.90), both well under the 0.76 ship line. Run `is46-a101_043-06e1d63d`, pandas_ta src sha1 `03e99bbc6e1c5930ca65fc1af784b3624dfc3ff3`, 89 ALTPORT-1 frames, 398,849 pooled bars, 329 + 358 = 687 comparators, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). Recorded in `docs/gate_e_ledger.csv` (measured 2026-11-08) |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -84,21 +83,20 @@ re-derives and passes against the updated `Counter`. `tests/test_altport2_ports.
 `CATEGORY_TOTAL` updated to match (278 → 279); `CATEGORY_BUCKETS` is unaffected
 (it tracks only `trend`/`volatility`/`volume`, not `momentum`).
 
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails
-in this worktree until the launcher's Gate E run is recorded -- expected, per
-this session's instructions ("Gate E owed", CLAUDE.md).
+`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` now
+passes: the launcher's Gate E run is recorded in `docs/gate_e_ledger.csv`
+(run `is46-a101_043-06e1d63d`, measured 2026-11-08).
 
 ## Suite run (this repo, this session)
 
-`python -m pytest -q`, full suite, default collection order: **3 failed, 4315
-passed, 83 skipped**. All three failures are expected and unrelated to the
-port's own logic: `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
-(needs the sibling `../AlternativeRepos` checkout, absent in this worktree),
-`test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (CLAUDE.md
-"Known breaks" -- untracked `docs/pine/` corpus), and
-`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (Gate E
-owed for `a101_043`, exactly as this session's rules require). No other test
-regresses; `tests/test_a101_043.py` alone: 19 passed.
+`python -m pytest -q`, full suite, default collection order, re-run after the
+Gate E ledger row landed: **2 failed, 4324 passed, 83 skipped**. Both failures
+are pre-existing and unrelated to the port's own logic (CLAUDE.md "Known
+breaks"): `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
+(needs the sibling `../AlternativeRepos` checkout, absent in this worktree)
+and `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
+(untracked `docs/pine/` corpus). `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+now passes. No other test regresses; `tests/test_a101_043.py` alone: 19 passed.
 
 Note: `tests/test_wiring_accessors.py`'s `strategy()`-exercising tests mutate
 the module-level `Category` lists in place (`core.py`'s `strategy()` calls
@@ -111,6 +109,6 @@ precedes both) avoids it, which is why the full-suite run above is clean.
 
 ## Receipt
 
-Gates A-D clear on the port. Gate E is pending; the launcher runs it after
-this session, and a later receipt session records the measured max |rho| here
-and in `docs/gate_e_ledger.csv`, deciding SHIP vs. a measured revert.
+Gates A-E clear on the port: Gate E max |rho| 0.4953 vs `Volume_Ratio_20_Pctl`,
+well under the 0.76 ship line. SHIP. Recorded in `docs/gate_e_ledger.csv`
+(measured 2026-11-08).
