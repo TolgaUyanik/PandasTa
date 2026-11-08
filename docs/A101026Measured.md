@@ -1,8 +1,7 @@
 # a101_026 — measured (issue #44)
 
-> **Status: Gates A-D cleared, Gate E pending, run by issue-solver after this session.**
-> Gate F (both repos' suites) is run by the launcher in clean worktrees; `python -m pytest
-> -q` in this worktree is reported below for the record.
+> **Status: Gates A-E cleared (SHIP), Gate F run by the launcher in both repos.**
+> `python -m pytest -q` in this worktree is reported below for the record.
 
 Volume-high rank correlation peak: Kakushadze's (2016, Wilmott, "101 Formulaic Alphas")
 Alpha101 `#26`, per issue #44. Module `pandas_ta/volume/a101_026.py`, column
@@ -58,7 +57,7 @@ formula does not need all four OHLCV series).
 | B Causality | pass | Future-perturbation sweep (both high and volume rewritten from `j` onward), 30 offsets past the 10-bar warm-up: real module **0 of 30** leaks (`python docs/measure_a101_026.py`). The repo test module (`tests/test_a101_026.py`) runs the same check over a shorter 15-offset sweep on a 900-bar frame, same result. A single-bar lookahead inside the chain was tried FIRST as the mutant and rejected: the rolling max absorbs a 1-bar forward peek whenever the shifted value isn't the new window maximum, catching only **10 of 30** offsets (measure script, kept and run rather than only described, so the count is re-derivable) -- a smoothing artefact of the max step, not a causality gap. The mutant actually shipped shifts the whole write index `corr_length + max_length = 8` bars into the future (`result = -peak.shift(-8)`, `importlib` source read, `exec`'d in memory): shown live (differs from the real module), then caught at **30 of 30** (measure script) / every offset (test module) |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic walk (seed 11, σ=1.5%/bar close-derived high, σ=1.95%/bar volume), shipped defaults: **1,252 of 1,500** bars non-NaN (83.47%), **792 distinct values** among the fired bars -- comfortably not constant. The 10-bar leading warm-up alone would allow up to 1,490 fires; the other **238** mid-stream NaNs (16.0% of the 1,490 post-warmup bars) are a real property of this formula, not a gap: `corr(ts_rank(volume,5), ts_rank(high,5), 5)` is undefined whenever a trailing 5-bar window of either rank series has zero variance (the rank series only takes 5 possible values, so a flat run of 5 identical ranks is not rare), and `rolling(3).max()` correctly propagates that NaN forward -- see the MID-STREAM NaN note below |
 | D Scale-free | pass | x8/x64 on EITHER `high` OR `volume` independently: **bit-identical, 0.0 max\|diff\|** (`ts_rank` is an order statistic, invariant to any positive monotonic rescale of its input; `corr` of two already-rank series inherits it twice over; `ts_max` and negation preserve it). x10/x3.7 on either input: **also 0.0 max\|diff\|**, exact rather than merely within the 1e-9 tolerance the test asserts -- no floating-point drift anywhere in the chain, matching NaN masks exactly. `0 < 1,252 fires < 1,500` and 792 distinct values rule out a constant column |
-| E Attribution | **pending, run by issue-solver after this session** | Gate E needs the private `Backtesting` engine and the 89-frame BIST cache, neither available in this worktree; `GATE_E_PENDING_OK=1` on CI lets `dev` carry this port with the row owed. The issue's own 2026-10-24 prototype screen measured the PROTOTYPE (not this port) at max\|ρ\| 0.2870 vs `efi_norm` (n=367,263), per-frame max median 0.2706 -- SHIP -- next comparators `cg` 0.2671 and `FWMA_vs_SMA_14_pct_Pctl` 0.2625. Whether this port reproduces those numbers is NOT re-derived here |
+| E Attribution | **SHIP** | Launcher's Gate E run (`is44-a101_026-bbc92714`, 2026-11-08), column `A101_026_5_5_5_3`, 89 ALTPORT-1 BIST frames, 398,849 pooled bars, 687 comparators (329 `compute_all` + 358 manifest): max\|ρ\| **0.2857** vs `efi_norm` (manifest, n=364,068); per-frame max median\|ρ\| **0.2711**, 0.0% of frames ≥ 0.90. Both well under the SHIP line (< 0.76) and the STRUCK/DISCLOSE bands. Canary bit-equal on AKBNK/BIENY/AGHOL/SASA. Matches the issue's 2026-10-24 prototype screen (0.2870 vs `efi_norm`, per-frame max median 0.2706) within measurement noise -- this port reproduces the prototype's numbers. Recorded in `docs/gate_e_ledger.csv` |
 | F Suites | this repo only; parent repo (`Backtesting`) and Gate E are run by the launcher in clean worktrees | `python -m pytest -q` (this session): see Receipt below |
 
 ## MID-STREAM NaN: `corr` of two quantised rank series is sometimes undefined
@@ -96,13 +95,8 @@ updated (33 → 34), since that test pins the exact per-category count.
 
 ## Receipt
 
-Gate E is OWED, not run this session (no `Backtesting` engine access in this worktree per
-the issue-solver rules). `docs/gate_e_ledger.csv` is NOT touched by this commit; the
-ledger row is recorded by a later receipt session once the launcher's Gate E run lands,
-per CLAUDE.md's "Owed, not failed" convention. `tests/test_gate_e_ledger.py::
-test_every_indicator_that_needs_a_row_has_one` is therefore expected to fail in this
-worktree until that happens -- not a regression, the documented owed state.
+Gate E run by the launcher 2026-11-08 (`is44-a101_026-bbc92714`), recorded in
+`docs/gate_e_ledger.csv` by this receipt session. Verdict SHIP: max\|ρ\| 0.2857 vs
+`efi_norm`, well under the 0.76 ship line. The port ships -- no column removed.
 
-`python -m pytest -q` in this worktree (this session, after wiring `a101_026`): see the
-launcher's own run for the authoritative number; this port added 17 passing tests and
-touched no other test's expectations beyond the count updates listed under Wiring above.
+`python -m pytest -q` in this worktree (this session): see below.
