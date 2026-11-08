@@ -50,7 +50,7 @@ Category = {
     ],
     # Momentum
     "momentum": [
-        "a101_021", "a101_023", "a101_043", "a101_046", "a101_048", "a101_053", "ao", "apo", "bias", "bop", "brar", "cci", "cdvo", "cfo", "cg", "cmo",
+        "a101_007", "a101_021", "a101_023", "a101_043", "a101_046", "a101_048", "a101_053", "ao", "apo", "bias", "bop", "brar", "cci", "cdvo", "cfo", "cg", "cmo",
         "coppock", "crsi", "cti", "dm", "er", "eri", "ewmac", "fisher", "gapm", "imi", "inertia", "kalman_rsi", "kdj", "kst", "lrsi", "macd", "macd_area_divergence",
         "mom", "osap_intmom", "osap_lrrev", "osap_mrrev", "ovn_split", "pfe", "pgo", "po", "ppo", "pressure_pulse", "psl", "pvo", "qqe", "roc", "rsi", "rsi_divergence", "rsx", "rvgi",
         "slope", "smi", "squeeze", "squeeze_pro", "stc", "stoch", "stochrsi", "td_seq", "trix",
