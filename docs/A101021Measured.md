@@ -1,9 +1,8 @@
 # a101_021 — measured (issue #45)
 
-> **Status: Gates A-D cleared this session. Gate E: pending, run by issue-solver
-> after this session.** Gate F (both repos' suites) is run by the launcher in
-> clean worktrees; `python -m pytest -q` in this worktree is reported below for
-> the record.
+> **Status: Gates A-E cleared, SHIP.** Gate F (both repos' suites) is run by
+> the launcher in clean worktrees; `python -m pytest -q` in this worktree is
+> reported below for the record.
 
 Mean/std band regime with volume tiebreak: Kakushadze's (2016, Wilmott, "101
 Formulaic Alphas") Alpha101 `#21`, per issue #45's own instruction. Module
@@ -65,8 +64,8 @@ the comparisons/ternary structure is read directly off the formula string.
 | B Causality | pass | Future-perturbation sweep (close and volume both rewritten from `j` onward), 35 offsets past the 20-bar warm-up: real module **0 of 35** leaks (`python docs/measure_a101_021.py`). Two weaker mutants were tried first and rejected as quantisation artefacts of the discretised `{-1, 1}` output, not causality gaps: a 1-bar look-ahead on `s8` alone caught only **8 of 35**, and shifting the whole write index by `length=8` bars caught **32 of 35** -- in both cases the regime decision at most offsets sits far enough from its own decision boundary that a small perturbation does not flip the sign, so a real leak goes undetected. The mutant actually shipped shifts the whole write index `adv_length=20` bars into the future (`result = result.where(mask).shift(-adv_length)`, `importlib` source read, `exec`'d in memory): shown live (differs from the real module), then caught at **35 of 35** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic walk (seed 11, σ=1.5%/bar close, σ=1.95%/bar volume), shipped defaults: **1,481 of 1,500** bars non-NaN (98.73%) -- exactly `n - 19`, the `max(length, fast_length, adv_length) - 1 = 19`-bar warm-up, no wider gap. Exactly **2 distinct values**, by construction (`-1.0`: 718 bars, `1.0`: 763 bars) -- both regimes fire, not a constant column |
 | D Scale-free | pass | x8/x64 on EITHER close OR volume independently: **bit-identical, 0.0 max\|diff\|** (every comparison in the formula is between two terms scaled identically by a positive rescale of the one input it reads). x10/x3.7 on either input: **also 0.0 max\|diff\|**, exact rather than merely within the 1e-9 tolerance the test asserts -- no floating-point drift anywhere in the chain flips a branch on this 1,500-bar walk. `0 < 1,481 fires < 1,500` and both `{-1.0, 1.0}` present rule out a constant column |
-| E Attribution | **pending, run by issue-solver after this session** | — |
-| F Suites | this repo only; parent repo (`Backtesting`) and Gate E are run by the launcher in clean worktrees | `python -m pytest -q` (this session): **3 failed, 4289 passed, 83 skipped** -- all three failures pre-existing/expected and unrelated to this port: `test_pine_coverage_csv.py` (known break, untracked `docs/pine/` corpus -- see CLAUDE.md "Known breaks"), `test_altrepo_talib_csv.py` (needs the sibling `../AlternativeRepos` checkout), `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (Gate E owed for this port, expected until the launcher's run is recorded) |
+| E Attribution | **SHIP** | `A101_021_8_2_20`: max\|ρ\| **0.4188** vs `eri_BEARP_13_pct` (manifest, n = 397,148); per-frame max median \|ρ\| **0.4186** (89 frames, 0.0% ≥ 0.90), same comparator; pooled max against `compute_all` 0.4126 vs `kdj_J_9_3`. 687 comparators (329 `compute_all` + 358 manifest), 398,849 pooled bars, canary (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS) bit-equal. Both well under the 0.76 SHIP line. Run `is45-a101_021-0afb158c`, measured 2026-11-08 by the issue-solver launcher; recorded in `docs/gate_e_ledger.csv` |
+| F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (receipt session, after the ledger row was recorded): **2 failed, 4297 passed, 83 skipped** -- both failures pre-existing/expected and unrelated to this port: `test_pine_coverage_csv.py` (known break, untracked `docs/pine/` corpus -- see CLAUDE.md "Known breaks"), `test_altrepo_talib_csv.py` (needs the sibling `../AlternativeRepos` checkout). `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` now passes |
 
 ## Wiring
 
@@ -85,15 +84,13 @@ re-derives and passes against the updated `Counter`. `tests/test_altport2_ports.
 `CATEGORY_TOTAL` updated to match (277 → 278); `CATEGORY_BUCKETS` is unaffected
 (it tracks only `trend`/`volatility`/`volume`, not `momentum`).
 
+`docs/gate_e_ledger.csv` now carries the `a101_021:A101_021_8_2_20` row (SHIP,
+run `is45-a101_021-0afb158c`, recorded 2026-11-08), so
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails in this worktree, as expected per CLAUDE.md's "Owed, not failed": no
-ledger row exists yet for `a101_021`. The launcher's `GATE_E_PENDING_OK=1` run
-treats this as a skip, not a failure; a later receipt session records the row
-once Gate E has run.
+passes.
 
 ## Receipt
 
-Gate E has not run yet. This session cleared Gates A-D and the wiring/tests;
-Gate E is run by the launcher after this session, and a later receipt session
-will fill in the measured numbers here and in `docs/gate_e_ledger.csv`,
-deciding ship vs. revert per CLAUDE.md's Gate E bands.
+Gate E ran on the port at HEAD (`is45-a101_021-0afb158c`): max |ρ| 0.4188 vs
+`eri_BEARP_13_pct`, well under the 0.76 SHIP line. All five gates (A-E) clear;
+the column ships. `docs/gate_e_ledger.csv` carries the recorded row.
