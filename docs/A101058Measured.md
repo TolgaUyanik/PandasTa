@@ -1,8 +1,10 @@
 # a101_058 — measured (issue #42)
 
-> **Status: Gates A-D cleared this session.** Gate E: pending, run by issue-solver
-> after this session. Gate F (both repos' suites) is run by the launcher in clean
-> worktrees; `python -m pytest -q` in this worktree is reported below for the record.
+> **Status: Gates A-F cleared. SHIP.** Gate E measured by the launcher 2026-11-08:
+> max|ρ| 0.1913 vs `Dist_to_hma_pct_Pctl` (manifest, n=380,892), per-frame max median
+> 0.1879, verdict SHIP, below the 0.76 ship line. Gate F (both repos' suites) is run by
+> the launcher in clean worktrees; `python -m pytest -q` in this worktree is reported
+> below for the record.
 
 Decayed price-volume correlation rank: Kakushadze's (2016, Wilmott, "101 Formulaic
 Alphas") Alpha101 `#58`, without its cross-sectional `IndNeutralize` wrapper (this fork
@@ -67,8 +69,8 @@ the issue's own `conv` field, not consulted for anything else).
 | B Causality | pass | Future-perturbation sweep (all of high/low/close/volume rewritten from `j` onward), 30 offsets past the 15-bar warm-up: real module **0 of 30** leaks (`python docs/measure_a101_058.py`). The repo test module (`tests/test_a101_058.py`) runs the same check over a shorter 15-offset sweep on a 900-bar frame, same result. A single-bar lookahead inside the correlation step was tried FIRST as the mutant and rejected: `ts_rank`'s 6-bucket output sometimes absorbs a 1-bar perturbation without changing bucket, catching only **18 of 30** offsets (`rejected_mutant` in `docs/measure_a101_058.py`, kept and run rather than only described, so the count is re-derivable) -- a quantisation artefact of the discretised final rank, not a causality gap. The mutant actually shipped shifts the whole write index `rank_length=6` bars into the future (`result = -ranked.shift(-rank_length)`, `importlib` source read, `exec`'d in memory): shown live (differs from the real module), then caught at **30 of 30** (measure script) / every offset (test module) |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic walk (seed 11, σ=1.5%/bar close, σ=1.95%/bar volume), shipped defaults: **1,485 of 1,500** bars non-NaN (99.00%) -- exactly `n - 15`, the `corr_length+decay_length+rank_length-3=15`-bar combined warm-up, no wider gap. Only **6 distinct values** among the 1,485 fired bars: -1.0 (439), -0.833333 (151), -0.666667 (140), -0.5 (155), -0.333333 (154), -0.166667 (446) -- see the CARDINALITY note below, this is a structural property of `ts_rank(d, 6)`, not a defect |
 | D Scale-free | pass | x8/x64 on EITHER high/low/close OR volume independently: **bit-identical, 0.0 max\|diff\|** (`corr` is scale-invariant in either argument by definition; `wma` and `ts_rank` inherit it). x10/x3.7 on either input: **also 0.0 max\|diff\|**, exact rather than merely within the 1e-9 tolerance the test asserts -- no floating-point drift anywhere in the chain. `0 < 1,485 fires < 1,500` and 6 distinct values rule out a constant column |
-| E Attribution | pending, run by issue-solver after this session | — |
-| F Suites | this repo only; parent repo (`Backtesting`) and Gate E are run by the launcher in clean worktrees | `python -m pytest -q` (this session, pre-ledger-record): **3 failed, 4263 passed, 83 skipped** -- the 3 failures are all pre-existing/expected: `test_pine_coverage_csv.py` (known break, untracked `docs/pine/` corpus -- see CLAUDE.md "Known breaks"), `test_altrepo_talib_csv.py` (needs the sibling `../AlternativeRepos` checkout), `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (this port's row is owed -- a future receipt session records it) |
+| E Attribution | **SHIP** | `A101_058_4_8_6` max\|ρ\| **0.1913132690444461** vs `Dist_to_hma_pct_Pctl` (manifest comparator set, n=380,892), per-frame max median \|ρ\| **0.18792664800631778** (89 ALTPORT-1 frames, 0% ≥ 0.90), well under the SHIP line (< 0.76). Against `compute_all` alone: max\|ρ\| 0.1808 vs `cfo` (n=386,727). Run `is42-a101_058-57328af5` (meta.json): 329 + 358 = 687 comparators, canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS, `pandas_ta_src_sha1 16feb2538ae77c87717b1a6f818852b5bc69d6d6`. Recorded in `docs/gate_e_ledger.csv`. Matches the issue's own prototype screen (0.1913 / 0.1879) essentially exactly, despite this port's `ts_rank` tie-handling assumption (disclosed in Gate A) differing from an unconfirmed vnpy convention -- the two implementations agree in practice |
+| F Suites | this repo only; parent repo (`Backtesting`) and Gate E are run by the launcher in clean worktrees | `python -m pytest -q` (this session, post-ledger-record): **2 failed, 4271 passed, 83 skipped** -- both failures pre-existing/expected and unrelated to this port: `test_pine_coverage_csv.py` (known break, untracked `docs/pine/` corpus -- see CLAUDE.md "Known breaks"), `test_altrepo_talib_csv.py` (needs the sibling `../AlternativeRepos` checkout). `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` now passes: this port's row was recorded this session in `docs/gate_e_ledger.csv` |
 
 ## CARDINALITY: `A101_058_4_8_6` can only take 6 distinct values, by construction
 
@@ -99,17 +101,16 @@ re-derives and passes against the updated `Counter`. `tests/test_altport2_ports.
 `CATEGORY_TOTAL` updated to match (276 → 277) and `CATEGORY_BUCKETS["volume"]`
 updated (31 → 32), since that test pins the exact per-category count.
 
-## Receipt (pending)
+## Receipt
 
-Gate E has not run yet. A future receipt session records the launcher's run in
-`docs/gate_e_ledger.csv` and fills in this section with the measured verdict, max|ρ| and
-comparator, deciding ship vs. revert per CLAUDE.md's bands. The issue's own 2026-10-24
-prototype screen (`a101_058` in `docs/issues/screen/candidates.csv`) measured the
-PROTOTYPE (not this port) at max|ρ| 0.1913 vs `Dist_to_hma_pct_Pctl` on the manifest
-(n=380,892), top-5 per-frame max median 0.1879 → SHIP, with the fork-overlap stage-2 max
-at 0.1906 vs `smi:SMIo_5_20_5` -- stated here as the issue's own prior evidence only, not
-re-asserted as this port's result until the launcher's run on the actual module confirms
-it. Note the prototype used Kakushadze's literal `vwap` proxy conversion per the issue's
-`cand` field; this port's `ts_rank` convention (count-of-less-or-equal, disclosed above as
-an assumption) was not part of what the prototype screen measured, since the screen ran
-on `ind_screen.py`'s own implementation, not this module.
+Gate E ran on this port 2026-11-08 (launcher run `is42-a101_058-57328af5`, recorded in
+`docs/gate_e_ledger.csv`): `A101_058_4_8_6` max|ρ| **0.1913** vs `Dist_to_hma_pct_Pctl`
+(manifest, n=380,892), per-frame max median |ρ| **0.1879** across 89 frames, 0% ≥ 0.90 →
+**SHIP**, clear of the 0.76 ship line. The issue's own 2026-10-24 prototype screen
+(`a101_058` in `docs/issues/screen/candidates.csv`) measured the PROTOTYPE (not this
+port) at the same max|ρ| 0.1913 vs `Dist_to_hma_pct_Pctl` and per-frame max median 0.1879
+-- this port's Gate E run reproduces those numbers essentially exactly, despite the
+`ts_rank` tie-handling convention disclosed as an assumption in Gate A (this fork's
+count-of-less-or-equal convention, not independently confirmed against vnpy's actual
+`alpha101.py`). Decision per CLAUDE.md's Gate E bands and the issue's "Done when": shipped
+through Gates A-F, no revert.
