@@ -1,9 +1,10 @@
 # a101_007 — measured (issue #51)
 
-> **Status: Gates A-D cleared on the port.** Gate E: pending, run by
-> issue-solver after this session. Gate F (both repos' suites) is run by the
-> launcher in clean worktrees; `python -m pytest -q` in this worktree is
-> reported below for the record.
+> **Status: Gates A-E cleared on the port -- SHIP (DISCLOSE band).** Gate E
+> max|ρ| 0.7681 vs `vol_at_low_ratio`, under the 0.80 DISCLOSE_GAP line and
+> well under the 0.90 STRUCK line, so the column ships with this disclosure.
+> Gate F (both repos' suites) is run by the launcher in clean worktrees;
+> `python -m pytest -q` in this worktree is reported below for the record.
 
 Volume-gated 7-day move rank: Kakushadze's (2016, Wilmott, "101 Formulaic
 Alphas") Alpha101 `#7`, per issue #51's own instruction. Module
@@ -67,7 +68,7 @@ No other operator needs resolution: `delta(x, d) = x - x.shift(d)` and
 | B Causality | pass | Future-perturbation sweep (close and volume both rewritten from `j` onward), 35 offsets past the 66-bar warm-up: real module **0 of 35** leaks (`python docs/measure_a101_007.py`). A weaker mutant was tried first and rejected as a quantisation artefact, not a causality gap: a 1-bar look-ahead on `d7` alone is a real look-ahead (proved live: output differs from the real module) but caught only **17 of 35** -- `ts_rank`'s bucketed output and the flat `-1` fallback branch both absorb a 1-bar perturbation often enough to miss it at 18 of the 35 offsets. The mutant actually shipped shifts the whole write index `ts_rank_length=60` bars into the future (`result = result.where(mask).shift(-ts_rank_length)`, `importlib` source read, `exec`'d in memory): shown live (differs from the real module), then caught at **35 of 35** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic walk (seed 11, sigma=1.5%/bar close, sigma=1.95%/bar volume), shipped defaults: **1,434 of 1,500** bars non-NaN (95.60%) -- exactly `n - 66`, the `max(adv_length, delta_length+ts_rank_length) - 1 = 66`-bar warm-up, no wider gap. **120 distinct values** observed on this walk (not a constant column), range `[-1.0, 1.0]`, median `-0.983333` (the flat `-1` fallback branch dominates on this walk) |
 | D Scale-free | pass | x8/x64 on EITHER close OR volume independently: **bit-identical, 0.0 max\|diff\|** (`tsrank`/`sign` never read `volume`; the `volume > adv` gate never reads `close`; `ts_rank` is an order statistic invariant to a positive rescale of its own input, and the strict inequality `volume > adv` keeps its truth value under a positive common rescale of both sides). x10/x3.7 on either input: **also 0.0 max\|diff\|**, exact rather than merely within the 1e-9 tolerance the test asserts -- no tie-breaking or floating-point drift flips a rank bucket or a gate decision on this 1,500-bar walk. `0 < 1,434 fires < 1,500` and `120 > 1` distinct values rule out a constant column |
-| E Attribution | pending, run by issue-solver after this session | `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.momentum.a101_007 --name a101_007`, to be recorded in `docs/gate_e_ledger.csv` |
+| E Attribution | **DISCLOSE (ships)** | Launcher's Gate E run (`is51-a101_007-ba8c9803`, 2026-11-09), column `A101_007_20_7_60`, 89 ALTPORT-1 BIST frames, 392,975 pooled bars, 687 comparators (329 `compute_all` + 358 manifest): max\|ρ\| **0.7681** vs `vol_at_low_ratio` (compute_all, n=392,975); per-frame max median\|ρ\| **0.7635**, 0.0% of frames ≥ 0.90. Pooled max also checked against the manifest set alone: 0.7681 vs `Volume_Ratio_20` (n=392,965). Canary bit-equal on AKBNK/BIENY/AGHOL/SASA. In the 0.76-0.80 DISCLOSE band per CLAUDE.md's Gate E table -- ships with this disclosure, not STRUCK (pooled and per-frame-median both well under 0.90). Matches the issue's 2026-10-24 prototype screen (max\|ρ\| 0.7686 vs `VOL_RATIO`/`Volume_Ratio_20`/`vol_at_low_ratio`, per-frame max median 0.7626) within measurement noise. Recorded in `docs/gate_e_ledger.csv` |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -94,12 +95,14 @@ records the row once the launcher's run lands.
 
 ## Suite run (this repo, this session)
 
-`python -m pytest -q`, full suite, default collection order: **3 failed, 4482
-passed, 83 skipped**. One failure is the expected, owed Gate E ledger row
-(`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-closed by a later receipt session). The other two are pre-existing and
-unrelated to this port (CLAUDE.md "Known breaks"):
-`test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
+`python -m pytest -q`, full suite, default collection order: **3 failed, 4489
+passed, 83 skipped**. `a101_007`'s own Gate E ledger row is now recorded
+(above), so its ledger test passes; the three failures are unrelated to this
+port (CLAUDE.md "Known breaks" plus one pre-existing owed row for a
+different, already-merged indicator):
+`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (owed
+for `mtd_ret`, unrelated to this issue -- merged separately, pre-dates this
+session), `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
 (needs the sibling `../AlternativeRepos` checkout, absent in this worktree)
 and `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
 (untracked `docs/pine/` corpus). No other test regresses;
@@ -107,7 +110,7 @@ and `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
 
 ## Receipt
 
-Gates A-D clear on the port. Gate E is owed: the launcher runs
-`gate_e_overlap.py` after this session, and a later receipt session records
-the measured max |rho| and the gate_e_ledger.csv row here, deciding SHIP vs.
-revert.
+Gate E run by the launcher 2026-11-09 (`is51-a101_007-ba8c9803`), recorded in
+`docs/gate_e_ledger.csv` by this receipt session. Verdict DISCLOSE: max\|ρ\|
+0.7681 vs `vol_at_low_ratio`, in the 0.76-0.80 band, under the 0.90 STRUCK
+line. The port ships -- no column removed.
