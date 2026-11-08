@@ -9,7 +9,7 @@
 Alphas") Alpha101 `#46`, per issue #49's own instruction -- the "core"
 sub-expression shared with `#49`/`#51`. Module
 `pandas_ta/momentum/a101_046.py`, column `A101_046_10`. Tests:
-`tests/test_a101_046.py` (14, all passing). Numbers below: `python
+`tests/test_a101_046.py` (12, all passing). Numbers below: `python
 docs/measure_a101_046.py`. Environment: this worktree's pinned
 pandas/numpy. Measured 2026-11-08.
 
@@ -75,7 +75,7 @@ measured numbers above and records the ledger row.
 ## Suite run (this repo, this session)
 
 `python -m pytest -q`, full suite, default collection order: **3 failed,
-4380 passed, 83 skipped**. `tests/test_a101_046.py` alone: 14 passed.
+4380 passed, 83 skipped**. `tests/test_a101_046.py` alone: 12 passed.
 
 Three failures, all pre-existing/expected and unrelated to this port's own
 logic: `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
