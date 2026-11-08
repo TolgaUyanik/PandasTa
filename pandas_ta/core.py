@@ -942,6 +942,48 @@ class AnalysisIndicators(BasePandasObject):
         return self._post_process(result, **kwargs)
 
     # Momentum
+    def a101_021(self, length=None, fast_length=None, adv_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = a101_021(close=close, volume=volume, length=length,
+                           fast_length=fast_length, adv_length=adv_length,
+                           offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def a101_023(self, length=None, delta_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = a101_023(high=high, close=close, length=length,
+                           delta_length=delta_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def a101_043(self, adv_length=None, vol_rank_length=None, delta_length=None,
+                 rev_rank_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = a101_043(close=close, volume=volume, adv_length=adv_length,
+                           vol_rank_length=vol_rank_length, delta_length=delta_length,
+                           rev_rank_length=rev_rank_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def a101_046(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = a101_046(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def a101_048(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = a101_048(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def a101_053(self, length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = a101_053(high=high, low=low, close=close, length=length,
+                           offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def ao(self, fast=None, slow=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
@@ -1112,6 +1154,11 @@ class AnalysisIndicators(BasePandasObject):
     def osap_intmom(self, near_length=None, far_length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = osap_intmom(close=close, near_length=near_length, far_length=far_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def osap_lrrev(self, near_length=None, far_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = osap_lrrev(close=close, near_length=near_length, far_length=far_length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def osap_mrrev(self, near_length=None, far_length=None, offset=None, **kwargs):
@@ -2619,6 +2666,26 @@ class AnalysisIndicators(BasePandasObject):
         return self._post_process(result, **kwargs)
 
     # Volume
+    def a101_035(self, vol_length=None, price_length=None, return_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = a101_035(high=high, low=low, close=close, volume=volume,
+                           vol_length=vol_length, price_length=price_length,
+                           return_length=return_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def a101_058(self, corr_length=None, decay_length=None, rank_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = a101_058(high=high, low=low, close=close, volume=volume,
+                           corr_length=corr_length, decay_length=decay_length,
+                           rank_length=rank_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def ad(self, open_=None, signed=True, offset=None, **kwargs):
         if open_ is not None:
             open_ = self._get_column(kwargs.pop("open", "open"))
@@ -2809,6 +2876,12 @@ class AnalysisIndicators(BasePandasObject):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = vol_delta(open_=open_, high=high, low=low, close=close, volume=volume, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def vol_sign_rev(self, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = vol_sign_rev(close=close, volume=volume, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def volcv(self, length=None, offset=None, **kwargs):
