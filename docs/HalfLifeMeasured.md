@@ -5,8 +5,9 @@
 > Gate E and Gate C's real-data counts need the private Backtesting engine and the BIST cache,
 > which the author's machine does not have. Until a Gate E run is recorded in
 > `docs/gate_e_ledger.csv`, `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-> fails on this branch. On `dev` it already fails for `mtd_ret` (#206); this branch adds
-> `halflife` to the same message (see Gate F). Merging is the owner's call.
+> owes a row for `halflife`: a **skip** in CI (`ci.yml` sets `GATE_E_PENDING_OK=1` on PRs into
+> `dev`; PR #256's CI run is green), a failure without that variable. `mtd_ret` (#206) is owed
+> on `dev` the same way (see Gate F). Merging is the owner's call.
 
 `HLIFE_100` is the Ornstein-Uhlenbeck mean-reversion half-life in bars: over the last 100
 one-bar pairs, regress `dP_t = close_t - close_{t-1}` on `P_{t-1} = close_{t-1}` with an
@@ -116,6 +117,11 @@ Run with CI's two `--deselect`s:
 * this branch: 1 failed, 4465 passed, 83 skipped. The +28 passes are the 27 tests of
   `tests/test_halflife.py` and `test_every_new_indicator_has_gate_b_and_d_tests[halflife]`. The
   failure is the same test, now for `['halflife', 'mtd_ret']`.
+* this branch with `GATE_E_PENDING_OK=1`, as CI runs it: 0 failed, 4465 passed, 84 skipped (the
+  owed ledger row is the extra skip). CI itself (run on `7c4896e`, numpy 1.26.4, no statsmodels):
+  4463 passed, 86 skipped. CI prints no skip reasons; the 2 passes fewer and 2 skips more are
+  consistent with `kpss`'s two statsmodels oracle tests, which `importorskip` and CI does not
+  install. That is an inference, not a measurement.
 
 ## Dictionary row provenance
 
