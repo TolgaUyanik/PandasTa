@@ -950,6 +950,15 @@ class AnalysisIndicators(BasePandasObject):
                            offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def a101_043(self, adv_length=None, vol_rank_length=None, delta_length=None,
+                 rev_rank_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = a101_043(close=close, volume=volume, adv_length=adv_length,
+                           vol_rank_length=vol_rank_length, delta_length=delta_length,
+                           rev_rank_length=rev_rank_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def a101_048(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = a101_048(close=close, length=length, offset=offset, **kwargs)
