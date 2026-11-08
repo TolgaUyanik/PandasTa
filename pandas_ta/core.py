@@ -1786,6 +1786,11 @@ class AnalysisIndicators(BasePandasObject):
         result = ffd(close=close, d=d, threshold=threshold, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def halflife(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = halflife(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def kpss(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = kpss(close=close, length=length, offset=offset, **kwargs)
