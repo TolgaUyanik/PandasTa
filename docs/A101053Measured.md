@@ -1,7 +1,6 @@
 # a101_053 — measured (issue #48)
 
-> **Status: Gates A-D cleared on the port. Gate E pending, run by
-> issue-solver after this session.** Gate F (both repos' suites) is run by
+> **Status: Gates A-E cleared. SHIP.** Gate F (both repos' suites) is run by
 > the launcher in clean worktrees; `python -m pytest -q` in this worktree is
 > reported below for the record.
 
@@ -44,7 +43,7 @@ signed infinity from the zero denominator is replaced with `NaN`.
 | B Causality | pass | Future-perturbation sweep (high, low and close all rewritten from `j` onward), 37 offsets past the 9-bar warm-up: real module **0 of 37** leaks (`python docs/measure_a101_053.py`). The shipped mutant shifts the whole write index 30 bars into the future (`result = (-d9).shift(-30)`, `importlib` source read, `exec`'d in memory): shown live (differs from the real module), then caught at **37 of 37** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic walk (seed 11, sigma=1.5%/bar on close, high/low built as `close * (1 +- abs(normal(0, sigma*0.5)))`), shipped default (`length=9`): **1,491 of 1,500** bars non-NaN (99.40%) -- exactly `n - 9`, the `length`-bar warm-up, no wider gap from the zero-denominator case on this particular walk. **1,491 distinct values** observed (not a constant column) |
 | D Scale-free | pass | A joint high/low/close price rescale x8/x64: **bit-identical, 0.0 max\|diff\|** (`clr`'s numerator and denominator are both linear in `close, high, low`, so the ratio itself -- not merely a linearly-rescaled version of it -- is unchanged by a positive rescale; a difference of two unchanged quantities is unchanged too). x10/x3.7: max\|diff\| **1.19e-7** / **6.98e-8** -- NOT bit-identical and bigger than the 1e-9 other `a101_0*` ports' ratios hold to, because this ratio's own denominator (`close - low`) is a difference that comes arbitrarily close to zero (measured min \|close-low\| on this walk: 7.4e-5), so rescale-then-divide loses more bits there than a ratio with a clean price-level denominator (`a101_023`'s plain `close`). This is catastrophic cancellation, not a scale leak in the algebra -- the test's tolerance is loosened to 1e-6 to match what is actually measured, not invented. `0 < 1,491 fires < 1,500` and `1,491 > 1` distinct values rule out a constant column |
-| E Attribution | pending, run by issue-solver after this session | -- |
+| E Attribution | **SHIP** | `A101_053_9` max \|ρ\| **0.6131** vs `CLV_Pctl` (manifest comparator set, n=311,906); per-frame max median \|ρ\| **0.6188** vs `CLV_Pctl`, 0.0% of 89 frames ≥ 0.90. Pooled compute_all-only max \|ρ\| 0.5221 vs `VOL_DELTA` (n=315,627). 687 comparators (329 compute_all + 358 manifest), 89 ALTPORT-1 frames, 398,849 pooled bars, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). Run `is48-a101_053-d596ef28`, recorded 2026-11-08 in `docs/gate_e_ledger.csv`. Well under the 0.76 SHIP line -- column kept. |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -66,31 +65,26 @@ re-derives and passes against the updated `Counter`. `tests/test_altport2_ports.
 (it tracks only `trend`/`volatility`/`volume`, not `momentum`).
 
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails until the launcher's Gate E run is recorded in
-`docs/gate_e_ledger.csv` -- expected, per CLAUDE.md "Owed, not failed": the
-indicator is wired into `Category` as usual rather than held out, and the
-receipt session records the row once the run exists.
+cleared once this session recorded the launcher's Gate E run (`is48-a101_053-d596ef28`)
+into `docs/gate_e_ledger.csv`.
 
-## Suite run (this repo, this session)
+## Suite run (this repo, this session, after recording the Gate E row)
 
-`python -m pytest -q`, full suite, default collection order: **3 failed,
-4360 passed, 83 skipped**. `tests/test_a101_053.py` alone: 14 passed.
+`python -m pytest -q`, full suite, default collection order: **2 failed,
+4368 passed, 83 skipped**. `tests/test_a101_053.py` alone: 14 passed.
 
-Of the 3 failures, 2 are pre-existing and unrelated to this port (CLAUDE.md
-"Known breaks"): `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
+Both failures are pre-existing and unrelated to this port (CLAUDE.md "Known
+breaks"): `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
 (needs the sibling `../AlternativeRepos` checkout, absent in this worktree)
 and `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
-(untracked `docs/pine/` corpus). The third,
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-is the expected "Gate E owed" failure described above -- it clears once the
-launcher's run is recorded.
+(untracked `docs/pine/` corpus).
+`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+now passes -- the ledger row is recorded.
 
 ## Receipt
 
-Gates A-D clear on the port (hand-derived correctness including the
+Gates A-E clear on the port (hand-derived correctness including the
 zero-denominator case, 0/37 causality leaks with the mutant caught at
 37/37, bit-identical x8/x64 scale invariance and a disclosed,
-measured -- not invented -- 1e-6 tolerance at x10/x3.7). Gate E is pending;
-this file is the receipt either way per the issue's own "Done when": a
-later session fills in the measured max \|rho\| and either confirms SHIP or
-records a measured revert.
+measured -- not invented -- 1e-6 tolerance at x10/x3.7, Gate E max \|ρ\|
+0.6131 vs `CLV_Pctl` -- well under the 0.76 SHIP line). SHIP; column kept.
