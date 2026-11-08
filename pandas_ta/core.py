@@ -1097,6 +1097,14 @@ class AnalysisIndicators(BasePandasObject):
         result = fisher(high=high, low=low, length=length, signal=signal, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def g191_146(self, smooth1_length=None, smooth1_weight=None, mean_length=None,
+                 smooth2_length=None, smooth2_weight=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_146(close=close, smooth1_length=smooth1_length, smooth1_weight=smooth1_weight,
+                           mean_length=mean_length, smooth2_length=smooth2_length,
+                           smooth2_weight=smooth2_weight, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def gapm(self, length=None, signal=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         close = self._get_column(kwargs.pop("close", "close"))
