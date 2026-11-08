@@ -1,9 +1,9 @@
 # a101_035 — measured (issue #50)
 
-> **Status: Gates A-D cleared in this session. Gate E: pending, run by issue-solver
-> after this session.** Gate F (both repos' suites) is also run by the launcher in
-> clean worktrees; `python -m pytest -q` in this worktree is reported below for the
-> record.
+> **Status: Gates A-E cleared. SHIP.** Gate E run by the launcher 2026-11-08
+> (`is50-a101_035-2c0e7a0b`), recorded in `docs/gate_e_ledger.csv`. Gate F (both
+> repos' suites) is run by the launcher in clean worktrees; `python -m pytest -q`
+> in this worktree is reported below for the record.
 
 Volume rank x price rank x return rank: Kakushadze's (2016, Wilmott, "101 Formulaic
 Alphas") Alpha101 `#35`, per issue #50. Module `pandas_ta/volume/a101_035.py`, column
@@ -49,7 +49,7 @@ No cross-sectional `IndNeutralize` appears in the issue's stated formula for `#3
 | B Causality | pass | Future-perturbation sweep (all of high/low/close/volume rewritten from `j` onward), 15 offsets past the 32-bar warm-up on a 900-bar frame: real module **0 of 15** leaks (`tests/test_a101_035.py`); the measure script runs the wider 30-offset sweep on a 1,500-bar frame, same result (**0 of 30**, `python docs/measure_a101_035.py`). A 1-bar look-ahead was tried FIRST as the mutant and rejected: caught only **29 of 30** offsets -- `ts_rank`'s integer-count quantisation sometimes absorbs a 1-bar perturbation without changing bucket, a quantisation artefact of the rank steps, not a causality gap. The mutant actually shipped wraps the whole final write (`result = vol_rank * (1 - pr_rank) * (1 - ret_rank)`) in `.shift(-vol_length)` -- a full 32-bar look-ahead (`importlib` source read, `exec`'d in memory): shown live (differs from the real module), then caught at **30 of 30** (measure script) / every offset (test module, 15 of 15) |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic walk (seed 11, σ=1.5%/bar close, σ=1.95%/bar volume), shipped defaults: **1,468 of 1,500** bars non-NaN (97.87%) -- exactly `n - 32`, the `max(vol_length-1, price_length-1, return_length) = 32`-bar combined warm-up (first valid index 32), no wider gap. **674 distinct values** among the 1,468 fired bars, min 0.0, max 0.908203, median 0.038086 -- not degenerate |
 | D Scale-free | pass | x8/x64 on EITHER high/low/close OR volume independently: **bit-identical, 0.0 max\|diff\|** (`ts_rank` is a pure order statistic, invariant to any positive rescale of its input; `returns` cancels the price scale exactly). x10/x3.7 on either input: **also 0.0 max\|diff\|**, measured rather than merely asserted -- these are not powers of two, so exact IEEE754 cancellation in `returns`' division is not a mathematical certainty the way x8/x64 is, but no tie in the tested windows flipped under the ~1e-16-scale rounding this frame produced (see the module docstring's SCALE-FREE paragraph for the caveat that this is an empirical finding on this frame, not a universal guarantee). `0 < 1,468 fires < 1,500` and 674 distinct values rule out a constant column |
-| E Attribution | **pending, run by issue-solver after this session** | not run in this worktree; the issue's own prototype screen (`docs/issues/screen/candidates.csv`) measured max\|ρ\| 0.7140 vs `Dist_to_FWMA_pct` (n=396,001), per-frame max median 0.7093 -> SHIP (< 0.76 ship line) -- that number describes the PROTOTYPE, not this port, and is not treated as this port's result |
+| E Attribution | **SHIP** | Run by the launcher 2026-11-08 (`is50-a101_035-2c0e7a0b`, `pandas_ta.volume.a101_035`, 89 ALTPORT-1 frames, 398,849 bars, 329 + 358 = 687 comparators, canary bit-equal). `A101_035_32_16_32`: max\|ρ\| **0.7146** vs `Dist_to_FWMA_pct` (manifest, n=396,001); per-frame max median **0.7097** vs `Dist_to_FWMA_pct` (89 frames, 0.0% of frames ≥ 0.90); verdict **SHIP** (both pooled and per-frame; < 0.76 ship line, < 0.90 per-frame line). Recorded in `docs/gate_e_ledger.csv`. (The issue's own 2026-10-24 prototype screen measured 0.7140/0.7093 on the PROTOTYPE, not this port -- close but not identical, as expected for an independently re-derived implementation.) |
 | F Suites | this repo only; parent repo (`Backtesting`) and Gate E are run by the launcher in clean worktrees | `python -m pytest -q` (this session): **3 failed, 4405 passed, 83 skipped** -- all three failures pre-existing/expected and unrelated to this port: `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (this port's row is owed, recorded by a later receipt session once the launcher's Gate E run lands), `test_pine_coverage_csv.py` (known break, untracked `docs/pine/` corpus -- see CLAUDE.md "Known breaks"), `test_altrepo_talib_csv.py` (needs the sibling `../AlternativeRepos` checkout) |
 
 ## Wiring
@@ -69,12 +69,10 @@ updated (32 → 33), since that test pins the exact per-category count.
 
 ## Receipt
 
-Gate A-D cleared this session (2026-11-08), all measured above, not merely asserted. Gate
-E has not run: this worktree has no access to the parent repo's Gate E harness by design
-(the launcher runs it separately). This file stands as the receipt for Gates A-D; a later
-receipt session fills in the Gate E numbers once the launcher's run lands, decides
-SHIP/DISCLOSE/STRUCK per CLAUDE.md's bands, and records the row in
-`docs/gate_e_ledger.csv`. The issue's own 2026-10-24 prototype screen measured the
-PROTOTYPE (not this port) at max|ρ| 0.7140 vs `Dist_to_FWMA_pct` -> SHIP; this port's own
-Gate E run is the number that will actually decide ship vs. revert, per CLAUDE.md's "Owed,
-not failed" policy.
+Gates A-E cleared, all measured above, not merely asserted. Gate A-D measured 2026-11-08
+in this worktree; Gate E measured 2026-11-08 by the launcher
+(`is50-a101_035-2c0e7a0b`), max|ρ| 0.7146 vs `Dist_to_FWMA_pct`, per-frame max median
+0.7097 -> **SHIP**, below both the 0.76 pooled and 0.90 per-frame lines, recorded in
+`docs/gate_e_ledger.csv`. Gate F: this repo's suite green modulo the three pre-existing,
+unrelated failures noted above; both repos' clean-worktree suites are run by the
+launcher. Port ships as-is -- no column removed.
