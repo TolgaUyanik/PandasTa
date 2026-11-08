@@ -2623,6 +2623,16 @@ class AnalysisIndicators(BasePandasObject):
         return self._post_process(result, **kwargs)
 
     # Volume
+    def a101_058(self, corr_length=None, decay_length=None, rank_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = a101_058(high=high, low=low, close=close, volume=volume,
+                           corr_length=corr_length, decay_length=decay_length,
+                           rank_length=rank_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def ad(self, open_=None, signed=True, offset=None, **kwargs):
         if open_ is not None:
             open_ = self._get_column(kwargs.pop("open", "open"))
