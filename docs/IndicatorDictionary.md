@@ -26,7 +26,7 @@ window per ticker before concatenating tickers.
 `*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is
 invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
-**281 indicators** probed; 1 raise on this environment (pandas 2.x) -- see [Known breaks](#known-breaks).
+**282 indicators** probed; 1 raise on this environment (pandas 2.x) -- see [Known breaks](#known-breaks).
 
 ### How many indicators is that, exactly
 
@@ -34,8 +34,8 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | surface | n | what it means |
 |---|---|---|
-| registered in `Category` | **279** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **287** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| registered in `Category` | **280** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **288** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
@@ -64,11 +64,12 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `ht_sine` | C | — | `HT_SINE` SF<br>`HT_LEADSINE` SF | 63 | `sin(DCPhase)` and `sin(DCPhase + 45 degrees)`. Ehlers' reading is that the two lines cross ahead of a cyclic turn and wander without crossing while… |
 | `ht_trendmode` | C | — | `HT_TRENDMODE` BIN | 63 | 1 when the market is judged to be trending, 0 when it is judged to be cycling. Four tests, in TA-Lib's order: a SineWave crossing resets the trend… |
 
-## momentum (67)
+## momentum (68)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
 | `a101_021` | C/V | `length=None`, `fast_length=None`, `adv_length=None` | `A101_021_8_2_20` BIN | 19 | Kakushadze's (2016, Wilmott, "101 Formulaic Alphas") Alpha101 `#21`, per issue #45. A short mean (`mean2`) is tested against a band built from a… |
+| `a101_023` | H/C | `length=None`, `delta_length=None` | `A101_023_20_2` SF | 19 | Kakushadze's (2016, Wilmott, "101 Formulaic Alphas") Alpha101 `#23`, per issue #47. When today's high is above its own 20-bar trailing average, the… |
 | `a101_043` | C/V | `adv_length=None`, `vol_rank_length=None`, `delta_length=None`, `rev_rank_length=None` | `A101_043_20_20_7_8` SF | 38 | Kakushadze's (2016, Wilmott, "101 Formulaic Alphas") Alpha101 `#43`, per issue #46. Today's volume relative to its 20-bar average is time-series… |
 | `a101_048` | C | `length=None` | `A101_048_250` SF | 251 | Kakushadze's (2016, Wilmott, "101 Formulaic Alphas") Alpha#101 `#48`, without its cross-sectional `IndNeutralize` wrapper (this fork has no… |
 | `ao` | H/L | `fast=None`, `slow=None` | `AO_5_34` PX | 33 | The Awesome Oscillator is an indicator used to measure a security's momentum. AO is generally used to affirm trends or to anticipate possible… |
@@ -370,7 +371,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation needed.
 
-`cdl_doji` `cdl_inside` `cdl_z` `correlation_cycle` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `a101_021` `a101_043` `a101_048` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `er` `ewmac` `fisher` `gapm` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `osap_intmom` `osap_mrrev` `ovn_split` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `kalman_trend` `ma_disparity` `log_return` `max_return` `percent_return` `seas` `trend_return` `covariance` `cusum` `entlz` `entropy` `ffd` `ie_asym` `kpss` `kurtosis` `median_ad_hl2` `normalize` `osap_retskew_21` `rank` `skew` `tf_centroid_20` `trend_scan` `zscore` `adx` `adxr` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `dx` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `corwin_schultz` `cvi` `garman_klass` `har_park` `massi` `natr` `range_compress_run` `range_profile` `rogers_satchell` `roll_spread` `rvi` `tf_median_absdiff_20` `ui` `volvol` `wvma` `yang_zhang` `a101_058` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `demand` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `osap_voltrend_60` `pocket_pivot` `pvcorr` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `vol_sign_rev` `volcv` `vsumd` `vzo`
+`cdl_doji` `cdl_inside` `cdl_z` `correlation_cycle` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `a101_021` `a101_023` `a101_043` `a101_048` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `er` `ewmac` `fisher` `gapm` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `osap_intmom` `osap_mrrev` `ovn_split` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `kalman_trend` `ma_disparity` `log_return` `max_return` `percent_return` `seas` `trend_return` `covariance` `cusum` `entlz` `entropy` `ffd` `ie_asym` `kpss` `kurtosis` `median_ad_hl2` `normalize` `osap_retskew_21` `rank` `skew` `tf_centroid_20` `trend_scan` `zscore` `adx` `adxr` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `dx` `fvg` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `corwin_schultz` `cvi` `garman_klass` `har_park` `massi` `natr` `range_compress_run` `range_profile` `rogers_satchell` `roll_spread` `rvi` `tf_median_absdiff_20` `ui` `volvol` `wvma` `yang_zhang` `a101_058` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `demand` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `osap_voltrend_60` `pocket_pivot` `pvcorr` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `vol_sign_rev` `volcv` `vsumd` `vzo`
 
 ## Never fires on the probe
 
