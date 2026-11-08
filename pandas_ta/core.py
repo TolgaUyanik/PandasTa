@@ -942,6 +942,14 @@ class AnalysisIndicators(BasePandasObject):
         return self._post_process(result, **kwargs)
 
     # Momentum
+    def a101_007(self, adv_length=None, delta_length=None, ts_rank_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = a101_007(close=close, volume=volume, adv_length=adv_length,
+                           delta_length=delta_length, ts_rank_length=ts_rank_length,
+                           offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def a101_021(self, length=None, fast_length=None, adv_length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
