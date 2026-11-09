@@ -1,8 +1,7 @@
 # g191_076 — measured (issue #54)
 
-> **Status: Gates A-D cleared, Gate E pending.** Gate E is run by the
-> launcher in `../Backtesting` after this session; this file's Gate E
-> section is filled in by a later receipt session once that run lands.
+> **Status: shipped. Gates A-F cleared.** Gate E ran 2026-11-09
+> (`is54-g191_076-368f0d38`): max \|ρ\| 0.3802 vs `HWC_LOWER`, SHIP.
 
 Variability of return-per-volume: Guotai Junan's (2017, "GTJA191", internal
 quant report, read via the HKUDS/Vibe-Trading copy, MIT) alpha `#76`, per
@@ -56,7 +55,7 @@ zero-mean window (`MEAN(X, 20) == 0`) would otherwise make the output
 | B Causality | pass | Future-perturbation sweep (both close and volume series rewritten from `j` onward, another synthetic series), 34 offsets past the 20-bar warm-up: real module **0 of 34** leaks (`python docs/measure_g191_076.py`). Two independent mutants (`importlib` source read, `exec`'d in memory), each shown live (differs from the real module) then caught at **34 of 34**: shifting the whole write index `length=20` bars into the future, and computing `STD`/`MEAN` with `center=True` instead of the causal trailing window -- the same look-ahead bug class CLAUDE.md documents for `bos`'s `rolling(..., center=True)` |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic close/volume series (seed 11/23, see `docs/measure_g191_076.py:_cv`), shipped default: **1,480 of 1,500** bars non-NaN (98.67%) -- exactly `n - 20`, the `length = 20`-bar warm-up, no wider gap. **1,480 distinct values** observed on this frame (every fired bar distinct -- not a constant column), range `[0.397496, 2.395784]`, median `0.858053` |
 | D Scale-free | pass | `ret_c` is exactly scale-free under a positive close rescale (`k` cancels inside `C/C1`, so price scale never reaches `x`); `x` scales by `1/k` under a positive volume rescale, and `STD`/`MEAN` are both linear in a positive scalar multiple, so `std_x / mean_x` is exactly invariant algebraically under ANY `k > 0`. Measured on the 1,500-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|**; VOLUME x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754, so the algebraic cancellation is also exact in float64). PRICE x10/x3.7: max\|diff\| **2.22e-14 / 1.82e-14**; VOLUME x10/x3.7: max\|diff\| **8.44e-15 / 1.90e-14** -- float64 rounding from the scalar multiply itself, tighter than `g191_191`'s correlation-based ratio because this chain is two plain divisions, not a Pearson correlation's variance terms -- well under the test's 1e-9 tolerance, not a scale dependency. `0 < 1,480 fires < 1,500` and `1,480 > 1` distinct values rule out a constant column |
-| E Attribution | **pending** | Gate E: pending, run by issue-solver after this session |
+| E Attribution | SHIP | `G191_076_20`: max \|ρ\| **0.3802** vs `HWC_LOWER` (`compute_all`, n = 387,523); per-frame max median **0.3791** vs `HWC_MID`, 89 frames, 0.0% of frames ≥ 0.90 -- SHIP (< 0.76 line). Run `is54-g191_076-368f0d38`, 398,849 pooled bars, 329 + 358 = 687 comparators, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). Recorded in `docs/gate_e_ledger.csv`, measured 2026-11-09 |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
