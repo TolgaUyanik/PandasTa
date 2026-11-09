@@ -1121,6 +1121,14 @@ class AnalysisIndicators(BasePandasObject):
                            smooth2_weight=smooth2_weight, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def g191_187(self, length=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_187(open_=open_, high=high, close=close, length=length,
+                           offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def gapm(self, length=None, signal=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         close = self._get_column(kwargs.pop("close", "close"))
