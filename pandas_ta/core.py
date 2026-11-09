@@ -1829,6 +1829,12 @@ class AnalysisIndicators(BasePandasObject):
         result = g191_165(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def g191_189(self, mean_length=None, mad_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_189(close=close, mean_length=mean_length,
+                           mad_length=mad_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def g191_190(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = g191_190(close=close, length=length, offset=offset, **kwargs)
