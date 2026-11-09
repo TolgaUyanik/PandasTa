@@ -1097,6 +1097,14 @@ class AnalysisIndicators(BasePandasObject):
         result = fisher(high=high, low=low, length=length, signal=signal, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def g191_093(self, length=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_093(open_=open_, low=low, close=close, length=length,
+                           offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def g191_146(self, smooth1_length=None, smooth1_weight=None, mean_length=None,
                  smooth2_length=None, smooth2_weight=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
