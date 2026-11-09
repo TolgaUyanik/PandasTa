@@ -88,11 +88,15 @@ CALCULATION, in the order computed below (`length=20`):
     prior_close  = DELAY(C, 1)
     ret_abs      = |C / prior_close - 1|
     x            = ret_abs / amount, inf -> NaN
-    down         = C < prior_close, NaN where prior_close is NaN (bar 0)
-    sumif        = SUM(x where down else 0, length), NaN where any bar in
-                   the window has undefined down-status
-    count        = SUM(down as 0/1, length), same NaN rule
-    down_avg     = sumif / count, inf -> NaN (no down day in the window)
+    down         = C < prior_close (plain bool; bar 0's status is undefined
+                   but `down` itself stays `False` there -- NaN comparisons
+                   evaluate to `False`, not `NaN`. The exclusion of bar 0
+                   happens downstream, not here: see `contribution` /
+                   `count_contribution` below.)
+    sumif        = SUM(x where down else 0, length), with bar 0 masked to
+                   NaN before the sum (not coerced to a "not a down day" 0)
+    count        = SUM(down as 0/1, length), same bar-0 masking
+    down_avg     = sumif / count, 0/0 -> NaN (no down day in the window)
     all_avg      = MEAN(x, length)
     G191_144     = down_avg / all_avg, inf -> NaN (all_avg == 0)
 
