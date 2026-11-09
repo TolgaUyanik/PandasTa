@@ -12,6 +12,7 @@ from .cmf import cmf
 from .demand import demand
 from .efi import efi
 from .eom import eom
+from .g191_191 import g191_191
 from .kvo import kvo
 from .maxvol_adv import maxvol_adv
 from .mfi import mfi

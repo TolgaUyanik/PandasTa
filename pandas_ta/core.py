@@ -2792,6 +2792,15 @@ class AnalysisIndicators(BasePandasObject):
         result = eom(high=high, low=low, close=close, volume=volume, length=length, divisor=divisor, offset=offset, drift=drift, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def g191_191(self, mean_length=None, corr_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = g191_191(high=high, low=low, close=close, volume=volume, mean_length=mean_length,
+                           corr_length=corr_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def kvo(self, fast=None, slow=None, signal=None, mamode=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
