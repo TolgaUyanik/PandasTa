@@ -4,9 +4,9 @@ Technical analysis indicators as a pandas extension. Fork of
 [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, extended with
 price-action / SMC indicators and oriented toward **machine-learning feature generation**.
 
-**298 indicators** registered in `Category`, across 9 categories — that is the number
+**299 indicators** registered in `Category`, across 9 categories — that is the number
 that matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two other
-counts are true of the same package and are easy to confuse with it: **306** are callable
+counts are true of the same package and are easy to confuse with it: **307** are callable
 as `df.ta.<name>()` (`Category` plus `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`,
 `up_and_down_volume`, `volume_delta` and `vp`), and `drawdown` and `ma` are
 importable as `ta.<name>()` without being either. All of them are in the dictionary; the
@@ -144,7 +144,7 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 
 **cycles (9)** — `correlation_cycle` `dsp` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode`
 
-**momentum (73)** — `a101_007` `a101_021` `a101_023` `a101_043` `a101_046` `a101_048` `a101_053` `ao` `apo` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `dm` `er` `eri` `ewmac` `fisher` `g191_093` `g191_146` `gapm` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `macd` `macd_area_divergence` `mom` `osap_intmom` `osap_lrrev` `osap_mrrev` `ovn_split` `pfe` `pgo` `po` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsi_divergence` `rsx` `rvgi` `slope` `smi` `squeeze` `squeeze_pro` `stc` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `vwmacd` `wavetrend` `willr` `wpo`
+**momentum (74)** — `a101_007` `a101_021` `a101_023` `a101_043` `a101_046` `a101_048` `a101_053` `ao` `apo` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `dm` `er` `eri` `ewmac` `fisher` `g191_002` `g191_093` `g191_146` `gapm` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `macd` `macd_area_divergence` `mom` `osap_intmom` `osap_lrrev` `osap_mrrev` `ovn_split` `pfe` `pgo` `po` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsi_divergence` `rsx` `rvgi` `slope` `smi` `squeeze` `squeeze_pro` `stc` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `vwmacd` `wavetrend` `willr` `wpo`
 
 **overlap (50)** — `alma` `bpress` `dema` `dema2` `ema` `ema2` `ema_align` `frama` `fwma` `hilo` `hl2` `hlc3` `hma` `iama` `ichimoku` `ichimoku_ml` `jma` `kalman_trend` `kama` `linreg` `linreg_channel` `ma_disparity` `mcgd` `midpoint` `midprice` `mmar` `nadaraya_watson_envelope` `ohlc4` `pwma` `rainbow` `rma` `rma2` `sinwma` `sma` `ssf` `supertrend` `supertrend2` `swma` `t3` `t3_tv` `tema` `tema2` `trima` `vidya` `vwap` `vwma` `wcp` `wilder_rma` `wma` `zlma`
 

@@ -172,6 +172,9 @@ accessor block). With `GATE_E_PENDING_OK=1`, as CI runs:
 | `dev` at `830cb97` | 0 failed, 4778 passed, 84 skipped |
 | this branch (merge `f0b208d`) | 0 failed, **4811 passed**, 84 skipped |
 
+A second merge, of `dev` at `cde811b` (one more port, `g191_002`), followed; for that tree the
+local check was the counter, wiring and halflife tests, and the full suite is CI's run on the PR.
+
 The +33 passes are the 32 tests of `tests/test_halflife.py` and
 `test_every_new_indicator_has_gate_b_and_d_tests[halflife]`; the extra skip in both is the owed
 ledger row (`mtd_ret`, #206, on `dev`; `halflife` here), which fails instead without the
@@ -188,14 +191,15 @@ install statsmodels. That is an inference, not a measurement.
 `.venv-pd2/Scripts/python docs/gen_indicator_dictionary.py` (pandas 2.3.3, numpy 2.5.4, TA-Lib
 0.7.1). On 2026-11-08 a same-day run on `dev` (`12891bd`) without this port reproduced the
 committed file exactly (the generator stamps the probe date, so a run on another day differs in
-that line). After merging `dev` at `830cb97` it was regenerated again (2026-11-09). The diff
+that line). After each merge of `dev` (`830cb97`, then `cde811b`) it was regenerated again (2026-11-09). The diff
 against `origin/dev`, enumerated line by line: the `halflife` row (`HLIFE_100` SF, warm-up 100),
-`statistics (29)`, the counts (300 probed, 298 in `Category`, 306 callable), and `halflife` added
+`statistics (29)`, the counts (301 probed, 299 in `Category`, 307 callable), and `halflife` added
 to the *Feed-ready shortlist*. Nothing else. The row's description is cut at 150 characters,
 before any docstring text the review rounds changed.
 
-README: 298 in `Category`, 306 callable, `statistics (29)`. `docs/MLCompanionContract.md` follows
-the dictionary: 643 tagged columns, 286 `SF`.
+README: 299 in `Category`, 307 callable, `statistics (29)`. `docs/MLCompanionContract.md` follows
+the dictionary: 644 tagged columns, 287 `SF`. (These counters follow `dev`: they are as of the
+merge with `dev` at `cde811b`; each later port merged into `dev` moves them by one.)
 
 HLIFE-4 is owed: `docs/indicators/halflife.md` was not generated (`docs/gen_indicator_pages.py`
 reads Gate E runs from `../Backtesting`, absent here), and the parent's
