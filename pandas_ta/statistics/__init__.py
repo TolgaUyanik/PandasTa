@@ -4,6 +4,7 @@ from .entropy import entropy
 from .g191_026 import g191_026
 from .g191_044 import g191_044
 from .g191_165 import g191_165
+from .g191_189 import g191_189
 from .g191_190 import g191_190
 from .ie_asym import ie_asym
 from .kpss import kpss
