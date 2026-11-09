@@ -8,6 +8,7 @@ from .bbands import bbands
 from .corwin_schultz import corwin_schultz
 from .cvi import cvi
 from .donchian import donchian
+from .g191_160 import g191_160
 from .garman_klass import garman_klass
 from .har_park import har_park
 from .hwc import hwc
