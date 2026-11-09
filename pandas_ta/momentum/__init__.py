@@ -24,6 +24,7 @@ from .er import er
 from .eri import eri
 from .ewmac import ewmac
 from .fisher import fisher
+from .g191_002 import g191_002
 from .g191_093 import g191_093
 from .g191_146 import g191_146
 from .gapm import gapm

@@ -26,7 +26,7 @@ window per ticker before concatenating tickers.
 `*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is
 invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
-**299 indicators** probed; 1 raise on this environment (pandas 2.x) -- see [Known breaks](#known-breaks).
+**300 indicators** probed; 1 raise on this environment (pandas 2.x) -- see [Known breaks](#known-breaks).
 
 ### How many indicators is that, exactly
 
@@ -34,8 +34,8 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | surface | n | what it means |
 |---|---|---|
-| registered in `Category` | **297** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **305** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| registered in `Category` | **298** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **306** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
@@ -64,7 +64,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `ht_sine` | C | — | `HT_SINE` SF<br>`HT_LEADSINE` SF | 63 | `sin(DCPhase)` and `sin(DCPhase + 45 degrees)`. Ehlers' reading is that the two lines cross ahead of a cyclic turn and wander without crossing while… |
 | `ht_trendmode` | C | — | `HT_TRENDMODE` BIN | 63 | 1 when the market is judged to be trending, 0 when it is judged to be cycling. Four tests, in TA-Lib's order: a SineWave crossing resets the trend… |
 
-## momentum (73)
+## momentum (74)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -93,6 +93,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `eri` | H/L/C | `length=None` | `BULLP_13` PX<br>`BEARP_13` PX | 12 | Elder's Bulls Ray Index contains his Bull and Bear Powers. Which are useful ways to look at the price and see the strength behind the market. Bull… |
 | `ewmac` | C | `vol_length=None` | `EWMAC_64_256_35` SF | 2 | Carver's volatility-normalised EMA crossover (Carver 2015, *Systematic Trading*, Appendix B *Trading Rules*): the difference of a fast and a slow EMA… |
 | `fisher` | H/L | `length=None`, `signal=None` | `FISHERT_9_1` SF<br>`FISHERTs_9_1` SF | 9 | Attempts to identify significant price reversals by normalizing prices over a user-specified number of periods. A reversal signal is suggested when… |
+| `g191_002` | H/L/C | `length=None` | `G191_002_1` SF | 1 | Guotai Junan's (2017, "GTJA191") alpha `#2`, per issue #63. The close-location value `((close-low)-(high-close))/(high-low)` reads where today's… |
 | `g191_093` | O/L/C | `length=None` | `G191_093_20` SF | 20 | Guotai Junan's (2017, "GTJA191") alpha `#93`, per issue #62. On days the open did not fall from the prior day's open, contributes zero; on days it… |
 | `g191_146` | C | `smooth1_length=None`, `smooth1_weight=None`, `mean_length=None`, `smooth2_length=None`, `smooth2_weight=None` | `G191_146_61_2_20_60_2` SF | 120 | Guotai Junan's (2017, "GTJA191") alpha `#146`, per issue #52. The daily return's deviation from its own slow GTJA-recursive average (the "return… |
 | `gapm` | O/C | `length=40`, `signal=20` | `GAPM_40_20` SF | 59 | The ratio of the sum of up gaps to the sum of down gaps over `length` bars, smoothed by an EMA of span `signal`. A gap is today's open minus… |
@@ -388,7 +389,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation needed.
 
-`cdl_doji` `cdl_inside` `cdl_z` `correlation_cycle` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `a101_007` `a101_021` `a101_023` `a101_043` `a101_046` `a101_048` `a101_053` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `er` `ewmac` `fisher` `g191_093` `g191_146` `gapm` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `osap_intmom` `osap_mrrev` `ovn_split` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `kalman_trend` `ma_disparity` `log_return` `max_return` `mtd_ret` `percent_return` `seas` `trend_return` `covariance` `cusum` `entlz` `entropy` `ffd` `g191_026` `g191_044` `g191_165` `g191_189` `g191_190` `ie_asym` `kpss` `kurtosis` `median_ad_hl2` `normalize` `osap_retskew_21` `rank` `skew` `tf_centroid_20` `trend_scan` `zscore` `adx` `adxr` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `dx` `fvg` `g191_098` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `corwin_schultz` `cvi` `garman_klass` `har_park` `massi` `natr` `range_compress_run` `range_profile` `rogers_satchell` `roll_spread` `rvi` `tf_median_absdiff_20` `ui` `volvol` `wvma` `yang_zhang` `a101_026` `a101_035` `a101_058` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `demand` `g191_076` `g191_144` `g191_191` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `osap_voltrend_60` `pocket_pivot` `pvcorr` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `vol_sign_rev` `volcv` `vsumd` `vzo`
+`cdl_doji` `cdl_inside` `cdl_z` `correlation_cycle` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `a101_007` `a101_021` `a101_023` `a101_043` `a101_046` `a101_048` `a101_053` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `er` `ewmac` `fisher` `g191_002` `g191_093` `g191_146` `gapm` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `osap_intmom` `osap_mrrev` `ovn_split` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `kalman_trend` `ma_disparity` `log_return` `max_return` `mtd_ret` `percent_return` `seas` `trend_return` `covariance` `cusum` `entlz` `entropy` `ffd` `g191_026` `g191_044` `g191_165` `g191_189` `g191_190` `ie_asym` `kpss` `kurtosis` `median_ad_hl2` `normalize` `osap_retskew_21` `rank` `skew` `tf_centroid_20` `trend_scan` `zscore` `adx` `adxr` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `dx` `fvg` `g191_098` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `corwin_schultz` `cvi` `garman_klass` `har_park` `massi` `natr` `range_compress_run` `range_profile` `rogers_satchell` `roll_spread` `rvi` `tf_median_absdiff_20` `ui` `volvol` `wvma` `yang_zhang` `a101_026` `a101_035` `a101_058` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `demand` `g191_076` `g191_144` `g191_191` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `osap_voltrend_60` `pocket_pivot` `pvcorr` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `vol_sign_rev` `volcv` `vsumd` `vzo`
 
 ## Never fires on the probe
 
