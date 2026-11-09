@@ -1,6 +1,6 @@
 # g191_167 — measured (issue #68)
 
-> **Status: Gates A-D cleared. Gate E pending, run by issue-solver after this session.
+> **Status: Gates A-E cleared, SHIP. Ledger row recorded 2026-11-10.
 > This repo's suite green except the pre-existing breaks below.**
 
 12-day sum of up moves: Guotai Junan's (2017, "GTJA191", internal quant report, read via
@@ -64,7 +64,7 @@ Total: `min_length = length + 1` = **13** bars at the shipped default, enforced 
 | B Causality | pass | Future-perturbation sweep (close series rewritten from `j` onward), 34 offsets past the 13-bar warm-up: real module **0 of 34** leaks. Write-shift mutant (final rolling-sum write index `length=12` bars into the future): caught **34 of 34**. Forward-delay mutant (`close.shift(-1)` instead of `close.shift(1)` for `C1`, turning the previous-close reference into a look-ahead at the next close): caught **34 of 34** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic close series (seed 11, lognormal walk, `docs/measure_g191_167.py:_walk`), shipped default: **1,488 of 1,500** bars non-NaN (99.20%), first valid at bar 12 (exactly the structural warm-up boundary, `min_length - 1`). **1,488 distinct values**. Range `[0.007263, 0.163191]`, median `0.069416` |
 | D Scale-free | pass | The up/down-day branch choice (`C-C1 > 0`) is invariant under a positive price rescale, and the rolling sum is linear in its input, so the whole column scales exactly by the same factor as `C`, cancelling against the final division by `C`. Measured on the 1,500-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754); x10/x3.7 **within float64 rounding tolerance** (max\|diff\| 4.30e-16 / 5.34e-16). `0 < 1488 fires < 1500` and `1488 > 1` distinct values rule out a constant column |
-| E Attribution | **pending** -- run by issue-solver after this session | Re-run on the port via `gate_e_overlap.py run --module pandas_ta.momentum.g191_167`; the 2026-10-24 PROTOTYPE measurement (not the port) is in the issue text: max \|ρ\| 0.7581 vs `Dist_to_BB_Lower_pct`, per-frame max median 0.7575, verdict SHIP -- a prototype is not a port (issue's own words), so this is background, not this gate's evidence |
+| E Attribution | **SHIP** | Re-run on the port, `gate_e_overlap.py run --module pandas_ta.momentum.g191_167`, 89 ALTPORT-1 frames, 687 comparators (329 `compute_all` + 358 manifest), canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). `G191_167_12`: max \|ρ\| **0.7580986525045462** vs `Dist_to_BB_Lower_pct` (manifest, n = 397,158); per-frame max median **0.7574856616104232** against the same comparator, 0 of 89 frames ≥ 0.90. Both below the 0.76 SHIP line -- harness verdict `SHIP`. Matches the 2026-10-24 prototype measurement (0.7581 / 0.7575) to 4 d.p., i.e. the port did not drift from the prototype it was derived from |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -84,24 +84,21 @@ distinct values, so the generator tags it `SF`), checked by
 `momentum` bucket is not tracked in `CATEGORY_BUCKETS` (only `trend`/`volatility`/`volume`
 are), so no change needed there.
 
-`g191_167`'s Gate E row is OWED (per this session's rules, the launcher runs Gate E
-afterward; a later receipt session records it in `docs/gate_e_ledger.csv`).
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails locally on
-exactly `['g191_167', 'mtd_ret']` -- `g191_167` is this port's own owed row, `mtd_ret`
-predates this session (carried over from issue #206, per `docs/G191160Measured.md`'s
-identical note), unrelated to this port. `g191_160` (issue #67) is no longer on this list: its
-Gate E row was already recorded (SHIP, max\|ρ\| 0.7074 vs `mad_pct`) in a prior session on
-this same branch lineage. Expected to fail locally per this session's rules ("that is
-expected: wire the indicator into `Category` as usual, and do not hold it out to silence the
-test").
+`g191_167`'s Gate E row was recorded 2026-11-10 (SHIP, max\|ρ\| 0.7581 vs
+`Dist_to_BB_Lower_pct`) via `python docs/gate_e_ledger.py record`, into
+`docs/gate_e_ledger.csv`. It is no longer on
+`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`'s owed list;
+only `mtd_ret` remains (predates this session, carried over from issue #206, per
+`docs/G191160Measured.md`'s identical note, unrelated to this port).
 
-## Suite run (this repo, this session)
+## Suite run (this repo, this receipt session)
 
-`python -m pytest -q`, full suite, default collection order: **3 failed, 4916 passed, 83
+`python -m pytest -q`, full suite, default collection order: **3 failed, 4923 passed, 83
 skipped**. `g191_167`'s own tests (`tests/test_g191_167.py`): **17 passed**. The 3 failures,
-all pre-existing and unrelated to this port (CLAUDE.md "Known breaks" plus the owed Gate E
-ledger row, see above): `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-(owed list above), `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
-(needs the sibling `../AlternativeRepos` checkout, absent in this worktree) and
+all pre-existing and unrelated to this port (CLAUDE.md "Known breaks" plus one unrelated owed
+Gate E ledger row): `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+(fails on exactly `['mtd_ret']` now that `g191_167`'s own row is recorded -- see Wiring above),
+`tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` (needs the
+sibling `../AlternativeRepos` checkout, absent in this worktree) and
 `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (untracked
 `docs/pine/` corpus). No other test regresses.
