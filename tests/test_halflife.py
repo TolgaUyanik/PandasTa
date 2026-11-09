@@ -11,11 +11,14 @@ What these tests pin, in order of how much it would hurt to lose them:
   each theta in 0.02, 0.05, 0.1, 0.2, K = 50 independent 2,001-bar O-U
   paths `P_t = P_{t-1} - theta (P_{t-1} - 100) + e_t`, one 2,000-pair
   estimate per path. The median relative error against ln(2)/theta is
-  -1.6%, +0.8%, +0.1%, +0.6%; one path's own SD is 20%, 13%, 9%, 6%. The
-  test asserts |median error| <= 3 SD / sqrt(K), a tolerance derived from
-  the measured spread, not picked. Against an independent `np.polyfit`
-  loop: max relative difference 1.3e-10 over lengths 100, 30, 3 on a walk
-  and an O-U path, NaN masks identical. A hand fixture (HLIFE-1 (b)) shows
+  -1.6%, +0.8%, +0.1%, +0.6%; one path's own SD is 20.3%, 13.3%, 9.0%,
+  6.3%, so the standard error of the median (1.2533 SD / sqrt(K)) is 3.6%,
+  2.3%, 1.6%, 1.1%. The test asserts |median error| <= 3 such SEs, with the
+  SDs fixed at their measured values (not recomputed from the sample, so a
+  variance blow-up cannot widen its own band), and the sample SD within
+  25% of them. Against an independent `np.polyfit` loop: NaN masks
+  identical, asserted rtol 1e-8 over lengths 100, 30, 3 on a walk and an
+  O-U path. A hand fixture (HLIFE-1 (b)) shows
   the arithmetic: closes 10, 12, 13, 13.5 at length 3 -> lambda -0.5 ->
   2 ln 2.
 * THE BIAS AT THE DEFAULT WINDOW, pinned so nobody reads it as signal: at
@@ -29,18 +32,33 @@ What these tests pin, in order of how much it would hurt to lose them:
   below the random-walk median.
 * THE NAMED NaN BRANCH (HLIFE-1's design decision: NaN, chosen by the port
   author, pending the owner's confirmation on PR #256): lambda >= 0
-  (trending, flat) and lambda <= -1 (the deviation flips sign every bar,
-  or explodes) are NaN, never negative, inf or a sub-bar value.
+  (trending, flat) and lambda <= -1 (outside monotone decay: the deviation
+  vanishes in one bar at -1, oscillates while decaying for -2 < lambda < -1,
+  does not decay at <= -2) are NaN, never negative or inf. A flat stretch
+  followed by a move is NaN on pandas 2 and 3 alike. pandas 3 can leave a
+  ~1e-12 residue in a flat window's rolling var; before review round 2 that
+  yielded half-lives of 68 to 105,244 bars on 43 of 200 such series.
+  Flatness is now tested exactly (rolling max == min); with that test
+  removed, the pinned case still fails on 22 of 120 series on pandas 3.
 * CAUSALITY by future-perturbation over 31 offsets with two futures; two
   one-bar look-ahead mutants (the output written one bar early, the change
   read one bar ahead) proved live, then caught at 31 of 31.
 * NO RECURSIVE STAGE, measured on values (HLIFE-2): a +5% move of close 500
   changes all 101 bars whose window holds it (by at least 7.2%), leaves
-  bars < 500 bit-identical, and moves bars > 600 by at most 4.3e-13
-  relative -- the add/remove rounding residue of pandas' rolling sums, not
-  a dependence. An EMA-smoothed mutant moves them by 0.25 and is caught.
+  bars < 500 bit-identical, moves bars 601-799 by at most 6.6e-15 relative
+  (the rounding residue of pandas' rolling add/remove, which IS a numerical
+  dependence on departed values), and leaves bars >= 800 bit-identical: the
+  sums run in independent blocks of 4 * length bars, so the residue ends at
+  the next block. An EMA-smoothed mutant moves later bars by 0.25 and is
+  caught.
+* BOUNDED PRECISION on hostile inputs, against an independent loop: a
+  level collapse from 1e5 to 1 matches to 7.8e-14 everywhere (the round-1
+  code, unblocked and unanchored, was off by 5.5% there; anchored but
+  unblocked, 0.38%); a single 1e7 bad tick in a walk near
+  100 leaves at most 2.1e-5 inside its own block and 3.0e-14 from the next
+  block on.
 * SCALE-FREE (HLIFE-2 D): close x8 and x64 bit-identical; x10 and x3.7
-  within 1.1e-12 and 2.8e-13 relative (asserted <= 1e-10), NaN masks match.
+  within 1.1e-13 and 9.5e-14 relative (asserted <= 1e-10), NaN masks match.
   Not constant: 1,095 distinct values over 1,095 non-NaN bars of the seed-11
   walk, range 3.13 to 2341 bars.
 * THE FAMILY (#4's tie rule; synthetic indication, not Gate E): on 10
@@ -106,17 +124,19 @@ def test_hand_computed():
     assert out.iloc[3] == pytest.approx(2 * LN2, rel=1e-12)
 
 
-@pytest.mark.parametrize("theta", [0.02, 0.05, 0.10, 0.20])
-def test_recovers_a_known_half_life(theta):
+@pytest.mark.parametrize("theta, sd", [(0.02, 0.203), (0.05, 0.133), (0.10, 0.090), (0.20, 0.063)])
+def test_recovers_a_known_half_life(theta, sd):
     K = 50
     err = np.array([
         halflife(_ou(theta, 2001, np.random.default_rng(1000 + k)), length=2000).iloc[-1]
         / (LN2 / theta) - 1
         for k in range(K)])
     assert not np.isnan(err).any()
-    # median of K independent estimates, within 3 standard errors of the
-    # per-path spread (measured SD 0.20 / 0.13 / 0.09 / 0.06)
-    assert abs(np.median(err)) <= 3 * err.std(ddof=1) / np.sqrt(K)
+    # the spread is what it was measured to be: a variance blow-up fails here
+    assert 0.75 * sd <= err.std(ddof=1) <= 1.25 * sd
+    # median of K independent estimates within 3 standard errors of the median,
+    # from the fixed measured SD (1.2533 SD / sqrt(K): 3.6%, 2.3%, 1.6%, 1.1%)
+    assert abs(np.median(err)) <= 3 * 1.2533 * sd / np.sqrt(K)
 
 
 @pytest.mark.parametrize("theta, median", [
@@ -149,8 +169,29 @@ def test_matches_an_independent_polyfit_loop(length, which):
     ref = _reference(s, length)
     assert (np.isnan(ref) == out.isna().values).all()
     m = ~np.isnan(ref)
-    # measured max relative difference 1.3e-10 (length 3, walk): rolling sums vs polyfit
+    # blocked, anchored rolling sums vs polyfit: rounding only
     np.testing.assert_allclose(out.values[m], ref[m], rtol=1e-8)
+
+
+def test_hostile_inputs_stay_precise():
+    # a level collapse from 1e5 to 1: round-1 code 5.5% off, unblocked 0.38% off
+    col = Series(np.r_[1e5 * np.exp(np.cumsum(np.random.default_rng(2).normal(0, .01, 300))),
+                       np.exp(np.cumsum(np.random.default_rng(3).normal(0, .01, 1000)))])
+    out, ref = halflife(col).values, _reference(col, 100)
+    assert (np.isnan(ref) == np.isnan(out)).all()
+    m = ~np.isnan(ref)
+    np.testing.assert_allclose(out[m], ref[m], rtol=1e-8)  # measured 7.8e-14
+    # one 1e7 bad tick at bar 1000; blocks of 400 start at 800 and 1200
+    bt = _walk(1600, 4)
+    bt[1000] = 1e7
+    out, ref = halflife(bt).values, _reference(bt, 100)
+    assert (np.isnan(ref) == np.isnan(out)).all()
+    m = ~np.isnan(ref)
+    m_in, m_after = m.copy(), m.copy()
+    m_in[1200:] = False
+    m_after[:1200] = False
+    np.testing.assert_allclose(out[m_in], ref[m_in], rtol=1e-4)  # measured 2.1e-5
+    np.testing.assert_allclose(out[m_after], ref[m_after], rtol=1e-8)  # measured 3.0e-14
 
 
 # --------------------------------------------------------- the NaN branch
@@ -166,6 +207,21 @@ def test_no_half_life_outside_minus_one_to_zero_is_nan():
     assert halflife(Series([10.0, 12, 9, 14, 7, 17, 3]), length=3).isna().all()
     out = halflife(_walk())
     assert (out.dropna() > 0).all() and np.isinf(out.values).sum() == 0
+
+
+def test_flat_then_move_is_nan():
+    # forward-filled closes (a halted name), then trading resumes: every window
+    # whose 100 previous closes are all equal has no half-life. The flat stretch
+    # starts at bar 1000, in a later block whose anchor is away from its level.
+    hits = 0
+    for level in (1.0, 100.0, 1e4):
+        for seed in range(40):
+            rng = np.random.default_rng(seed)
+            w = level * np.exp(np.cumsum(rng.normal(0, .01, 1000)))
+            s = Series(np.r_[w, [w[-1]] * 150, w[-1] * np.exp(np.cumsum(rng.normal(0, .01, 50)))])
+            hits += int(halflife(s)[1100:1151].notna().any())
+    # without the exact flatness test: 22 of 120 on pandas 3.0.0, 0 on 2.3.3
+    assert hits == 0
 
 
 def test_edge_cases():
@@ -192,23 +248,27 @@ def test_edge_cases():
 
 def _reach(fn):
     """Move close 500 by +5%; return (head bit-equal, bars changed in 500..600,
-    smallest relative change there, largest relative change after 600)."""
+    smallest relative change there, largest relative change in 601..799,
+    bars >= 800 bit-equal)."""
     close = _walk()
     p = close.copy()
     p[500] *= 1.05
     base, moved = fn(close), fn(p)
-    win, after = base[500:601].notna(), base[601:].notna()
+    win, after = base[500:601].notna(), base[601:800].notna()
     rel_in = ((moved[500:601] - base[500:601]).abs() / base[500:601])[win]
-    rel_after = ((moved[601:] - base[601:]).abs() / base[601:])[after]
-    return moved[:500].equals(base[:500]), int((rel_in > 0).sum()), rel_in.min(), rel_after.max()
+    rel_after = ((moved[601:800] - base[601:800]).abs() / base[601:800])[after]
+    return (moved[:500].equals(base[:500]), int((rel_in > 0).sum()), rel_in.min(),
+            rel_after.max(), moved[800:].equals(base[800:]))
 
 
 def test_the_taint_reach_is_exactly_the_window():
-    head, changed, smallest, after = _reach(halflife)
+    head, changed, smallest, after, next_block = _reach(halflife)
     assert head
     assert changed == 101 and smallest > 0.07  # measured 0.0719
-    # measured 4.3e-13: pandas' rolling add/remove rounding residue, not a dependence
+    # same block: rolling-sum rounding residue only (measured 6.6e-15)
     assert after <= 1e-10
+    # the next block (from bar 800) never saw close 500
+    assert next_block
 
 
 def test_a_recursive_stage_would_be_caught():
@@ -234,10 +294,10 @@ def _load_mutant(old, new, tag):
 
 MUTANTS = {
     # the slope written one bar early: bar T reports the window ending at T+1
-    "write": ("lam = (sxy / sxx.where(sxx > 0)).to_numpy()",
-              "lam = (sxy / sxx.where(sxx > 0)).shift(-1).to_numpy()"),
+    "write": ("return (sxy / sxx).where(~flat & (sxx > 0)).to_numpy()",
+              "return (sxy / sxx).where(~flat & (sxx > 0)).shift(-1).to_numpy()"),
     # the one-bar change read one bar ahead
-    "change": ("change = c.diff()", "change = c.diff().shift(-1)"),
+    "change": ("change = x.diff()", "change = x.diff().shift(-1)"),
 }
 
 OFFSETS = range(110, 1150, 34)  # 31 offsets
@@ -296,9 +356,9 @@ def test_price_scale_within_tolerance(k):
     base, scaled = halflife(close), halflife(close * k)
     assert (base.isna() == scaled.isna()).all()
     m = base.notna()
-    # measured 1.1e-12 (x10) and 2.8e-13 (x3.7) relative on numpy 2.5.4. Relative
+    # measured 1.1e-13 (x10) and 9.5e-14 (x3.7) relative on numpy 2.5.4. Relative
     # error in the half-life is relative error in lambda, which grows as lambda
-    # nears 0 (values up to 2341 bars here); the bound leaves ~90x headroom.
+    # nears 0 (values up to 2341 bars here); the bound leaves ~1000x headroom.
     assert ((scaled[m] - base[m]).abs() / base[m]).max() <= 1e-10
 
 
