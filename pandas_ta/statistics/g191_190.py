@@ -108,10 +108,17 @@ touching even one pre-warm-up bar comes out `NaN` (pandas' rolling
 `min_periods` demands that many NON-NULL observations in the window),
 rather than silently treating an undefined bar as "not up, not dn, zero
 contribution" the way the prototype's raw `np.where`-free boolean
-comparisons would if run on a shorter frame. The prototype itself never
-hits this edge (Gate E's harness only ever calls it on frames far longer
-than the warm-up), so this is a disclosed hardening, not an observed
-behaviour change.
+comparisons would. This is a MEASURED fix, not a theoretical one: on the
+1,500-bar synthetic frame used throughout this module's tests, the naive
+(unmasked) reading produces a non-NaN -- and wrong, because it is built
+from bars `g` has not yet defined -- value at **16 of the 19 bars** in
+`[length-1, 2*length-3]` (`[19,37]` at the shipped default), where this
+port's masked version is `NaN` at all 19 by construction
+(`python docs/measure_g191_190.py`). Gate E's harness, which only ever
+calls this module on frames far longer than the warm-up, would never
+surface the difference in its pooled statistics (19 bars out of hundreds
+of thousands), which is why this needed an explicit measurement rather
+than an appeal to "it never comes up".
 
 CAUSALITY. `r[t]` reads `C[t]` and `C[t-1]`. `g[t]` reads `C[t]` and
 `C[t-(length-1)]`. `up[t]`, `dn[t]`, `e2[t]` are pure functions of `r[t]`

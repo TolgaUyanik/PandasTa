@@ -71,7 +71,11 @@ MEANINGFUL from `t>=19` (a `NaN` `g[t]` makes a `>`/`<` comparison plain
 `False` in pandas, not `NaN` -- a trap this port avoids by masking `up`/
 `dn` to `NaN` wherever `g` itself is `NaN`, then rolling `COUNT`/`SUM` with
 `min_periods=length` so a window touching even one pre-warm-up bar comes
-out `NaN`). `COUNT`/`SUM` over a trailing 20-bar window ending at `t` need
+out `NaN`). Measured, not theoretical: on the 1,500-bar synthetic frame,
+the NAIVE (unmasked) reading produces a non-NaN -- and wrong -- value at
+**16 of the 19 bars** in `[19,37]`, where this port's masked version is
+`NaN` at all 19 by construction (`python docs/measure_g191_190.py`).
+`COUNT`/`SUM` over a trailing 20-bar window ending at `t` need
 every bar in `[t-19,t]` to be meaningful, i.e. `t>=38`. So the whole column
 is `NaN` for strictly fewer than 39 bars of history; `min_length =
 2*length-1 = 39` at defaults, enforced by `verify_series`. Measured: on

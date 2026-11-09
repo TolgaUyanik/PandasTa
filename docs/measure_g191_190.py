@@ -62,6 +62,33 @@ def main():
           f"first_valid_index={first_valid}")
     print(f"min={out.min():.6f} max={out.max():.6f} median={out.median():.6f}")
 
+    # Disclosed hardening: pandas evaluates `r>g`/`r<g` against a NaN `g`
+    # as plain False, not NaN, so a NAIVE reading (no explicit `.where(valid)`
+    # mask before rolling) would NOT itself come out NaN at bars [length-1,
+    # 2*length-3] (here [19,37]) the way this port's masked version does.
+    # Measure the naive reading's output there to show it is not merely
+    # "shorter warm-up", but numerically WRONG (biased by treating an
+    # undefined bar as "zero contribution").
+    g_lookback = length = 20
+    g_lookback = length - 1
+    r = close / close.shift(1) - 1.0
+    g = (close / close.shift(g_lookback)) ** (1.0 / length) - 1.0
+    up_naive = (r > g).astype(float)  # no `.where(valid)` -- False, not NaN, pre-warm-up
+    dn_naive = (r < g).astype(float)
+    e2 = (r - g) ** 2
+    count_up_n = up_naive.rolling(length, min_periods=length).sum()
+    count_dn_n = dn_naive.rolling(length, min_periods=length).sum()
+    sumif_dn_n = e2.where(dn_naive == 1.0, 0.0).rolling(length, min_periods=length).sum()
+    sumif_up_n = e2.where(up_naive == 1.0, 0.0).rolling(length, min_periods=length).sum()
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ratio_n = ((count_up_n - 1.0) * sumif_dn_n) / (count_dn_n * sumif_up_n)
+        naive_out = np.log(ratio_n.where(ratio_n > 0)).replace([np.inf, -np.inf], np.nan)
+    window = range(length - 1, 2 * length - 2)  # bars [19, 37]
+    naive_defined = int(naive_out.iloc[list(window)].notna().sum())
+    masked_defined = int(out.iloc[list(window)].notna().sum())
+    print(f"bars[{window.start}:{window.stop}] naive-reading non-NaN={naive_defined} "
+          f"masked (shipped) non-NaN={masked_defined} (shipped is 0 by construction)")
+
     m = out.notna()
     for k in (8.0, 64.0, 10.0, 3.7):
         scaled = g191_190(close * k)
