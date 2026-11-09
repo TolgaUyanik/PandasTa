@@ -1,6 +1,6 @@
 # g191_189 — measured (issue #61)
 
-> **Status: Gates A-D cleared. Gate E: pending, run by issue-solver after this session.**
+> **Status: Gates A-F cleared. SHIP.**
 
 Mean absolute deviation from the 6-day mean: Guotai Junan's (2017,
 "GTJA191", internal quant report, read via the HKUDS/Vibe-Trading copy,
@@ -79,7 +79,7 @@ shipped defaults (`mean_length=6, mad_length=6`), enforced by
 | B Causality | pass | Future-perturbation sweep (close series rewritten from `j` onward, another synthetic frame), 22 offsets past the 11-bar warm-up: real module **0 of 22** leaks (`python docs/measure_g191_189.py`). One mutant (`importlib` source read, `exec`'d in memory, shown live-different from the real module): shifting the final rolling-mean write index `mad_length=6` bars into the future -- caught at **22 of 22** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 900-bar synthetic close series (seed 11, see `docs/measure_g191_189.py:_close`), shipped default: **890 of 900** bars non-NaN (98.89%), first valid at bar 10 (exactly the structural warm-up boundary, `min_length - 1`). **890 distinct values** (continuous statistic, no inherent ceiling unlike a rank-based column). Range `[0.002574, 0.041536]`, median `0.013310` |
 | D Scale-free | pass | `inner_mean` is linear in `close`, so a positive rescale `k*close` scales it to `k*inner_mean`; `deviation = |close - inner_mean|` then scales to `k*deviation`; `mad` (a plain average) scales to `k*mad`; dividing by `k*close` cancels the `k` exactly. Measured on the 900-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754); x10/x3.7 **within float64 rounding tolerance** (max\|diff\| 1.7e-16 / 1.5e-16 -- the rolling-mean and division arithmetic itself rounds differently at a non-power-of-two multiplier, even though the true ratio is identical). `0 < 890 fires < 900` and `890 > 1` distinct values rule out a constant column |
-| E Attribution | pending, run by issue-solver after this session | — |
+| E Attribution | SHIP | `G191_189_6_6`: max\|rho\| 0.6726427263356 vs `natr` (`compute_all`, n = 397,692); per-frame max median 0.6572564719700037 (89 frames); verdict SHIP (< 0.76 ship line). Run `is61-g191_189-0f5bacef`, 89 ALTPORT-1 frames, 398,849 pooled bars, 329 + 358 comparators, canary bit-equal (`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS`). Measured 2026-11-09, ledger row recorded in `docs/gate_e_ledger.csv` |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -102,9 +102,8 @@ tags it `SF`), checked by
 (295 -> 296); no `CATEGORY_BUCKETS` entry needed (that dict only tracks
 `trend`/`volatility`/`volume`, not `statistics`).
 
-Gate E is run by the launcher (`gate_e_overlap.py`, Backtesting #107)
-after this session; the ledger row is recorded in a later receipt session
-once the measurement lands.
+Gate E run by the launcher (`gate_e_overlap.py`, Backtesting #107);
+ledger row recorded above, 2026-11-09.
 
 ## Suite run (this repo, this session)
 
