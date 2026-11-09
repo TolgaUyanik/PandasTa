@@ -1,8 +1,8 @@
 # g191_191 — measured (issue #53)
 
-> **Status: Gates A-D cleared, Gate E pending.** Gate E is run by the
-> launcher in `../Backtesting` after this session; this file's Gate E
-> section is filled in by a later receipt session once that run lands.
+> **Status: Gates A-E cleared, SHIP.** Gate E ran in `../Backtesting`
+> (run `is53-g191_191-1e25f670`, 2026-11-09); this receipt session filled
+> in the numbers below and recorded `docs/gate_e_ledger.csv`.
 
 Volume-low correlation plus mid-to-close gap: Guotai Junan's (2017,
 "GTJA191", internal quant report, read via the HKUDS/Vibe-Trading copy, MIT)
@@ -58,7 +58,7 @@ different, because it is not different.
 | B Causality | pass | Future-perturbation sweep (every OHLCV series rewritten from `j` onward, another synthetic frame), 34 offsets past the 23-bar warm-up: real module **0 of 34** leaks (`python docs/measure_g191_191.py`). Two independent mutants (`importlib` source read, `exec`'d in memory), each shown live (differs from the real module) then caught at **34 of 34**: shifting the whole write index `corr_length=5` bars into the future, and computing `MEAN(volume, mean_length)` with `center=True` instead of the causal trailing window -- the same look-ahead bug class CLAUDE.md documents for `bos`'s `rolling(..., center=True)` |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic OHLCV frame (seed 11/12/23, see `docs/measure_g191_191.py:_ohlcv`), shipped defaults: **1,477 of 1,500** bars non-NaN (98.47%) -- exactly `n - 23`, the `mean_length + corr_length - 2 = 23`-bar warm-up, no wider gap. **1,477 distinct values** observed on this frame (every fired bar distinct -- not a constant column), range `[-0.992038, 0.996678]`, median `-0.007214` |
 | D Scale-free | pass | Pearson correlation is exactly invariant to a positive rescale of either input (the scale cancels between covariance and standard deviation); the `/close` on the price-gap term cancels a positive price rescale algebraically too. Measured on the 1,500-bar frame: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|**; VOLUME x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754, so the algebraic cancellation is also exact in float64). PRICE x10/x3.7: max\|diff\| **2.12e-11 / 3.11e-11**; VOLUME x10/x3.7: max\|diff\| **2.89e-11 / 2.74e-11** -- float64 rounding in the correlation/division chain (larger than `g191_146`'s because a rolling correlation's variance terms amplify rounding more than a single division, but still 8 orders of magnitude under the test's 1e-9 tolerance), not a scale dependency. `0 < 1,477 fires < 1,500` and `1,477 > 1` distinct values rule out a constant column |
-| E Attribution | **pending** | Gate E: pending, run by issue-solver after this session |
+| E Attribution | **SHIP** | `G191_191_20_5`: max \|rho\| **0.2360** vs `efi_norm` (manifest, n=382,410), per-frame max median \|rho\| **0.2284** (89 frames, 0.0% >= 0.90), pooled over 329+358=687 comparators, 398,849 bars. Under the 0.76 ship line (`r3-perframe-0.90`). Run `is53-g191_191-1e25f670`, canary AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS bit-equal. Recorded in `docs/gate_e_ledger.csv` (measured 2026-11-09) |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -78,23 +78,22 @@ re-derives and passes against the updated `Counter`. `tests/test_altport2_ports.
 `CATEGORY_TOTAL` updated to match (287 -> 288) and `CATEGORY_BUCKETS["volume"]`
 (34 -> 35).
 
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-now owes a row for `g191_191` (expected -- this is the "Gate E owed, not
-failed" skip described in CLAUDE.md, surfaced as a hard failure in this local
-run because `GATE_E_PENDING_OK` is not set outside CI). `mtd_ret` is also
-owed in the same assertion, pre-existing and unrelated to this port (carried
-over from issue #206, per `docs/G191146Measured.md`'s identical note).
+`g191_191`'s Gate E ledger row is recorded in `docs/gate_e_ledger.csv`
+(`is53-g191_191-1e25f670`, measured 2026-11-09, SHIP). `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+still owes a row for `mtd_ret`, pre-existing and unrelated to this port
+(carried over from issue #206, per `docs/G191146Measured.md`'s identical
+note).
 
-## Suite run (this repo, this session)
+## Suite run (this repo, receipt session, 2026-11-09)
 
-`python -m pytest -q`, full suite, default collection order: **3 failed, 4533
+`python -m pytest -q`, full suite, default collection order: **3 failed, 4540
 passed, 83 skipped**. `g191_191`'s own tests (`tests/test_g191_191.py`): **19
 passed**. The three failures, all pre-existing and unrelated to this port
-(CLAUDE.md "Known breaks" plus the two owed Gate E rows):
+(CLAUDE.md "Known breaks" plus one pre-existing owed Gate E row):
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-(owed for `['g191_191', 'mtd_ret']` -- `g191_191` is this port's own pending
-row, closed by the receipt session after the launcher's Gate E run;
-`mtd_ret` pre-dates this session),
+(owed for `['mtd_ret']` only -- `g191_191`'s own row is now recorded in
+`docs/gate_e_ledger.csv`, closed by this receipt session; `mtd_ret` pre-dates
+this session, per `docs/G191146Measured.md`'s identical note),
 `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
 (needs the sibling `../AlternativeRepos` checkout, absent in this worktree)
 and `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
