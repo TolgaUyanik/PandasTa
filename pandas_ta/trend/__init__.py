@@ -19,6 +19,7 @@ from .equal_highs_lows import equal_highs_lows
 from .flag_breakout import flag_breakout
 from .fvg import fvg
 from .fvg_sweep_magnet import fvg_sweep_magnet
+from .g191_098 import g191_098
 from .halftrend import halftrend
 from .head_shoulders import head_shoulders
 from .increasing import increasing
