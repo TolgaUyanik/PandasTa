@@ -5,7 +5,7 @@
 Rescaled range R/S (48): Guotai Junan's (2017, "GTJA191", internal quant
 report, read via the HKUDS/Vibe-Trading copy, MIT) alpha `#165`, per issue
 #55's own instruction. Module `pandas_ta/statistics/g191_165.py`, column
-`G191_165_48`. Tests: `tests/test_g191_165.py` (15, all passing). Numbers
+`G191_165_48`. Tests: `tests/test_g191_165.py` (16, all passing). Numbers
 below: `python docs/measure_g191_165.py`. Environment: this worktree's
 pinned pandas/numpy. Measured 2026-11-09.
 
@@ -44,16 +44,19 @@ reasoning, not a silent guess (full reasoning in the module docstring):
    163`, `w_rescaled_range`) independently reaches the same reading
    (`roll(c, 48, w_rescaled_range)`, `ind_screen.py:530`, windows first,
    cumsum's only inside each window). Two independent reads agree.
-2. **`STD`'s ddof.** The sibling GTJA191 ports in this fork (`g191_076`,
-   `g191_146`) cite the prototype's own GENERIC `std` operator
-   (`ind_screen.py:48`, `x.rolling(n).std()`, pandas default `ddof=1`) as
-   what GTJA's `STD(...)` means -- the operator the formula string itself
-   names. The prototype's `w_rescaled_range` helper recomputes the window's
-   std inline with plain numpy (`ddof=0`) as a vectorisation shortcut local
-   to that one screening function, never restated as what `STD` means
-   anywhere else. This port uses `ddof=1`, matching every sibling port's own
-   `STD`. The two conventions differ only by a constant factor
-   `sqrt((length-1)/length)` (measured below).
+2. **`STD`'s ddof.** Of the sibling GTJA191 ports, only `g191_076`'s own
+   formula (`STD(|C/C1-1|/V,20) / MEAN(...)`) actually invokes a `STD`
+   operator; `g191_146` and `g191_191`'s formulas never do, so they are
+   silent on this question, not corroborating witnesses. `g191_076` cites
+   the prototype's own GENERIC `std` operator (`ind_screen.py:48`,
+   `x.rolling(n).std()`, pandas default `ddof=1`) as what GTJA's `STD(...)`
+   means -- the operator the formula string itself names. The prototype's
+   `w_rescaled_range` helper recomputes the window's std inline with plain
+   numpy (`ddof=0`) as a vectorisation shortcut local to that one screening
+   function, never restated as what `STD` means anywhere else. This port
+   uses `ddof=1`, matching `g191_076`'s own `STD` -- a one-port precedent,
+   not a fork-wide one. The two conventions differ only by a constant
+   factor `sqrt((length-1)/length)` (measured below).
 
 ## Gates
 
@@ -62,7 +65,7 @@ reasoning, not a silent guess (full reasoning in the module docstring):
 | A Correctness | derived directly from the issue's own stated formula plus its own parenthetical naming the target as "the R/S statistic" -- two disclosed interpretation choices (window-local `SUMAC`, `STD` ddof=1), both reasoned above, neither a silent guess | 7-bar hand-derived example at `length=4` (`tests/test_g191_165.py::test_hand_derived_seven_bars`), checked against an independent per-bar PYTHON LOOP (not the module's own vectorised `sliding_window_view` code): `result[3..6] = [1.5491933384829668, 1.224744871391589, 1.224744871391589, 1.5491933384829668]`, matching the module's float64 output exactly. Matches the same independent loop at the shipped default (`length=48`), 3 spot-checked bars (300, 600, 899) on a 900-bar synthetic close series, relative difference 1.6e-14 / 3.2e-15 / 5.0e-15 (float64 rounding, not a disagreement) |
 | B Causality | pass | Future-perturbation sweep (close series rewritten from `j` onward, another synthetic series), 34 offsets past the 48-bar warm-up: real module **0 of 34** leaks (`python docs/measure_g191_165.py`). Two independent mutants (`importlib` source read, `exec`'d in memory), each shown live (differs from the real module) then caught at **34 of 34**: shifting the whole write index `length=48` bars into the future, and writing each window's result to its CENTER bar instead of its last bar -- the same look-ahead bug class CLAUDE.md documents for `bos`'s `rolling(..., center=True)`, expressed here as a write-index shift because this module computes its own windows with `sliding_window_view` rather than pandas' `.rolling()` |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic close series (seed 11, see `docs/measure_g191_165.py:_cv`), shipped default: **1,453 of 1,500** bars non-NaN (96.87%) -- exactly `n - 47`, the `length = 48`-bar warm-up (first valid index 47), no wider gap. **1,453 distinct values** observed (every fired bar distinct -- not a constant column), range `[10.156818, 22.540253]`, median `18.515885` |
-| D Scale-free | pass | Every term in the ratio -- the window mean, the deviations, the window-local cumsum, its range, and the window's own std -- scales EXACTLY linearly with a positive rescale of `close` by any `k`, so `R / S` is exactly invariant algebraically for ANY `k > 0`. Measured on the 1,500-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754, so the algebraic cancellation is also exact in float64); PRICE x10/x3.7: max\|diff\| **3.80e-13 / 4.35e-13** -- float64 rounding from the scalar multiply itself, well under the test's 1e-9 tolerance, not a scale dependency. `0 < 1,453 fires < 1,500` and `1,453 > 1` distinct values rule out a constant column. Separately measured: the `ddof=1` vs. `ddof=0` STD choice (Gate A, point 2) scales the whole column by a constant `sqrt(47/48) = 0.989529` at the shipped default -- confirmed by direct computation, not merely the algebraic prediction |
+| D Scale-free | pass | Every term in the ratio -- the window mean, the deviations, the window-local cumsum, its range, and the window's own std -- scales EXACTLY linearly with a positive rescale of `close` by any `k`, so `R / S` is exactly invariant algebraically for ANY `k > 0`. Measured on the 1,500-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754, so the algebraic cancellation is also exact in float64); PRICE x10/x3.7: max\|diff\| **3.80e-13 / 4.35e-13** -- float64 rounding from the scalar multiply itself, well under the test's 1e-9 tolerance, not a scale dependency. `0 < 1,453 fires < 1,500` and `1,453 > 1` distinct values rule out a constant column. The `0/0` edge case (a `length`-bar flat run makes both the range and the std exactly zero) is guarded with `np.errstate` and pinned directly: a 60-bar constant-close series (`tests/test_g191_165.py::test_flat_window_is_nan_not_inf_or_a_crash`) fires `NaN`, never `inf`/`-inf`, at every one of its 13 would-be bars. Separately measured: the `ddof=1` vs. `ddof=0` STD choice (Gate A, point 2) scales the whole column by a constant `sqrt(47/48) = 0.989529` at the shipped default -- confirmed by direct computation, not merely the algebraic prediction |
 | E Attribution | pending, run by issue-solver after this session | — |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
@@ -95,8 +98,8 @@ note).
 ## Suite run (this repo, this session)
 
 `python -m pytest -q`, full suite, default collection order: **3 failed,
-4583 passed, 83 skipped**. `g191_165`'s own tests (`tests/test_g191_165.py`):
-**15 passed**. Pre-existing failures, all unrelated to this port (CLAUDE.md
+4584 passed, 83 skipped**. `g191_165`'s own tests (`tests/test_g191_165.py`):
+**16 passed**. Pre-existing failures, all unrelated to this port (CLAUDE.md
 "Known breaks" plus the owed Gate E rows):
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
 (owed for `['g191_165', 'mtd_ret']` -- `g191_165` is this port's own pending

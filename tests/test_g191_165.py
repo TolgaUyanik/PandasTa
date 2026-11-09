@@ -225,6 +225,19 @@ def test_other_price_scales_within_tolerance(k):
     assert (base - scaled).abs().max() < 1e-9
 
 
+def test_flat_window_is_nan_not_inf_or_a_crash():
+    """A window of `length` identical closes makes both the range (R) and
+    the std (S) exactly zero, so `R / S` is `0/0`. The module guards this
+    with `np.errstate`; this pins the guarded output as NaN, not `inf` or
+    `-inf`, and that it never raises."""
+    close = Series([100.0] * 60)
+    out = g191_165(close, length=48)
+    assert out.iloc[:47].isna().all()
+    fired = out.iloc[47:]
+    assert fired.isna().all()
+    assert not np.isinf(out.to_numpy()).any()
+
+
 def test_fires_and_is_not_constant():
     close = _cv()
     out = g191_165(close)

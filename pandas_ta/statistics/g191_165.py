@@ -46,24 +46,28 @@ reasoning (not a silent guess):
    (`Z = np.cumsum(W - W.mean(1, keepdims=True), 1)`). Two independent reads
    of the same ambiguous text agree, so this port uses the window-local
    reading.
-2. **`STD`'s ddof.** Every sibling GTJA191 port in this fork (`g191_076`,
-   `g191_146`) cites the prototype's own GENERIC `std` operator,
+2. **`STD`'s ddof.** The sibling GTJA191 port that actually invokes a `STD`
+   operator in its own formula, `g191_076` (`STD(|C/C1-1|/V,20) /
+   MEAN(|C/C1-1|/V,20)`), cites the prototype's own GENERIC `std` operator,
    `ind_screen.py:48` (`def std(x, n): return x.rolling(n).std()`, pandas'
    default `ddof=1`, a SAMPLE standard deviation), as the GTJA `STD(...)`
    spelling -- that is the operator the issue's formula string itself
-   invokes by name (`STD(C,48)`). The prototype's `w_rescaled_range` helper
-   does NOT call that generic operator for its own denominator; it
-   recomputes the window's std inline with plain numpy (`W.std(1)`, numpy's
-   default `ddof=0`, a POPULATION standard deviation) -- a vectorisation
-   shortcut local to that one screening function's implementation, never
-   restated anywhere as what GTJA's `STD` means. Per the issue's own
-   instruction ("Gate A starts from the source formula, not the prototype"),
-   this port uses the operator the FORMULA names (`ddof=1`, matching every
-   sibling port's own `STD`), not the one the screening helper happened to
-   take a numeric shortcut with. The two conventions differ only by the
-   factor `sqrt((length-1)/length)` (`sqrt(47/48) ~ 0.98961` at the shipped
-   default) -- a small, constant rescale, not a shape change; see
-   `docs/G191165Measured.md` for the measured size of this choice.
+   invokes by name (`STD(C,48)`). (`g191_146` and `g191_191`'s own formulas
+   never invoke `STD` at all, so they are silent on this question, not
+   corroborating witnesses -- this is a one-port precedent, not a fork-wide
+   one.) The prototype's `w_rescaled_range` helper does NOT call that
+   generic operator for its own denominator; it recomputes the window's std
+   inline with plain numpy (`W.std(1)`, numpy's default `ddof=0`, a
+   POPULATION standard deviation) -- a vectorisation shortcut local to that
+   one screening function's implementation, never restated anywhere as what
+   GTJA's `STD` means. Per the issue's own instruction ("Gate A starts from
+   the source formula, not the prototype"), this port uses the operator the
+   FORMULA names (`ddof=1`, matching `g191_076`'s own `STD`), not the one
+   the screening helper happened to take a numeric shortcut with. The two
+   conventions differ only by the factor `sqrt((length-1)/length)`
+   (measured `sqrt(47/48) = 0.989529` at the shipped default) -- a small,
+   constant rescale, not a shape change; see `docs/G191165Measured.md` for
+   the measured size of this choice.
 
 CALCULATION, in the order computed below (`length=48`):
     for each window of `length` consecutive closes ending at bar `t`:
