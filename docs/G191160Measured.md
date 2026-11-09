@@ -1,7 +1,7 @@
 # g191_160 — measured (issue #67)
 
-> **Status: Gates A-D cleared. Gate E pending, run by issue-solver after this session.
-> This repo's suite green except the pre-existing breaks below.**
+> **Status: Gates A-E cleared, SHIP. This repo's suite green except the pre-existing breaks
+> below.**
 
 Down-day volatility EMA: Guotai Junan's (2017, "GTJA191", internal quant report, read via
 the HKUDS/Vibe-Trading copy, MIT) alpha `#160`, per issue #67's own instruction. Module
@@ -65,7 +65,7 @@ defaults, enforced by `verify_series`.
 | B Causality | pass | Future-perturbation sweep (close series rewritten from `j` onward), 34 offsets past the 38-bar warm-up: real module **0 of 34** leaks. Write-shift mutant (final GTJA-`SMA`/division write index `smooth_length=20` bars into the future): caught **34 of 34**. Centered-std mutant (`std_c = close.rolling(std_length, center=True).std()`, the `bos` look-ahead bug class): caught **34 of 34** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic close series (seed 11, lognormal walk, `docs/measure_g191_160.py:_walk`), shipped default: **1,462 of 1,500** bars non-NaN (97.47%), first valid at bar 38 (exactly the structural warm-up boundary, `min_length - 1`). **1,462 distinct values**. Range `[0.004948, 0.034365]`, median `0.011990` |
 | D Scale-free | pass | The down/up-day branch choice (`C<=C1`) is invariant under a positive price rescale, and `STD`/GTJA `SMA` are both linear in a positive scalar multiple of their input, so the whole column scales exactly by the same factor as `C`, cancelling against the final division by `C`. Measured on the 1,500-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754); x10/x3.7 **within float64 rounding tolerance** (max\|diff\| 3.32e-14 / 1.35e-14). `0 < 1462 fires < 1500` and `1462 > 1` distinct values rule out a constant column |
-| E Attribution | **pending** -- run by issue-solver after this session | Re-run on the port via `gate_e_overlap.py run --module pandas_ta.volatility.g191_160`; the 2026-10-24 PROTOTYPE measurement (not the port) is in the issue text: max \|ρ\| 0.7068 vs `mad_pct`, per-frame max median 0.6797, verdict SHIP -- a prototype is not a port (issue's own words), so this is background, not this gate's evidence |
+| E Attribution | pass, SHIP | Run `is67-g191_160-4e62a22b` (`gate_e_overlap.py run --module pandas_ta.volatility.g191_160`), 89 ALTPORT-1 frames, 398,849 pooled bars, 329 + 358 = 687 comparators, canary bit-equal on AKBNK/BIENY/AGHOL/SASA. `G191_160_20_20_1`: max \|ρ\| **0.7074** vs `mad_pct` (n=395,467), per-frame max median \|ρ\| **0.6782** (against `mad_pct`, 89 frames, 0% >= 0.90) -- under the SHIP line (< 0.76). Recorded in `docs/gate_e_ledger.csv`, measured 2026-11-10 |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -84,14 +84,9 @@ distinct values, so the generator tags it `SF`), checked by
 `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL` updated to match (`301 -> 302`) and
 `CATEGORY_BUCKETS["volatility"]` updated (`28 -> 29`).
 
-`g191_160`'s Gate E row is OWED (per this session's rules, the launcher runs Gate E
-afterward; a later receipt session records it in `docs/gate_e_ledger.csv`).
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails locally on
-exactly `['g191_160', 'mtd_ret']` -- `g191_160` is this port's own owed row, `mtd_ret` predates
-this session (carried over from issue #206, per `docs/G191152Measured.md`'s identical note),
-unrelated to this port. Expected to fail locally per this session's rules ("that is
-expected: wire the indicator into `Category` as usual, and do not hold it out to silence the
-test").
+`g191_160`'s Gate E row is recorded in `docs/gate_e_ledger.csv` (SHIP, measured 2026-11-10, this
+receipt session). `mtd_ret` predates this session (carried over from issue #206, per
+`docs/G191152Measured.md`'s identical note), unrelated to this port.
 
 ⚠ **A pre-existing, unrelated defect found while cross-checking README counts in a
 non-default test order, disclosed here rather than fixed (out of this issue's scope):**
