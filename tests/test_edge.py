@@ -10,8 +10,8 @@ What these pin, in order of how much it would hurt to lose:
   -0.016889917516422 signed in the reference's own test suite; EDGE_10 on
   them reads its magnitude to 1e-12 relative. Plus an independent
   transcription of the reference `edge()` (log differences, exact ties,
-  nan-means, one window at a time -- none of the module's code) at 12 bars
-  of a simulated frame, to 1e-9 relative.
+  plain means, one window at a time -- none of the module's code) at 12
+  bars of a simulated frame, to 1e-9 relative.
 * SEMANTICS: on a simulated market with a known spread (390 one-minute
   steps a day, a trade seen with probability 0.1 at the bid or the ask),
   EDGE_21 recovers a 5% spread and, over 10 paths, a 1% one. And the noise
@@ -23,9 +23,10 @@ What these pin, in order of how much it would hurt to lose:
   in memory) proved live and caught. Plus two reach facts: the current
   bar's close is not read, and a bad tick moves exactly the `length` bars
   whose window holds it -- no rolling-sum residue after it leaves.
-* The tie tolerance: ties moved by one ulp (adjusted-price noise) leave
-  EDGE within 1e-12; the reference's exact tie test moves by 29% on the
-  same input.
+* The tie tolerance, from both sides: ties moved by one ulp (adjusted-price
+  noise) leave EDGE within 1e-12, where the reference's exact tie test
+  moves by 29%; a tie moved by 1e-7 relative is a real price difference and
+  moves EDGE.
 * SCALE-FREE: x8/x64 bit-identical with matching NaN masks, x10/x3.7
   within 1e-12, and `0 < fires < n` with every fired value distinct.
 * Edge cases and wiring (`Category`, the accessor, `EDGE_21`).
@@ -71,7 +72,8 @@ def _published():
 
 def _oracle(op, hi, lo, cl):
     """eguidotti/bidask `edge()` transcribed: log differences, exact ties,
-    nan-means, unsigned. One window."""
+    unsigned. One window. Plain means, not the reference's nan-means: a NaN
+    anywhere blanks the window, as edge_rolling's default min_periods does."""
     o, h, l, c = (np.log(np.asarray(x, dtype=float)) for x in (op, hi, lo, cl))
     m = (h + l) / 2.0
     h1, l1, c1, m1 = h[:-1], l[:-1], c[:-1], m[:-1]
@@ -153,8 +155,8 @@ def test_recovers_a_wide_spread():
 
 
 def test_recovers_a_one_percent_spread_over_paths():
-    """Single 1000-day paths read medians 0.00866 to 0.01026 (measured); the
-    median over 10 paths is pinned near 1%, slightly low."""
+    """Single 1000-day paths read medians 0.00866 to 0.01026 (measured, not
+    asserted); the median over 10 paths is pinned: 0.009575, about 4% low."""
     meds = [edge(*_sim(n=1000, spread=0.01, seed=100 + k)).median() for k in range(10)]
     assert np.median(meds) == pytest.approx(0.009575, abs=1e-5)
 
@@ -173,8 +175,8 @@ def test_zero_spread_reads_a_volatility_floor():
 
 
 MUTANT = (
-    "values[length - 1:] = np.where(complete, _edge_rows(*windows), np.nan)",
-    "values[length - 2:-1] = np.where(complete, _edge_rows(*windows), np.nan)",
+    "lo = length - 1 + start",
+    "lo = length - 2 + start",
 )
 
 OFFSETS = range(40, 600, 35)  # 16 offsets
@@ -251,6 +253,27 @@ def test_ulp_noise_on_ties_is_ignored():
     exact = _oracle(o2, h, l, c2)
     assert ours == pytest.approx(abs(PUBLISHED_SIGNED), rel=1e-12)
     assert exact / abs(PUBLISHED_SIGNED) == pytest.approx(0.7069, abs=1e-4)
+
+
+def test_a_real_price_difference_is_not_a_tie():
+    """The other side of the tolerance: bar 2's open ties its low; moved up
+    by 1e-7 relative (100x TIE_RTOL) it is a real difference, so po moves
+    and EDGE with it. A tolerance loosened to 1e-6 would hide this."""
+    o, h, l, c = (x.to_numpy().copy() for x in _published())
+    assert o[2] == l[2]
+    o[2] *= 1 + 1e-7
+    out = edge(Series(o), Series(h), Series(l), Series(c), length=10).iloc[9]
+    assert out == pytest.approx(_oracle(o, h, l, c), rel=1e-9)
+    assert abs(out / abs(PUBLISHED_SIGNED) - 1) > 0.01
+
+
+def test_chunk_boundaries_do_not_change_values(monkeypatch):
+    """Windows are evaluated in chunks; a chunk of 7 windows (many
+    boundaries, a ragged last chunk) gives bit-identical output."""
+    sim = _sim(seed=4)
+    base = edge(*sim)
+    monkeypatch.setattr(_REAL, "CHUNK_CELLS", 7 * 20)
+    pd.testing.assert_series_equal(edge(*sim), base, check_exact=True)
 
 
 # ------------------------------------------------------------ scale-free

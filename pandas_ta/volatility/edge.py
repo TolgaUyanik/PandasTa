@@ -6,6 +6,7 @@ from pandas import Series
 from pandas_ta.utils import get_offset, verify_series
 
 TIE_RTOL = 1e-9
+CHUNK_CELLS = 1 << 18  # window cells per evaluation chunk (2 MiB per float temporary)
 
 
 def _prices(s):
@@ -100,12 +101,19 @@ def edge(open_, high, low, close, length=None, offset=None, **kwargs):
     # computed window by window rather than from rolling sums, so no value
     # depends on bars that have left the window. A window with any missing
     # input is NaN, as the reference's `edge_rolling` makes it.
+    # Windows are evaluated CHUNK_CELLS // (length - 1) at a time, so peak
+    # memory stays near a constant instead of growing with n * length.
     cols = _pairs(_prices(open_), _prices(high), _prices(low), _prices(close))
     w = length - 1
     windows = [sliding_window_view(x, w) for x in cols]
-    complete = ~np.any([np.isnan(x).any(axis=1) for x in windows], axis=0)
+    step = max(1, CHUNK_CELLS // w)
     values = np.full(open_.size, np.nan)
-    values[length - 1:] = np.where(complete, _edge_rows(*windows), np.nan)
+    for start in range(0, windows[0].shape[0], step):
+        chunk = [x[start:start + step] for x in windows]
+        complete = ~np.any([np.isnan(x).any(axis=1) for x in chunk], axis=0)
+        rows = np.where(complete, _edge_rows(*chunk), np.nan)
+        lo = length - 1 + start
+        values[lo:lo + rows.size] = rows
 
     spread = Series(values, index=open_.index)
 
@@ -152,13 +160,15 @@ Decisions made explicitly:
 - Price ties (the indicator variables, e.g. open == high) are tested on raw
   prices with a relative tolerance of 1e-9 instead of the reference's exact
   test on logs: adjusted prices carry ulp noise that exact equality reads
-  as "no tie". On unadjusted tick data the two agree.
+  as "no tie". On the reference's own ohlc.csv both tests find the same
+  ties (3815 open=high, 3905 open=low, 949 high=low).
 - A window with a missing, zero or negative price is NaN, as
   `edge_rolling`'s default `min_periods` makes it; the reference's
   single-sample `edge()` instead skips missing values.
 - Computed window by window, not from rolling sums: every value depends on
   its own window only, so a bad tick stops affecting the estimate as soon
-  as it leaves the window.
+  as it leaves the window. Windows are evaluated in chunks, so peak memory
+  does not grow with n * length.
 
 Scale-free: every return is a log price ratio and every tie test is
 relative, so a x8/x64 rescaling is bit-identical. See docs/EdgeMeasured.md.
