@@ -1132,6 +1132,11 @@ class AnalysisIndicators(BasePandasObject):
                            offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def g191_167(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_167(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def g191_187(self, length=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         high = self._get_column(kwargs.pop("high", "high"))
