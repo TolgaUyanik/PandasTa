@@ -1,6 +1,6 @@
 # g191_093 — measured (issue #62)
 
-> **Status: Gates A-D cleared, F (this repo) green. Gate E pending.**
+> **Status: Gates A-E cleared, F (this repo) green. SHIP.**
 
 20-day sum of open-down moves (DBM): Guotai Junan's (2017, "GTJA191",
 internal quant report, read via the HKUDS/Vibe-Trading copy, MIT) alpha
@@ -79,7 +79,7 @@ meaningful `contribution` values ending at `t`: true warm-up
 | B Causality | pass | Future-perturbation sweep (OHLC series jointly rewritten from `j` onward), 34 offsets past the 21-bar warm-up: real module **0 of 34** leaks. Write-shift mutant (final rolling-sum write index `length=20` bars into the future): caught **34 of 34**. Forward-DELAY mutant (`open_.shift(1)` to `open_.shift(-1)`) needed a DEDICATED deterministic construction rather than the same random sweep: because `MAX` always collapses to `O-L` (above), the DELAY only ever flips a binary branch gate, and the random sweep's own coincidental gate agreement hid the leak at **13 of 34** offsets (caught only 21 of 34) -- measured, which is why the committed test instead builds a strictly-increasing `open` series and perturbs only the suffix to force a deterministic gate flip at one bar, where the mutant visibly leaks (`base=0.03` vs. `pert=0.02`) and the real module does not (`base=0.0` vs. `pert=0.0`) |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic OHLC series (seed 11, see `docs/measure_g191_093.py:_ohlc`), shipped default: **1,480 of 1,500** bars non-NaN (98.67%), first valid at bar 20 (exactly the structural warm-up boundary, `min_length - 1`). **1,480 distinct values**. Range `[0.004019, 0.110608]`, median `0.038238` |
 | D Scale-free | pass | `O1` is linear in `open` (a shift carries no arithmetic); the `open >= O1` comparison is unchanged by a positive rescale; `O-L` and `O-O1` each scale linearly, so their `MAX` scales by the same positive factor; `DBM`, a plain sum, scales linearly; dividing by `close` (scaled by the same factor) cancels it exactly. Measured on the 1,500-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754); x10/x3.7 **within float64 rounding tolerance** (max\|diff\| 7.29e-16 / 6.59e-16). `0 < 1480 fires < 1500` and `1480 > 1` distinct values rule out a constant column |
-| E Attribution | pending, run by issue-solver after this session | -- |
+| E Attribution | SHIP | `G191_093_20`: max \|rho\| **0.6822487** vs `ui` (n=396,535, `compute_all`); per-frame max median \|rho\| **0.6911409** vs `ui`, 0.0% of 89 frames at/above 0.90. Run `is62-g191_093-5e5c5021`, 89 ALTPORT-1 frames, 398,849 pooled bars, 329 + 358 = 687 comparators, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). Below the 0.76 SHIP line (`r3-perframe-0.90` bands). |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -102,9 +102,9 @@ tags it `SF`), checked by
 (296 -> 297); no `CATEGORY_BUCKETS` entry needed (that dict only tracks
 `trend`/`volatility`/`volume`, not `momentum`).
 
-Gate E owed; run by the launcher (`gate_e_overlap.py`, Backtesting #107)
-after this session, then recorded in `docs/gate_e_ledger.csv` by a later
-receipt session.
+Gate E run by the launcher (`gate_e_overlap.py`, Backtesting #107),
+recorded in `docs/gate_e_ledger.csv` by this receipt session
+(2026-11-09).
 
 ## Suite run (this repo, this session)
 
