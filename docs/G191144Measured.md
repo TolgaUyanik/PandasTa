@@ -1,8 +1,8 @@
 # g191_144 — measured (issue #57)
 
-> **Status: Gates A-D cleared (this session). Gate E pending, run by**
-> **issue-solver after this session. Gate F: this repo's suite green**
-> **modulo pre-existing/expected failures (below).**
+> **Status: Gates A-E cleared. Gate E: SHIP (max |rho| 0.4810, well under**
+> **the 0.76 ship line). Gate F: this repo's suite green modulo**
+> **pre-existing/expected failures (below).**
 
 Down-day illiquidity share: Guotai Junan's (2017, "GTJA191", internal quant
 report, read via the HKUDS/Vibe-Trading copy, MIT) alpha `#144`, per issue
@@ -75,7 +75,7 @@ valid exactly at bar 20).
 | B Causality | pass | Future-perturbation sweep (OHLCV series rewritten from `j` onward, another synthetic frame), 34 offsets past the 21-bar warm-up: real module **0 of 34** leaks (`python docs/measure_g191_144.py`). Two independent mutants (`importlib` source read, `exec`'d in memory), each shown live (differs from the real module) then caught at **34 of 34**: shifting the final write index `length=20` bars into the future, and flipping the backward `DELAY` (`close.shift(1)`, i.e. `C1`) into a FORWARD shift (`close.shift(-1)`) -- turning the previous-close reference into a look-ahead at the NEXT close |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic OHLCV series (seed 11, see `docs/measure_g191_144.py:_ohlcv`), shipped default: **1,480 of 1,500** bars non-NaN (98.67%), first valid at bar 20 (exactly the structural `length`-bar warm-up boundary -- this seed's first 20-bar window has >= 1 down day, so the `0/0` extension described above did not trigger here). **1,480 distinct values** observed (every fired bar distinct -- not a constant column), range `[0.427618, 1.860677]`, median `1.021865` |
 | D Scale-free | pass | `|C/C1-1|` is exactly invariant to a positive price rescale, and `AMOUNT = TP*V` scales by the product of any price-rescale and any volume-rescale, so `x`'s scale cancels identically between the down-day average (numerator) and the all-day average (denominator) -- algebraically exact for ANY positive `k` (price), `j` (volume), together or separately. Measured on the 1,500-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|**; VOLUME x8/x64 **bit-identical, 0.0 max\|diff\|**; BOTH (price and volume together) x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754, so the algebraic cancellation is also exact in float64). PRICE x10/x3.7: max\|diff\| **7.11e-15 / 5.77e-15**; VOLUME x10/x3.7: **1.44e-15 / 1.11e-15**; BOTH x10/x3.7: **7.77e-15 / 5.77e-15** -- all float64 rounding from the scalar multiply itself, far under the test's 1e-9 tolerance. `0 < 1,480 fires < 1,500` and `1,480 > 1` distinct values rule out a constant column |
-| E Attribution | **pending, run by issue-solver after this session** | not run in this session (CLAUDE.md, "Gate E: the launcher runs it") |
+| E Attribution | **SHIP** | Run by the launcher (`gate_e_overlap.py run --module pandas_ta.volume.g191_144`), 89 ALTPORT-1 frames, 687 comparators (329 `compute_all` + 358 manifest). `G191_144_20`: pooled max \|rho\| **0.4810** vs `OBV_Price_Divergence` (manifest set, n = 387,519); per-frame max median \|rho\| **0.4975** (also `OBV_Price_Divergence`), 0 of 89 frames >= 0.90. Verdict **SHIP** (< 0.76 pooled, < 0.90 per-frame median). Canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). Recorded in `docs/gate_e_ledger.csv`, measured 2026-11-09 |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -95,22 +95,22 @@ these from the live dictionary and passes. `tests/test_altport2_ports.py`'s
 `CATEGORY_TOTAL` updated to match (291 -> 292) and `CATEGORY_BUCKETS["volume"]`
 (36 -> 37).
 
-Ledger row: **owed**, recorded by a later receipt session once the
-launcher's Gate E run lands (CLAUDE.md, "Gate E ledger"). `mtd_ret` is still
-owed in the same ledger-test assertion, pre-existing and unrelated to this
-port (carried over from issue #206, per `docs/G191026Measured.md`'s
-identical note).
+Ledger row: recorded (`docs/gate_e_ledger.csv`, `g191_144:G191_144_20`,
+SHIP, measured 2026-11-09). `mtd_ret` is still owed in the ledger-test
+assertion, pre-existing and unrelated to this port (carried over from issue
+#206, per `docs/G191026Measured.md`'s identical note).
 
-## Suite run (this repo, this session)
+## Suite run (this repo, receipt session, after the Gate E ledger row landed)
 
 `python -m pytest -q`, full suite, default collection order: **3 failed,
-4639 passed, 83 skipped**. `g191_144`'s own tests (`tests/test_g191_144.py`):
+4646 passed, 83 skipped**. `g191_144`'s own tests (`tests/test_g191_144.py`):
 **23 passed**. The 3 failures are pre-existing / expected, all unrelated to
 this port's correctness (CLAUDE.md "Known breaks"):
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-(owed for `['g191_144', 'mtd_ret']` -- `g191_144` is this port's own owed row,
-`mtd_ret` pre-dates this session, per `docs/G191026Measured.md`'s identical
-note), `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
+(owed for `['mtd_ret']` only now -- `g191_144`'s own row is recorded in
+`docs/gate_e_ledger.csv`; `mtd_ret` pre-dates this session, per
+`docs/G191026Measured.md`'s identical note),
+`tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
 (needs the sibling `../AlternativeRepos` checkout, absent in this worktree)
 and `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
 (untracked `docs/pine/` corpus, CLAUDE.md "Known breaks"). No other test
