@@ -1,8 +1,7 @@
 # g191_190 — measured (issue #59)
 
-> **Status: Gates A-D cleared. Gate E: pending, run by issue-solver after**
-> **this session. Gate F: this repo's suite green modulo pre-existing/**
-> **expected failures (below).**
+> **Status: Gates A-E cleared, SHIP. Gate F: this repo's suite green**
+> **modulo pre-existing/expected failures (below).**
 
 Above/below geometric-mean return dispersion (20): Guotai Junan's (2017,
 "GTJA191", internal quant report, read via the HKUDS/Vibe-Trading copy,
@@ -90,7 +89,7 @@ structural boundary, no extension beyond it observed).
 | B Causality | pass | Future-perturbation sweep (close series rewritten from `j` onward, another synthetic series), 34 offsets past the 39-bar warm-up: real module **0 of 34** leaks (`python docs/measure_g191_190.py`). Two independent mutants (`importlib` source read, `exec`'d in memory, each shown live-different from the real module): shifting the final write index `length=20` bars into the future, and replacing `g`'s backward `DELAY(close,19)` with a FORWARD shift (`close.shift(-19)`) -- both caught at **34 of 34** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic close series (seed 11, see `docs/measure_g191_190.py:_close`), shipped default: **1,462 of 1,500** bars non-NaN (97.47%), first valid at bar 38 (exactly the structural warm-up boundary). **1,462 distinct values** observed (every fired bar distinct -- not a constant column), range `[-1.966201, 2.336908]`, median `-0.055001`. The remaining 38 bars are the warm-up, not the `LOG` domain guard -- on this synthetic frame the ratio inside `LOG` is positive at every warmed-up bar |
 | D Scale-free | pass | `r` and `g` are both return RATIOS, each exactly invariant under a positive price rescale by any `k>0` (the `k` cancels inside the ratio before any other arithmetic runs) -- not a special case of power-of-two multiplication. Every downstream term is built only from `r` and `g`, so the whole column is scale-free BY CONSTRUCTION. Measured on the 1,500-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754, so the already-exact algebraic invariance carries through exactly in float64); PRICE x10/x3.7: max\|diff\| **2.80e-14 / 2.15e-14** -- float64 rounding from the scalar multiply itself, far under the test's 1e-9 tolerance, not a scale dependency. `0 < 1,462 fires < 1,500` and `1,462 > 1` distinct values rule out a constant column |
-| E Attribution | **pending** | Run by the launcher (`gate_e_overlap.py run --module pandas_ta.statistics.g191_190`) after this session. This file will be updated with the measured numbers once that run lands |
+| E Attribution | **SHIP** | `G191_190_20`: max \|ρ\| **0.5182** vs `PVT_Slope_norm` (manifest, n = 395,456), per-frame max median \|ρ\| **0.5158** vs `PVT_Slope_norm_Pctl`, over 89 frames, 0.0% of frames ≥ 0.90. Both the pooled max and the per-frame max median are under the 0.76 SHIP line of `r3-perframe-0.90` -- SHIP, no revert needed. Run by the launcher: `gate_e_overlap.py run --module pandas_ta.statistics.g191_190`, 329 + 358 = 687 comparators, canary bit-equal (`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS`), `pandas_ta_src_sha1 e365c39baad4b052b263da4474d34a73108c764e`. Ledger row recorded 2026-11-09 (`docs/gate_e_ledger.csv`) |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -112,24 +111,19 @@ re-derives these from the live dictionary and passes.
 (293 -> 294); no `CATEGORY_BUCKETS` entry needed (that dict only tracks
 `trend`/`volatility`/`volume`, not `statistics`).
 
-Gate E ledger row: NOT yet recorded -- owed, per the rules governing this
-session (Gate E is run by the launcher after this session; a later receipt
-session records `docs/gate_e_ledger.csv` once that run lands).
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-is expected to fail on `g191_190` until then (CLAUDE.md, "Owed, not
-failed").
+Gate E ledger row: recorded 2026-11-09 (`python docs/gate_e_ledger.py record
+... --measured 2026-11-09`, `docs/gate_e_ledger.csv`), verdict SHIP.
 
-## Suite run (this session)
+## Suite run (receipt session, 2026-11-09, after the Gate E ledger row landed)
 
 `python -m pytest -q`, full suite, default collection order: **3 failed,
-4688 passed, 83 skipped**. `g191_190`'s own tests (`tests/test_g191_190.py`):
+4695 passed, 83 skipped**. `g191_190`'s own tests (`tests/test_g191_190.py`):
 **16 passed**. The 3 failures are pre-existing / expected, all unrelated to
 this port's correctness (CLAUDE.md "Known breaks"):
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-(fails with `no Gate E ledger row for ['g191_190', 'mtd_ret']` --
-`g191_190` is this port's own owed row, by design per this session's
-rules; `mtd_ret` pre-dates this session, per `docs/G191026Measured.md`'s
-identical note), `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
+(fails with `no Gate E ledger row for ['mtd_ret']` -- `g191_190` now HAS
+its row, recorded this session; `mtd_ret` pre-dates this session, per
+`docs/G191026Measured.md`'s identical note), `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
 (needs the sibling `../AlternativeRepos` checkout, absent in this
 worktree) and `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
 (untracked `docs/pine/` corpus, CLAUDE.md "Known breaks"). No other test
