@@ -942,6 +942,14 @@ class AnalysisIndicators(BasePandasObject):
         return self._post_process(result, **kwargs)
 
     # Momentum
+    def a101_007(self, adv_length=None, delta_length=None, ts_rank_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = a101_007(close=close, volume=volume, adv_length=adv_length,
+                           delta_length=delta_length, ts_rank_length=ts_rank_length,
+                           offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def a101_021(self, length=None, fast_length=None, adv_length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
@@ -1087,6 +1095,22 @@ class AnalysisIndicators(BasePandasObject):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
         result = fisher(high=high, low=low, length=length, signal=signal, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def g191_093(self, length=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_093(open_=open_, low=low, close=close, length=length,
+                           offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def g191_146(self, smooth1_length=None, smooth1_weight=None, mean_length=None,
+                 smooth2_length=None, smooth2_weight=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_146(close=close, smooth1_length=smooth1_length, smooth1_weight=smooth1_weight,
+                           mean_length=mean_length, smooth2_length=smooth2_length,
+                           smooth2_weight=smooth2_weight, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def gapm(self, length=None, signal=None, offset=None, **kwargs):
@@ -1786,6 +1810,44 @@ class AnalysisIndicators(BasePandasObject):
         result = ffd(close=close, d=d, threshold=threshold, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def g191_026(self, mean_length=None, corr_length=None, lag=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_026(high=high, low=low, close=close, mean_length=mean_length,
+                           corr_length=corr_length, lag=lag, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def g191_044(self, mean_v_length=None, corr_length=None, decay1_length=None,
+                 tsrank1_length=None, delta_length=None, decay2_length=None,
+                 tsrank2_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = g191_044(high=high, low=low, close=close, volume=volume,
+                           mean_v_length=mean_v_length, corr_length=corr_length,
+                           decay1_length=decay1_length, tsrank1_length=tsrank1_length,
+                           delta_length=delta_length, decay2_length=decay2_length,
+                           tsrank2_length=tsrank2_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def g191_165(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_165(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def g191_189(self, mean_length=None, mad_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_189(close=close, mean_length=mean_length,
+                           mad_length=mad_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def g191_190(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_190(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def halflife(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = halflife(close=close, length=length, offset=offset, **kwargs)
@@ -2070,6 +2132,12 @@ class AnalysisIndicators(BasePandasObject):
         low = self._get_column(kwargs.pop("low", "low"))
         close = self._get_column(kwargs.pop("close", "close"))
         result = fvg(high=high, low=low, close=close, max_zones=max_zones, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def g191_098(self, length=None, reversal_length=None, threshold=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_098(close=close, length=length, reversal_length=reversal_length,
+                           threshold=threshold, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def halftrend(self, atr_period=None, amplitude=None, offset=None, **kwargs):
@@ -2671,6 +2739,15 @@ class AnalysisIndicators(BasePandasObject):
         return self._post_process(result, **kwargs)
 
     # Volume
+    def a101_026(self, vol_rank_length=None, high_rank_length=None, corr_length=None,
+                 max_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = a101_026(high=high, volume=volume, vol_rank_length=vol_rank_length,
+                           high_rank_length=high_rank_length, corr_length=corr_length,
+                           max_length=max_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def a101_035(self, vol_length=None, price_length=None, return_length=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
@@ -2770,6 +2847,29 @@ class AnalysisIndicators(BasePandasObject):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = eom(high=high, low=low, close=close, volume=volume, length=length, divisor=divisor, offset=offset, drift=drift, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def g191_076(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = g191_076(close=close, volume=volume, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def g191_144(self, length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = g191_144(high=high, low=low, close=close, volume=volume, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def g191_191(self, mean_length=None, corr_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = g191_191(high=high, low=low, close=close, volume=volume, mean_length=mean_length,
+                           corr_length=corr_length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def kvo(self, fast=None, slow=None, signal=None, mamode=None, offset=None, **kwargs):
