@@ -1,6 +1,6 @@
 # g191_026 — measured (issue #56)
 
-> **Status: Gates A-D cleared, Gate E pending, run by issue-solver after this session.**
+> **Status: Gates A-F cleared. SHIP.**
 
 Seven-day mean gap plus 230-day VWAP/lagged-close correlation: Guotai
 Junan's (2017, "GTJA191", internal quant report, read via the
@@ -49,7 +49,7 @@ inferred.
 | B Causality | pass | Future-perturbation sweep (OHLC series rewritten from `j` onward, another synthetic frame), 30 offsets past the 234-bar warm-up: real module **0 of 30** leaks (`python docs/measure_g191_026.py`). Two independent mutants (`importlib` source read, `exec`'d in memory), each shown live (differs from the real module) then caught at **30 of 30**: shifting the whole write index `corr_length=230` bars into the future, and flipping the backward `DELAY` (`close.shift(lag)`) into a FORWARD shift (`close.shift(-lag)`) -- turning the lag term itself into a look-ahead |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic OHLC series (seed 11, see `docs/measure_g191_026.py:_ohlc`), shipped default: **1,266 of 1,500** bars non-NaN (84.40%) -- exactly `n - 234`, the `lag + corr_length = 235`-bar warm-up (first valid index 234), no wider gap. **1,266 distinct values** observed (every fired bar distinct -- not a constant column), range `[0.508263, 0.976310]`, median `0.861435` |
 | D Scale-free | pass | Pearson correlation is exactly invariant to a positive rescale of either input (the scale cancels between covariance and standard deviation), and the mean-gap term's own `/close` cancels a positive price rescale algebraically too -- so the whole column is exactly invariant algebraically for ANY `k > 0`. Measured on the 1,500-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754, so the algebraic cancellation is also exact in float64); PRICE x10/x3.7: max\|diff\| **6.38e-13 / 6.91e-13** -- float64 rounding from the scalar multiply itself, well under the test's 1e-9 tolerance, not a scale dependency. `0 < 1,266 fires < 1,500` and `1,266 > 1` distinct values rule out a constant column |
-| E Attribution | pending, run by issue-solver after this session | -- |
+| E Attribution | SHIP | `G191_026_7_230_5`: max\|rho\| **0.4614** vs `Dist_to_FWMA_pct_Pctl` (`manifest`, n = 378,023); per-frame max median \|rho\| **0.4786** (also `Dist_to_FWMA_pct_Pctl`), 89 frames, 0.0% of frames >= 0.90. 1 of 687 comparators degenerate. Run `is56-g191_026-3e2ead20` (`pandas_ta_src_sha1` `5a9499d5025ff5890c7b19f42147b223d6e5e29f`, canary AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS bit-equal), recorded in `docs/gate_e_ledger.csv`, measured 2026-11-09. 0.4614 < 0.76 ship line (CLAUDE.md Gate E bands) -- well clear, no DISCLOSE tier reached |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -70,10 +70,8 @@ values, so the generator tags it `SF`). `tests/test_altport2_ports.py`'s
 needed (that dict only tracks `trend`/`volatility`/`volume`, not
 `statistics`).
 
-The ledger row cannot be recorded yet: Gate E has not run (`docs/pine/` and
-the parent `Backtesting` repo are both outside this worktree). A later
-receipt session records `g191_026`'s row after the launcher's Gate E run
-and fills in the Gate E line above. `mtd_ret` is also still owed in the same
+Ledger row recorded 2026-11-09 (`python docs/gate_e_ledger.py record ... --measured 2026-11-09`),
+`docs/gate_e_ledger.csv`. `mtd_ret` is still owed in the same ledger-test
 assertion, pre-existing and unrelated to this port (carried over from issue
 #206, per `docs/G191076Measured.md`'s identical note).
 
