@@ -1,6 +1,6 @@
 # g191_002 — measured (issue #63)
 
-> **Status: Gates A-D cleared, this repo's suite green. Gate E: pending, run by issue-solver after this session.**
+> **Status: Gates A-E cleared (SHIP), this repo's suite green.**
 
 One-day change of close location: Guotai Junan's (2017, "GTJA191", internal
 quant report, read via the HKUDS/Vibe-Trading copy, MIT) alpha `#2`, per
@@ -72,7 +72,7 @@ matching the prototype's own unconditional use of `sdiv`.
 | B Causality | pass | Future-perturbation sweep (high/low/close jointly rewritten from `j` onward), 37 offsets past the 2-bar warm-up: real module **0 of 37** leaks. Write-shift mutant (final write index shifted 30 bars into the future, `result = (-d1).shift(-30)`): shown live different from the real module, then caught **37 of 37** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic high/low/close walk (seed 11, see `docs/measure_g191_002.py:_walk`), shipped default: **1,499 of 1,500** bars non-NaN (99.93%), first valid at bar 1 (exactly the structural warm-up boundary, `min_length - 1`). **1,499 distinct values**. Range `[-1.857726, 1.880959]`, median `0.015892` |
 | D Scale-free | pass | `clv`'s numerator (`2*close-high-low`) and denominator (`high-low`) are both linear in `(high,low,close)`, so a positive rescale cancels exactly, leaving `clv` -- and hence `DELTA(clv,1)` and its negation -- unchanged. Measured on the 1,500-bar walk: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754); x10/x3.7 **within float64 rounding tolerance** (max\|diff\| 2.75e-13 / 3.46e-13). `0 < 1499 fires < 1500` and `1499 > 1` distinct values rule out a constant column |
-| E Attribution | pending, run by issue-solver after this session | — |
+| E Attribution | SHIP | `G191_002_1`: max \|ρ\| **0.6885** vs `CLV_Pctl` (manifest, n = 391,357); per-frame max median \|ρ\| **0.6867** (against `CLV_Pctl`, 89 frames, 0.0% of frames ≥ 0.90). Below both SHIP thresholds (pooled < 0.76, per-frame median < 0.90). Run `is63-g191_002-9647fe36`, 89 ALTPORT-1 frames, 398,849 pooled bars, 329 + 358 = 687 comparators, canary bit-equal (`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS`), measured 2026-11-09 |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -95,20 +95,20 @@ tags it `SF`), checked by
 (297 -> 298); no `CATEGORY_BUCKETS` entry needed (that dict only tracks
 `trend`/`volatility`/`volume`, not `momentum`).
 
-Gate E to be run by the launcher (`gate_e_overlap.py`, Backtesting #107);
-`docs/gate_e_ledger.csv` row and the numbers above are filled in by a
-later receipt session once that run exists.
+Gate E run by the launcher (`gate_e_overlap.py`, Backtesting #107);
+`docs/gate_e_ledger.csv` row recorded 2026-11-09
+(`python docs/gate_e_ledger.py record ... --measured 2026-11-09`).
 
 ## Suite run (this repo, this session)
 
-`python -m pytest -q`, full suite, default collection order: **3 failed,
-4795 passed, 83 skipped**. `g191_002`'s own tests
-(`tests/test_g191_002.py`): **16 passed**. Pre-existing / expected
-failures, all unrelated to this port's correctness (CLAUDE.md "Known
-breaks" plus this port's own owed Gate E row):
+`python -m pytest -q`, full suite, default collection order (after Gate
+E ran and its ledger row was recorded, 2026-11-09): **3 failed, 4802
+passed, 83 skipped**. `g191_002`'s own tests (`tests/test_g191_002.py`):
+**16 passed**. Pre-existing failures, unrelated to this port
+(CLAUDE.md "Known breaks"):
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-(owed for `['g191_002', 'mtd_ret']` -- `g191_002`'s row is owed by design
-per this session's override rules; `mtd_ret` pre-dates this session),
+(owed for `['mtd_ret']` only -- that row pre-dates this session;
+`g191_002`'s own row is recorded and no longer owed),
 `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
 (needs the sibling `../AlternativeRepos` checkout, absent in this
 worktree) and `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
