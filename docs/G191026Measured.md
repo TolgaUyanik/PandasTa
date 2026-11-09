@@ -78,13 +78,14 @@ assertion, pre-existing and unrelated to this port (carried over from issue
 ## Suite run (this repo, this session)
 
 `python -m pytest -q`, full suite, default collection order: **3 failed,
-4608 passed, 83 skipped**. `g191_026`'s own tests (`tests/test_g191_026.py`):
+4615 passed, 83 skipped**. `g191_026`'s own tests (`tests/test_g191_026.py`):
 **16 passed**. Pre-existing / expected failures, all unrelated to this
-port's correctness (CLAUDE.md "Known breaks" plus this port's own owed Gate
-E row):
+port's correctness (CLAUDE.md "Known breaks"); `g191_026`'s own ledger row
+is recorded (see "Ledger row recorded" above), so it no longer appears
+here:
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-(owed for `['g191_026', 'mtd_ret']` -- `g191_026`'s row is owed by design
-per this session's override rules; `mtd_ret` pre-dates this session),
+(owed for `['mtd_ret']` only -- pre-dates this session, per
+`docs/G191076Measured.md`'s identical note),
 `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
 (needs the sibling `../AlternativeRepos` checkout, absent in this worktree)
 and `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
