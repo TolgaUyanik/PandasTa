@@ -163,19 +163,22 @@ rolling ADF stay blocked until HLIFE-3 reports, as #4 says.
 
 ### Gate F (the author's machine, `.venv-pd2`)
 
-Run with CI's two `--deselect`s; `dev` on 2026-11-08, this branch on 2026-11-09 after review
-round 2:
+Run with CI's two `--deselect`s. `dev` moved while this PR was open; the branch merged
+`origin/dev` at `830cb97` (2026-11-09; conflicts only in the shared counters and one `core.py`
+accessor block). With `GATE_E_PENDING_OK=1`, as CI runs:
 
-| tree | `GATE_E_PENDING_OK=1` (as CI) | without it |
-|---|---|---|
-| `dev` at `12891bd` | 0 failed, 4437 passed, 84 skipped | 1 failed (`mtd_ret`, #206), 4437 passed, 83 skipped |
-| this branch | 0 failed, **4470 passed**, 84 skipped | 1 failed (`['halflife', 'mtd_ret']`), 4470 passed, 83 skipped |
+| tree | result |
+|---|---|
+| `dev` at `830cb97` | 0 failed, 4778 passed, 84 skipped |
+| this branch (merge `f0b208d`) | 0 failed, **4811 passed**, 84 skipped |
 
 The +33 passes are the 32 tests of `tests/test_halflife.py` and
-`test_every_new_indicator_has_gate_b_and_d_tests[halflife]`. With the variable, the owed ledger
-row is a skip; without it, the one failure. CI runs: `7c4896e` 4463 passed / 86 skipped,
-`835eba1` (run 42519643902) 4466 passed / 86 skipped, both green on numpy 1.26.4 without
-statsmodels. CI prints no skip reasons; its 2 passes fewer and 2 skips more than the local run are
+`test_every_new_indicator_has_gate_b_and_d_tests[halflife]`; the extra skip in both is the owed
+ledger row (`mtd_ret`, #206, on `dev`; `halflife` here), which fails instead without the
+variable. Earlier, on the `12891bd` base (2026-11-08/09): `dev` 4437 passed / 84 skipped, this
+branch 4470 / 84; without the variable 1 failed in each (`mtd_ret`; `['halflife', 'mtd_ret']`).
+CI runs: `7c4896e` 4463 passed / 86 skipped, `835eba1` (run 42519643902) 4466 passed / 86
+skipped, both green on numpy 1.26.4 without statsmodels. CI prints no skip reasons; its 2 passes fewer and 2 skips more than the local run are
 consistent with `kpss`'s two statsmodels oracle tests, which `importorskip`, and CI does not
 install statsmodels. That is an inference, not a measurement.
 
@@ -183,15 +186,16 @@ install statsmodels. That is an inference, not a measurement.
 
 `docs/IndicatorDictionary.md` was **fully regenerated** with
 `.venv-pd2/Scripts/python docs/gen_indicator_dictionary.py` (pandas 2.3.3, numpy 2.5.4, TA-Lib
-0.7.1). The same-day run on `dev` without this port reproduced the committed file exactly (the
-generator stamps the probe date, so a run on another day differs in that line). The diff against
-`dev`, enumerated line by line on 2026-11-08: the `halflife` row (`HLIFE_100` SF, warm-up 100),
-`statistics (24)`, the counts (287 probed, 285 in `Category`, 293 callable), and `halflife` added
-to the *Feed-ready shortlist*. Nothing else. Regenerating after review round 1 changed nothing:
-the row's description is cut at 150 characters, before the docstring text that changed; the same holds after round 2 (the only line a 2026-11-09 run changed was the probe date).
+0.7.1). On 2026-11-08 a same-day run on `dev` (`12891bd`) without this port reproduced the
+committed file exactly (the generator stamps the probe date, so a run on another day differs in
+that line). After merging `dev` at `830cb97` it was regenerated again (2026-11-09). The diff
+against `origin/dev`, enumerated line by line: the `halflife` row (`HLIFE_100` SF, warm-up 100),
+`statistics (29)`, the counts (300 probed, 298 in `Category`, 306 callable), and `halflife` added
+to the *Feed-ready shortlist*. Nothing else. The row's description is cut at 150 characters,
+before any docstring text the review rounds changed.
 
-README: 285 in `Category`, 293 callable, `statistics (24)`. `docs/MLCompanionContract.md` follows
-the dictionary: 630 tagged columns, 273 `SF`.
+README: 298 in `Category`, 306 callable, `statistics (29)`. `docs/MLCompanionContract.md` follows
+the dictionary: 643 tagged columns, 286 `SF`.
 
 HLIFE-4 is owed: `docs/indicators/halflife.md` was not generated (`docs/gen_indicator_pages.py`
 reads Gate E runs from `../Backtesting`, absent here), and the parent's
