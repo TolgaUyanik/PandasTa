@@ -1,7 +1,7 @@
 # g191_152 — measured (issue #66)
 
-> **Status: Gates A-D cleared, this repo's suite green except the pre-existing/owed breaks
-> below. Gate E: pending, run by issue-solver after this session.**
+> **Status: Gates A-E cleared (SHIP), this repo's suite green except the pre-existing breaks
+> below.**
 
 MACD of the smoothed lagged 9-day ratio: Guotai Junan's (2017, "GTJA191", internal quant
 report, read via the HKUDS/Vibe-Trading copy, MIT) alpha `#152`, per issue #66's own
@@ -65,7 +65,7 @@ defaults, enforced by `verify_series`.
 | B Causality | pass | Future-perturbation sweep (close series rewritten from `j` onward), 34 offsets past the 52-bar warm-up: real module **0 of 34** leaks. Write-shift mutant (final GTJA-`SMA` write index `smooth2_length=9` bars into the future): caught **34 of 34**. Centered-mean mutant (`fast = s9_1.rolling(fast_length, center=True).mean()`, the `bos` look-ahead bug class): caught **34 of 34**. A third construction (`r1 = ratio.shift(-1)`, a genuine one-bar look-ahead) is live-different from the real module but caught **0 of 34** -- the pipeline's own further `DELAY`s push its first visible output effect one bar past the checked window; disclosed in the module docstring and pinned as a negative result (`tests/test_g191_152.py::test_forward_inner_delay_mutant_is_live_but_not_caught_by_this_sweep`), not used as a Gate B pin |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic close series (seed 11, lognormal walk, `docs/measure_g191_152.py:_walk`), shipped default: **1,448 of 1,500** bars non-NaN (96.53%), first valid at bar 52 (exactly the structural warm-up boundary, `min_length - 1`). **1,448 distinct values**. Range `[-0.029103, 0.025660]`, median `-0.000714` |
 | D Scale-free | pass | `ratio = C/DELAY(C,9)` is linear-cancelling under a positive price rescale (`k*C / (k*DELAY(C,9)) = C/DELAY(C,9)`), so every downstream term built only from `ratio` is untouched for any `k > 0`. Measured on the 1,500-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754); x10/x3.7 **within float64 rounding tolerance** (max\|diff\| 2.02e-16 / 1.82e-16). `0 < 1448 fires < 1500` and `1448 > 1` distinct values rule out a constant column |
-| E Attribution | pending, run by issue-solver after this session | -- |
+| E Attribution | SHIP | `G191_152_9_9_1_12_26_9_1`: max \|ρ\| **0.6995** vs `ppo_PPOs_12_26_9` (`compute_all`, n = 394,221); per-frame max median **0.7057** (89 frames); verdict **SHIP** (< 0.76 ship line). Run `is66-g191_152-265ef14e`, `gate_e_overlap.py run --module pandas_ta.momentum.g191_152`, 89 frames, 398,849 pooled bars, 329 + 358 comparators, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). Recorded in `docs/gate_e_ledger.csv` (measured 2026-11-09). |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -84,12 +84,10 @@ synthetic frame and takes many distinct values, so the generator tags it `SF`), 
 `CATEGORY_BUCKETS` entry needed (that dict only tracks `trend`/`volatility`/`volume`, not
 `momentum`).
 
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` now owes a row for
-`['g191_152', 'mtd_ret']` (expected -- this is the "Gate E owed, not failed" skip described in
-CLAUDE.md, surfaced as a hard failure in this local run because `GATE_E_PENDING_OK` is not set
-outside CI). `mtd_ret` pre-dates this session (carried over from issue #206, per
-`docs/G191146Measured.md`'s identical note); `g191_152` is this port's own pending row, closed by
-the receipt session after the launcher's Gate E run.
+`g191_152`'s Gate E row is recorded in `docs/gate_e_ledger.csv` (measured 2026-11-09, this
+session). `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` still
+owes a row for `mtd_ret`, pre-dating this session (carried over from issue #206, per
+`docs/G191146Measured.md`'s identical note) -- unrelated to this port.
 
 ## Suite run (this repo, this session)
 
