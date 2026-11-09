@@ -1810,6 +1810,20 @@ class AnalysisIndicators(BasePandasObject):
                            corr_length=corr_length, lag=lag, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def g191_044(self, mean_v_length=None, corr_length=None, decay1_length=None,
+                 tsrank1_length=None, delta_length=None, decay2_length=None,
+                 tsrank2_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = g191_044(high=high, low=low, close=close, volume=volume,
+                           mean_v_length=mean_v_length, corr_length=corr_length,
+                           decay1_length=decay1_length, tsrank1_length=tsrank1_length,
+                           delta_length=delta_length, decay2_length=decay2_length,
+                           tsrank2_length=tsrank2_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def g191_165(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = g191_165(close=close, length=length, offset=offset, **kwargs)
