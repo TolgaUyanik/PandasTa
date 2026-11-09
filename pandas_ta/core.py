@@ -2096,6 +2096,12 @@ class AnalysisIndicators(BasePandasObject):
         result = fvg(high=high, low=low, close=close, max_zones=max_zones, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def g191_098(self, length=None, reversal_length=None, threshold=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_098(close=close, length=length, reversal_length=reversal_length,
+                           threshold=threshold, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def halftrend(self, atr_period=None, amplitude=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
