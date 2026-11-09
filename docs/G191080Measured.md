@@ -1,7 +1,7 @@
 # g191_080 — measured (issue #64)
 
-> **Status: Gates A-D cleared, this repo's suite green except the pre-existing/owed breaks
-> below. Gate E: pending, run by issue-solver after this session.**
+> **Status: shipped through Gates A-F. Gate E SHIP (max \|rho\| 0.6913 vs
+> `Volume_Ratio_20_Pctl`). This repo's suite green except the pre-existing breaks below.**
 
 5-day volume change: Guotai Junan's (2017, "GTJA191", internal quant report, read via the
 HKUDS/Vibe-Trading copy, MIT) alpha `#80`, per issue #64's own instruction. Module
@@ -43,7 +43,7 @@ number.
 | B Causality | pass | Future-perturbation sweep (volume rewritten from `j` onward, another synthetic series), 29 offsets past the 5-bar warm-up: real module **0 of 29** leaks (`python docs/measure_g191_080.py`). One mutant (`importlib` source read, `exec`'d in memory, the final write index shifted `length=5` bars into the future), shown live (differs from the real module) then caught at **29 of 29** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,600-bar synthetic volume series (seed 11, uniform 1e4-1e6, see `docs/measure_g191_080.py:_walk`), shipped default: **1,595 of 1,600** bars non-NaN (99.69%) -- exactly `n - 5`, the `length = 5`-bar warm-up, no wider gap. **1,595 distinct values** observed on this frame (every fired bar distinct -- not a constant column), range `[-97.905416, 6200.430258]`, median `-0.431888` |
 | D Scale-free | pass | For ANY `k > 0`: `100*(k*V-k*V5)/(k*V5) = 100*(V-V5)/V5` algebraically -- the `k` cancels inside the division itself, not merely for a power-of-two multiplier. The column reads no price input at all, so a close/high/low/open rescale cannot reach it (no price-scale test applies, same as `osap_voltrend_60`). Measured on the 1,600-bar series: VOLUME x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754, so the algebraic cancellation is also exact in float64). VOLUME x10/x3.7: max\|diff\| **9.09e-13** both -- float64 rounding from the scalar multiply itself, well under the test's 1e-9 tolerance, not a scale dependency. `0 < 1,595 fires < 1,600` and `1,595 > 1` distinct values rule out a constant column |
-| E Attribution | pending, run by issue-solver after this session | -- |
+| E Attribution | **SHIP** -- `G191_080_5` max \|rho\| **0.6913** vs `Volume_Ratio_20_Pctl` (manifest comparator, n = 391,774), per-frame max median **0.6957** (89 frames, 0.0% >= 0.90) -- under the 0.76 SHIP line | `gate_e_overlap.py run --module pandas_ta.volume.g191_080`, run `is64-g191_080-0f4c3a01`, 89 ALTPORT-1 frames, 398,849 pooled bars, 329 + 358 = 687 comparators, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). Ledger row recorded `docs/gate_e_ledger.csv` (measured 2026-11-09) |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -59,11 +59,9 @@ synthetic frame and takes many distinct values, so the generator tags it `SF`).
 `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL` updated to match (298 -> 299) and
 `CATEGORY_BUCKETS["volume"]` (37 -> 38).
 
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` now owes a row for
-`g191_080` (expected -- this is the "Gate E owed, not failed" skip described in CLAUDE.md,
-surfaced as a hard failure in this local run because `GATE_E_PENDING_OK` is not set outside CI).
-`mtd_ret` is also owed in the same assertion, pre-existing and unrelated to this port (carried
-over from issue #206, per `docs/G191146Measured.md`'s identical note).
+`g191_080`'s Gate E ledger row is now recorded (`docs/gate_e_ledger.csv`, measured 2026-11-09,
+SHIP). `mtd_ret` remains owed in the same assertion, pre-existing and unrelated to this port
+(carried over from issue #206, per `docs/G191146Measured.md`'s identical note).
 
 ## Suite run (this repo, this session)
 
