@@ -1,8 +1,7 @@
 # g191_098 — measured (issue #58)
 
-> **Status: Gates A-D cleared. Gate E: pending, run by issue-solver after**
-> **this session. Gate F: this repo's suite green modulo pre-existing/**
-> **expected failures (below).**
+> **Status: Gates A-E cleared, SHIP. Gate F: this repo's suite green**
+> **modulo pre-existing/expected failures (below).**
 
 100-day trend-gated drawdown / 3-day reversal: Guotai Junan's (2017,
 "GTJA191", internal quant report, read via the HKUDS/Vibe-Trading copy,
@@ -79,7 +78,7 @@ boundary, no extension beyond it observed).
 | B Causality | pass | Future-perturbation sweep (close series rewritten from `j` onward, another synthetic series), 32 offsets past the 199-bar warm-up: real module **0 of 32** leaks (`python docs/measure_g191_098.py`). Mutant 1 (`importlib` source read, `exec`'d in memory, shown live-different from the real module): shifting the final write index `length=100` bars into the future -- caught at **32 of 32**. Mutant 2: replacing the gate's backward `DELAY(close,100)` with a FORWARD shift (`close.shift(-100)`) -- caught at a **measured 21 of 32**, not every offset. Disclosed reason: the gate only feeds a `<= 0.05` step function, so a corrupted denominator leaks into the output only on the offsets where it actually flips which branch is selected; mutant 1 proves the harness catches every offset when the leak is continuous rather than step-gated, so the gap in mutant 2 is a property of this ternary formula, not a weaker test |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic close series (seed 11, see `docs/measure_g191_098.py:_close`), shipped default: **1,301 of 1,500** bars non-NaN (86.73%), first valid at bar 199 (exactly the structural warm-up boundary). Of those, **915 bars take the drawdown branch** (`gate <= 0.05`) and **386 bars take the reversal branch** (`gate > 0.05`) -- BOTH branches of the ternary fire on real-shaped data, not just one. **1,267 distinct values** observed (not a constant column), range `[-0.289941, 0.082892]`, median `-0.053172` |
 | D Scale-free | pass | Under a positive price rescale, `trend_mean`, `DELTA(trend_mean,100)` and `DELAY(close,100)` all scale linearly by the same factor `k`, so `gate` is exactly invariant and the branch taken at every bar is identical pre- and post-rescale; `drawdown` and `reversal` both scale by `k` in whichever branch is active, and the final division by `close` (which also scaled by `k`) cancels it exactly. Measured on the 1,500-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754, so the algebraic cancellation is also exact in float64). PRICE x10/x3.7: max\|diff\| **2.22e-16 / 1.94e-16** -- float64 rounding from the scalar multiply itself, far under the test's 1e-9 tolerance. `0 < 1,301 fires < 1,500` and `1,267 > 1` distinct values rule out a constant column |
-| E Attribution | **pending** | Run by the launcher (`gate_e_overlap.py run --module pandas_ta.trend.g191_098`) after this session. This file will be updated with the measured numbers once that run lands |
+| E Attribution | **SHIP** | Run by the launcher: `gate_e_overlap.py run --module pandas_ta.trend.g191_098`, 89 ALTPORT-1 frames, 398,849 pooled bars, 687 comparators (329 `compute_all` + 358 `ml_features` manifest). Column `G191_098_100_3_0.05`: pooled max \|ρ\| **0.5067** vs `cmo_Pctl` (manifest, n=381,138); per-frame max median \|ρ\| **0.5174** (also vs `cmo_Pctl`); `perframe_pct_frames_ge_090` = 0.0. Both bands (pooled and per-frame-median) land under the 0.76 SHIP line -- **SHIP**, no strike. Ledger row recorded: `docs/gate_e_ledger.csv` (`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-09`), run dir `is58-g191_098-e820d44f` |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -99,11 +98,8 @@ re-derives these from the live dictionary and passes.
 `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL` updated to match
 (292 -> 293) and `CATEGORY_BUCKETS["trend"]` (60 -> 61).
 
-Gate E ledger row: NOT yet recorded -- owed, per the rules governing this
-session (Gate E is run by the launcher after this session; a later receipt
-session records `docs/gate_e_ledger.csv` once that run lands).
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-is therefore expected to fail in this session's own run (see below).
+Gate E ledger row: recorded 2026-11-09, SHIP, max\|ρ\| 0.5067 vs `cmo_Pctl`
+(`docs/gate_e_ledger.csv`).
 
 ## Suite run (this session)
 
