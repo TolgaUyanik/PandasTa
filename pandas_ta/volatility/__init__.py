@@ -10,6 +10,7 @@ from .cvi import cvi
 from .donchian import donchian
 from .g191_023 import g191_023
 from .g191_160 import g191_160
+from .g191_174 import g191_174
 from .garman_klass import garman_klass
 from .har_park import har_park
 from .hwc import hwc
