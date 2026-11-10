@@ -2161,6 +2161,14 @@ class AnalysisIndicators(BasePandasObject):
         result = fvg(high=high, low=low, close=close, max_zones=max_zones, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def g191_069(self, length=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_069(open_=open_, high=high, low=low, close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def g191_098(self, length=None, reversal_length=None, threshold=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = g191_098(close=close, length=length, reversal_length=reversal_length,
