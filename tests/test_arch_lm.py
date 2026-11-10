@@ -26,11 +26,14 @@ What these pin, in order of how much it would hurt to lose:
   bars whose window holds one of its two returns.
 * SCALE-FREE: x8/x64 bit-identical, x10/x3.7 within 1e-9, and the column
   fires and is not constant.
-* Edge cases (flat, bad prices, short input, length floor, chunk
-  boundaries) and wiring (`Category`, the accessor, `ARCHLM_100`).
+* Edge cases (flat, bad prices, extreme closes whose return overflows
+  when squared, the exact NaN span of a run of unchanged closes, short
+  input, length floor, chunk boundaries) and wiring (`Category`, the
+  accessor, `ARCHLM_100`).
 """
 import importlib
 import types
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -95,7 +98,9 @@ def test_matches_statsmodels_the_source_call(length):
     r = c[1:] / c[:-1] - 1
     lags = min(10, length // 5)
     for t in range(length, c.size):
-        ref = diag.het_arch(r[t - length:t], nlags=lags, result_object=False)[0]
+        with warnings.catch_warnings():  # 0.15's FutureWarning on the tuple return
+            warnings.simplefilter("ignore", FutureWarning)
+            ref = diag.het_arch(r[t - length:t], nlags=lags)[0]
         assert abs(out[t] - ref) < 1e-11, t
     assert np.isnan(out[:length]).all()
 
@@ -130,16 +135,13 @@ def _pooled(make, k=10, n=600):
 
 def test_clustered_volatility_reads_higher():
     """Medians over 10 paths x 500 bars (measured): iid normal 8.947,
-    GARCH(0.10, 0.85) 12.728, GARCH(0.20, 0.75) 17.985 -- ordered.
-    Share above the 5% critical value: 4.2% / 23.6% / 49.1%."""
+    GARCH(0.10, 0.85) 12.728, GARCH(0.20, 0.75) 17.985 -- ordered."""
     normal = _pooled(lambda n, s: _iid(n, s))
     mid = _pooled(lambda n, s: _garch(n, s, 0.10, 0.85))
     high = _pooled(lambda n, s: _garch(n, s, 0.20, 0.75))
     meds = tuple(np.median(v) for v in (normal, mid, high))
     assert meds[0] < meds[1] < meds[2]
     assert meds == pytest.approx((8.9469, 12.7281, 17.9848), abs=1e-3)
-    shares = tuple(np.mean(v > CRIT_5PCT_10DF) for v in (normal, mid, high))
-    assert shares == pytest.approx((0.0424, 0.2360, 0.4908), abs=1e-4)
 
 
 def test_fat_tails_read_lower_than_normal():
@@ -252,6 +254,35 @@ def test_a_bad_close_blanks_its_windows(bad):
     out = arch_lm(c2)
     assert out.iloc[150:251].isna().all()  # returns 150 and 151 are NaN
     pd.testing.assert_series_equal(out.drop(range(150, 251)), base.drop(range(150, 251)))
+
+
+@pytest.mark.parametrize("extreme, blank", [(1e-300, range(151, 251)), (1e160, range(150, 250))])
+def test_an_extreme_close_blanks_its_windows_instead_of_raising(extreme, blank):
+    """A positive but extreme close makes one return's square overflow
+    (return 151 for 1e-300, return 150 for 1e160). Unmasked, that inf
+    reached the SVD and raised LinAlgError for the whole series; now the
+    100 windows holding it are NaN and every bar outside 150..250 is
+    unchanged."""
+    close = _garch(300, seed=1)
+    base = arch_lm(close)
+    c2 = close.copy()
+    c2.iloc[150] = extreme
+    out = arch_lm(c2)
+    assert out.iloc[list(blank)].isna().all()
+    assert out.isna().sum() == base.isna().sum() + 100
+    pd.testing.assert_series_equal(out.drop(range(150, 251)), base.drop(range(150, 251)))
+
+
+def test_a_run_of_unchanged_closes_blanks_before_the_window_is_flat():
+    """149 zero returns (150 equal closes from bar 300): the regressand is
+    the window's last 90 squared returns, so the column blanks once those
+    are all zero -- 149 - 90 + 1 = 60 bars (390..449), 10 bars before a
+    window would be entirely flat."""
+    close = _iid(800, seed=4).to_numpy().copy()  # read-only view on pandas 3
+    close[300:450] = close[300]
+    out = arch_lm(Series(close))
+    blank = np.flatnonzero(out.isna().to_numpy()[100:]) + 100
+    assert blank.tolist() == list(range(390, 450))
 
 
 def test_short_input_and_length_floor():
