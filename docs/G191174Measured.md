@@ -1,7 +1,8 @@
 # g191_174 — measured (issue #74)
 
-> **Status: Gates A-D cleared. Gate E: pending, run by issue-solver after this session.
-> This repo's suite green except the pre-existing breaks below and the owed Gate E ledger row.**
+> **Status: Gates A-F cleared. Gate E measured 2026-11-10: DISCLOSE, max|rho| 0.7885 vs
+> `mad_pct` -- under the 0.90 strike line, column ships. Ledger row recorded.
+> This repo's suite green except the pre-existing breaks below.**
 
 Up-day volatility EMA: Guotai Junan's (2017, "GTJA191", internal quant report, read via the
 HKUDS/Vibe-Trading copy, MIT) alpha `#174`, per issue #74's own instruction. Module
@@ -71,7 +72,7 @@ smooth_length - 1` = `20+20-1` = **39** bars at the shipped defaults, enforced b
 | B Causality | pass | Future-perturbation sweep (close series rewritten from `j` onward), 34 offsets past the 38-bar warm-up: real module **0 of 34** leaks. Write-shift mutant (final write index `smooth_length=20` bars into the future): caught **34 of 34**. Centered-std mutant (`std_c = close.rolling(std_length, center=True).std()`, the `bos` look-ahead bug class): caught **34 of 34** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic close series (seed 11, lognormal walk, `docs/measure_g191_174.py:_walk`), shipped default: **1,462 of 1,500** bars non-NaN (97.47%), first valid at bar 38 (exactly the structural warm-up boundary, `min_length - 1`). **1,462 distinct values**. Range `[0.006771, 0.025463]`, median `0.012430`, no negative values observed |
 | D Scale-free | pass | The up-day branch choice (`C>C1`) is invariant under a positive price rescale, and `STD`/GTJA `SMA` are both linear in a positive scalar multiple of their input, so `u` scales by the same factor as `close`; the final `/close` division is what cancels that factor exactly. Measured on the 1,500-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754); x10/x3.7 **within float64 rounding tolerance** (max\|diff\| 3.06e-14 / 1.05e-14). `0 < 1462 fires < 1500` and `1462 > 1` distinct values rule out a constant column; no negative value observed on the fired bars |
-| E Attribution | **pending, run by issue-solver after this session** | per CLAUDE.md "Owed, not failed" -- this session does not run Gate E or touch `../Backtesting` |
+| E Attribution | **DISCLOSE** (0.76 <= \|rho\| < 0.80, under the 0.90 strike line) | Spearman, 89 ALTPORT-1 frames, 398,849 pooled bars, 687 comparators (329 `compute_all` + 358 manifest), canary `AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS` bit-equal. `G191_174_20_20_1`: max\|rho\| **0.7885** vs `mad_pct` (manifest, n=395,467); per-frame max median **0.7747** (also `mad_pct`, 89 frames, 0% of frames >= 0.90). Run `is74-g191_174-716f26eb`, recorded in `docs/gate_e_ledger.csv` |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -90,19 +91,24 @@ distinct values, so the generator tags it `SF`), checked by
 `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL` updated to match (`308 -> 309`) and
 `CATEGORY_BUCKETS["volatility"]` updated (`30 -> 31`).
 
-`g191_174`'s Gate E row is NOT yet in `docs/gate_e_ledger.csv`, per this session's override
-rules (issue-solver runs Gate E after this session; a later receipt session records the ledger
-row and fills in the measured numbers above). This is expected to leave
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` failing on this
-tree until that happens (see Suite run below).
+`g191_174`'s Gate E row is recorded in `docs/gate_e_ledger.csv` (verdict `DISCLOSE`, run
+`is74-g191_174-716f26eb`, measured 2026-11-10).
 
 ## Suite run (this repo, this session)
 
-`python -m pytest -q`, full suite, default collection order: **3 failed, 5071 passed, 83
-skipped**. `g191_174`'s own tests (`tests/test_g191_174.py`): **17 passed**. The 3 failures,
-all pre-existing or expected-until-the-launcher's-run (CLAUDE.md "Known breaks" plus this
-port's own owed Gate E ledger row, see above): `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-(owed row above), `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
-(needs the sibling `../AlternativeRepos` checkout, absent in this worktree) and
-`tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (untracked
-`docs/pine/` corpus). No other test regresses.
+`python -m pytest -q`, full suite, default collection order (receipt session, after the Gate E
+ledger row above was recorded): **3 failed, 5078 passed, 83 skipped**. `g191_174`'s own tests
+(`tests/test_g191_174.py`): **17 passed**. The 3 failures, none caused by this port:
+
+- `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` -- NOT
+  `g191_174` (its row is recorded, confirmed by a one-off probe of `gl.read_ledger()` /
+  `gl.read_grandfathered()` against `ta.Category`: `MISSING: ['mtd_ret']`). `mtd_ret` is a
+  pre-existing, unrelated indicator (`14a7515`/`6db7948`, issue #206) with its own owed Gate E
+  row; out of this issue's scope.
+- `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` (needs the
+  sibling `../AlternativeRepos` checkout, absent in this worktree) -- pre-existing, per
+  CLAUDE.md.
+- `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (untracked
+  `docs/pine/` corpus) -- pre-existing, per CLAUDE.md "Known breaks".
+
+No other test regresses.
