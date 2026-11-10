@@ -1,7 +1,7 @@
 # g191_069 — measured (issue #70)
 
-> **Status: Gates A-D cleared, wired, this repo's suite green except the pre-existing breaks
-> below. Gate E: pending, run by issue-solver after this session.**
+> **Status: Gates A-E cleared, wired, this repo's suite green except the pre-existing breaks
+> below. Gate E: DISCLOSE (max |rho| 0.7621, under the 0.90 STRUCK line) -- ship.**
 
 Open-based directional balance (DTM/DBM, 20): Guotai Junan's (2017, "GTJA191", internal quant
 report, read via the HKUDS/Vibe-Trading copy, MIT) alpha `#69`, per issue #70's own instruction.
@@ -50,7 +50,7 @@ the prototype's `dtm`/`sd`/`sb`/final-ternary lines already agree exactly.
 | B Causality | pass | Future-perturbation sweep (open, high, low AND close all rewritten from `j` onward, another synthetic frame), 34 offsets past the 20-bar warm-up: real module **0 of 34** leaks (`python docs/measure_g191_069.py`). One mutant (`importlib` source read, `exec`'d in memory, the final write index shifted `length=20` bars into the future), shown live (differs from the real module) then caught at **34 of 34** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic frame (seed 23 OHLC, `docs/measure_g191_069.py:_ohlc`), shipped default: **1,480 of 1,500** bars non-NaN (98.67%) -- exactly `n - 20`, the `length = 20`-bar warm-up, no wider gap. **1,480 distinct values** observed on this frame (not a constant column), range `[-0.717688, 0.963483]`, median `0.435050` |
 | D Scale-free | pass | For ANY `k > 0`: a uniform price rescale (`open,high,low,close -> k*(...)`) leaves every gate comparison and the final `SD > SB` branch unchanged (scaling preserves the sign of a difference, hence an ordering), and scales `DTM`, `DBM`, `SD`, `SB` all by exactly `k`, so the final ratio is invariant algebraically. Measured on the 1,500-bar frame: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|**; PRICE x10/x3.7: max\|diff\| **8.69e-15** / **4.26e-15**, float64 rounding from the scalar multiply itself, well under the test's 1e-9 tolerance. `0 < 1,480 fires < 1,500` and `1,480 > 1` distinct values rule out a constant column |
-| E Attribution | **pending, run by issue-solver after this session** | `python ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.trend.g191_069` -- not run by this session per the launcher's rules (never reads from or writes to `../Backtesting`) |
+| E Attribution | DISCLOSE (ship, disclosed) | `G191_069_20`: max \|rho\| **0.7621** vs `Ret_21d_vol_adj` (manifest comparator, n = 396,980), per-frame max median \|rho\| **0.7889** (also `Ret_21d_vol_adj`, 89 frames, 0% of frames >= 0.90). Both under the 0.90 STRUCK line (pooled and per-frame-median), so not struck; 0.76 <= 0.7621 < 0.80 puts it in the DISCLOSE band (CLAUDE.md Gate E row, `r3-perframe-0.90`). Run by the launcher: `gate_e_overlap.py run --module pandas_ta.trend.g191_069`, 89 ALTPORT-1 frames, 398,849 bars, 687 comparators (329 compute_all + 358 manifest), canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). Recorded in `docs/gate_e_ledger.csv` (`docs/gate_e_ledger.py record`, measured 2026-11-10) |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -67,9 +67,8 @@ synthetic frame and takes many distinct values, so the generator tags it `SF`), 
 `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL` updated to match (304 -> 305) and
 `CATEGORY_BUCKETS["trend"]` (61 -> 62).
 
-`g191_069`'s Gate E ledger row is NOT YET recorded (`docs/gate_e_ledger.csv`); the launcher runs
-Gate E after this session, and a later receipt session records the row and fills in the measured
-numbers here.
+`g191_069`'s Gate E ledger row is recorded (`docs/gate_e_ledger.csv`), DISCLOSE verdict, measured
+2026-11-10.
 
 ## Suite run (this repo, this session)
 
