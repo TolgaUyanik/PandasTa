@@ -2907,6 +2907,18 @@ class AnalysisIndicators(BasePandasObject):
         result = g191_080(volume=volume, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def g191_111(self, smooth1_length=None, smooth1_weight=None, smooth2_length=None,
+                 smooth2_weight=None, mean_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = g191_111(high=high, low=low, close=close, volume=volume,
+                           smooth1_length=smooth1_length, smooth1_weight=smooth1_weight,
+                           smooth2_length=smooth2_length, smooth2_weight=smooth2_weight,
+                           mean_length=mean_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def g191_144(self, length=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
