@@ -19,6 +19,11 @@ import pandas as pd
 sys.path.insert(0, os.getcwd())
 import tests.test_diff2_acf1 as T  # noqa: E402
 from pandas_ta.momentum.a101_048 import a101_048  # noqa: E402
+from pandas_ta.momentum.er import er  # noqa: E402
+from pandas_ta.statistics.g191_165 import g191_165  # noqa: E402
+from pandas_ta.statistics.kpss import kpss  # noqa: E402
+from pandas_ta.trend.chop import chop  # noqa: E402
+from pandas_ta.trend.vhf import vhf  # noqa: E402
 from pandas_ta.volatility.roll_spread import roll_spread  # noqa: E402
 
 
@@ -68,25 +73,48 @@ FRAMES = (("AR(1) phi 0.2, 1500", lambda: T._ar1(1500, 1, 0.2)), ("iid normal, 1
 
 
 def kats_diff2y_acf1(x, acfpacf_lag=6, period=7):
-    """kats/tsfeatures/tsfeatures.py (a6b7e88): the guards at L1090 and
-    L1109-1116 (`_yule_walker_determinant` with one lag is the demeaned
-    variance, L1156-1167) and the value at L1098-1105, L975."""
-    from statsmodels.tsa.stattools import acf
+    """The control flow of kats/tsfeatures/tsfeatures.py (a6b7e88)
+    `get_acfpacf_features` as far as `diff2y_acf1` depends on it, in Kats'
+    order: the guard at L1090, L1098-1105, `pacf(x)` at L1107, the
+    zero-variance guard at L1109-1116 (`_yule_walker_determinant` with one
+    lag is the demeaned variance, L1156-1167), the two `pacf` calls at
+    L1118-1119, and the value at L975. The `pacf` results feed other
+    features and are discarded; the calls are kept because they raise on
+    short inputs, which is part of what Kats does. Not reproduced: the
+    `acf(x)` and `acf(diff1x)` values (L1103-1104) and the feature
+    switches, which do not affect `diff2y_acf1`."""
+    from statsmodels.tsa.stattools import acf, pacf
     if len(x) < 10 or len(x) < period or len(np.unique(x)) == 1:
         return np.nan
     nlag = min(acfpacf_lag, len(x) - 2)
     diff1x = [x[i] - x[i - 1] for i in range(1, len(x))]
     diff2x = [diff1x[i] - diff1x[i - 1] for i in range(1, len(diff1x))]
+    diff2y_acf_list = acf(diff2x, fft=True, nlags=nlag)[1:]
+    pacf(x, nlags=period)
     for d in (diff1x, diff2x):
         v = np.array(d, dtype=np.float64)
         v -= v.mean()
         if (v ** 2).mean() == 0:
             return np.nan
-    return acf(diff2x, fft=True, nlags=nlag)[1:][0]
+    pacf(diff1x, nlags=nlag)
+    pacf(diff2x, nlags=nlag)
+    return diff2y_acf_list[0]
+
+
+def kats_minimum():
+    print("== the shortest input Kats' own call returns a value on ==")
+    x = np.log(T._ar1(40, 1).to_numpy())
+    for n in range(9, 17):
+        try:
+            v = kats_diff2y_acf1(x[:n])
+            out = "NaN (L1090 guard)" if np.isnan(v) else f"{v:+.4f}"
+        except Exception as e:  # noqa: BLE001
+            out = f"raises {type(e).__name__}"
+        print(f"  {n} points: {out}")
 
 
 def gate_a():
-    print("== Gate A: vs Kats diff2y_acf1 (its own lines and guards) on log close, every window ==")
+    print("== Gate A: vs Kats diff2y_acf1 (kats_diff2y_acf1 above) on log close, every window ==")
     print("   (the unguarded module, so the rounding guard does not enter; Kats differences logs,")
     print("    the module takes the log of the ratio: agreement is to rounding)")
     U = _unguarded()
@@ -95,7 +123,7 @@ def gate_a():
         c = close.to_numpy()
         logc = np.log(c)
         zero = np.mean(c[1:] == c[:-1])
-        for L in (10, 63, 100, 252):
+        for L in (14, 63, 100, 252):
             ours = U.diff2_acf1(close, length=L).to_numpy()
             ref = np.full(c.size, np.nan)
             for t in range(L - 1, c.size):
@@ -111,21 +139,53 @@ def guard():
     U = _unguarded()
     rows = [(f"100*(1+{g:g})^t, 300", lambda g=g: pd.Series(100 * (1 + g) ** np.arange(300.0)))
             for g in (1e-2, 1e-4, 1e-7, 1e-8, 1e-10)]
+    rows.append(("exp(linspace(0, 30, 300)), 10%/bar", lambda: pd.Series(np.exp(np.linspace(0.0, 30.0, 300)))))
     rows.append(("log close = 1e-5 t^2, 300", lambda: pd.Series(100 * np.exp(1e-5 * np.arange(300.0) ** 2))))
     rows.append(("10.0 with one-ulp jitter, 300", ulp_flat))
+    noise_units = []
     for name, mk in rows:
         close = mk()
         g, u = T.diff2_acf1(close), U.diff2_acf1(close)
+        units = _units(close, 100)
+        noise_units.append(np.nanmax(units))
         print(f"  {name}: shipped fires {g.notna().sum()}; unguarded fires {u.notna().sum()}, "
-              f"median {u.median():.3f}, min {u.min():.3f}, max {u.max():.3f}")
+              f"median {u.median():.3f}, min {u.min():.3f}, max {u.max():.3f}; "
+              f"largest sd {np.nanmax(units):.2f} eps units")
+    real_units = []
     for name, mk in FRAMES + (("10%/bar on a 0.01 tick, 150", tick10),):
         close = mk()
-        for L in (10, 100, 252):
+        for L in (14, 100, 252):
             if L > close.size:
                 continue
             g, u = T.diff2_acf1(close, length=L), U.diff2_acf1(close, length=L)
             same = np.array_equal(g.to_numpy(), u.to_numpy(), equal_nan=True)
-            print(f"  {name} length {L}: identical {same}, blanked by the guard only {int((g.isna() & u.notna()).sum())}")
+            units = _units(close, L)
+            fired = units[u.notna().to_numpy()]
+            real_units.append(fired.min())
+            print(f"  {name} length {L}: identical {same}, blanked by the guard only "
+                  f"{int((g.isna() & u.notna()).sum())}; smallest sd where it fires {fired.min():.1e} eps units")
+    rng = np.random.default_rng(0)
+    for sd in (1e-12, 1e-9):
+        close = pd.Series(100 * np.exp(np.cumsum(sd * rng.standard_normal(300))))
+        units = _units(close, 100)
+        real_units.append(np.nanmin(units))
+        print(f"  iid log returns of sd {sd:g}, 300: shipped fires {T.diff2_acf1(close).notna().sum()} of 201; "
+              f"smallest sd {np.nanmin(units):.1e} eps units")
+    print(f"  headroom of the floor (NOISE_ULPS = {T._REAL.NOISE_ULPS}): rounding-only series reach at most "
+          f"{max(noise_units):.2f} units; real series are at least {min(real_units):.1e} units")
+
+
+def _units(close, length):
+    """sd of each window's return changes, in units of eps * (1 + max |log return|)."""
+    c = close.to_numpy(dtype=float)
+    r = np.log(c[1:] / c[:-1])
+    d2 = np.diff(r)
+    out = np.full(c.size, np.nan)
+    for t in range(length - 1, c.size):
+        w = d2[t - length + 1:t - 1]
+        rmax = np.abs(r[t - length + 1:t]).max()
+        out[t] = w.std() / (np.finfo(float).eps * (1 + rmax))
+    return out
 
 
 def semantics():
@@ -191,6 +251,18 @@ def family():
     A, B = np.concatenate(A), np.concatenate(B)
     m = ~np.isnan(A) & ~np.isnan(B)
     print(f"  A101_048 (default): Spearman {sp(A[m], B[m]):.4f} over {m.sum()} bars where both fire")
+    print("== family: against trend-vs-reversal columns in Category, 100 paths x 600 bars each ==")
+    print("   (chop is given high = low = close: these frames are close-only)")
+    others = (("ER_10 (default)", lambda c: er(c)), ("ER_100", lambda c: er(c, length=100)),
+              ("g191_165 (default)", lambda c: g191_165(c)), ("CHOP (default)", lambda c: chop(c, c, c)),
+              ("VHF (default)", lambda c: vhf(c)), ("KPSS_100 (default)", lambda c: kpss(c)))
+    for frame, mk in (("iid normal", lambda s: T._ar1(600, s)), ("AR(1) phi +0.3", lambda s: T._ar1(600, s, 0.3))):
+        closes = [mk(2000 + s) for s in range(100)]
+        A = np.concatenate([T.diff2_acf1(c).to_numpy() for c in closes])
+        for name, fn in others:
+            B = np.concatenate([np.asarray(fn(c), dtype=float).reshape(len(c), -1)[:, 0] for c in closes])
+            m = ~np.isnan(A) & ~np.isnan(B)
+            print(f"  {frame}, {name}: Spearman {sp(A[m], B[m]):+.4f} over {m.sum()} bars where both fire")
 
 
 def window_definition():
@@ -227,6 +299,7 @@ def _timed(close, length):
 
 
 if __name__ == "__main__":
+    kats_minimum()
     gate_a()
     guard()
     semantics()

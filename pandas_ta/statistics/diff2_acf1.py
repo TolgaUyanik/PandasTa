@@ -10,6 +10,7 @@ from pandas_ta.utils import get_offset, verify_series
 # only by the rounding of log(c / c1): no variation.
 NOISE_ULPS = 64
 CHUNK_CELLS = 1 << 18  # window cells per evaluation chunk
+MIN_LENGTH = 14
 
 
 def _acf1_rows(d, rmax):
@@ -32,7 +33,9 @@ def _acf1_rows(d, rmax):
 def diff2_acf1(close, length=None, offset=None, **kwargs):
     """Indicator: Lag-1 autocorrelation of return changes (DIFF2ACF1)"""
     # Validate Arguments
-    length = int(length) if length and int(length) >= 10 else 100
+    # 14 closes is the shortest window Kats' own call returns a value on
+    # (see the docstring); below that, fall back to the default.
+    length = int(length) if length and int(length) >= MIN_LENGTH else 100
     close = verify_series(close, length)
     offset = get_offset(offset)
 
@@ -40,7 +43,9 @@ def diff2_acf1(close, length=None, offset=None, **kwargs):
 
     # Calculate Result
     c = close.to_numpy(dtype=float)
-    c = np.where(np.isfinite(c) & (c > 0), c, np.nan)
+    # A close that is not a finite, normal positive float (NaN, inf, zero,
+    # negative, or subnormal such as 1e-310) is bad data: missing.
+    c = np.where(np.isfinite(c) & (c >= np.finfo(float).tiny), c, np.nan)
     with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
         r = np.log(c[1:] / c[:-1])  # diff of log close; exact under a x2^k rescale
         r[~np.isfinite(r)] = np.nan  # a ratio that overflows or underflows: missing
@@ -94,13 +99,15 @@ signs. In population it is (2*rho1 - 1 - rho2) / (2 * (1 - rho1)) for
 return autocorrelations rho1, rho2 -- for AR(1) returns, -(1 - phi) / 2 --
 so it reads above -0.5 when returns trend and below when they reverse.
 
-Measured (docs/Diff2Acf1Measured.md): it ranks bars almost exactly as that
-identity evaluated on the window's own lag-1 and lag-2 sample return
-autocorrelations does (Spearman 0.99), so it carries the information of
-those two autocorrelations and little else; against lag-1 alone the
-Spearman is 0.61 to 0.71. Its centre does not move with volatility
-clustering or fat tails (GARCH and Student-t returns read a median of
--0.49, as iid normal returns do).
+Measured on synthetic iid, AR(1) and GARCH paths only
+(docs/Diff2Acf1Measured.md): it ranks bars almost as that identity
+evaluated on the window's own lag-1 and lag-2 sample return
+autocorrelations does (Spearman 0.99 pooled), so on those paths it
+carries the information of those two autocorrelations and little else.
+Against lag-1 alone the Spearman is 0.61 to 0.71 pooled, and 0.28 to 0.89
+by path (p10 to p90). Its centre does not move with volatility clustering
+or fat tails (GARCH and Student-t returns read a median of -0.49, as iid
+normal returns do).
 
 Source: Kats tsfeatures (Meta, MIT), `get_acfpacf_features` ->
 `diff2y_acf1` (`kats/tsfeatures/tsfeatures.py` L1049-1151, L973-975 at
@@ -113,9 +120,15 @@ the 2026-10-25 screen prototype (candidate kats_diff2_acf1_100,
 docs/issues/screen/ind_screen_r5.py, local to the owner's machine).
 PandasTa issue #153.
 
+Only the `diff2y_acf1` lines are ported. The same Kats function also
+computes partial autocorrelations (L1107, L1118-1119), and with its
+defaults statsmodels' `pacf` raises on inputs of 10 to 13 points, so Kats
+returns a value from 14 points on. That is this column's minimum length.
+
 Causal: bar T reads closes T - length + 1 .. T. Scale-free: log returns are
-logs of price ratios, exact under a x8/x64 rescale. A window with a NaN,
-zero or negative close, or a price ratio that overflows, is NaN. So is a
+logs of price ratios, exact under a x8/x64 rescale. A window with a close
+that is NaN, infinite, zero, negative or subnormal (below 2.2e-308), or a
+price ratio that overflows, is NaN. So is a
 window whose return changes do not vary beyond the rounding of
 log(c / c1): standard deviation at most 64 machine epsilons times
 (1 + the window's largest |log return|), about 1.4e-14 for ordinary
@@ -135,8 +148,9 @@ Calculation:
 
 Args:
     close (pd.Series): Series of 'close's
-    length (int): Closes per window. At least 10 (Kats' own minimum); a
-        smaller or missing value falls back to the default. Default: 100
+    length (int): Closes per window. At least 14 (the shortest input Kats'
+        own call returns a value on); a smaller or missing value falls
+        back to the default. Default: 100
     offset (int): How many periods to offset the result. Default: 0
 
 Kwargs:

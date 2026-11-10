@@ -22,29 +22,46 @@ diff2y_acf1 = diff2y_acf_list[0]                                        # L975
 - So the value is `sum(x[t] * x[t-1]) / sum(x²)` on the demeaned twice-differenced
   series.
 
-Kats returns NaN in three cases:
-- the input has fewer than 10 points (L1090);
-- the input is constant (L1090);
-- the variance of `diff1x` or of `diff2x` is exactly 0 (L1109–1116; with one lag,
-  `_yule_walker_determinant`, L1156–1167, is that variance).
+**Only these lines are ported.** The same Kats function has four outcomes for
+`diff2y_acf1`, measured with `measure_diff2_acf1.py` (`kats_minimum`):
+- **NaN** when the input has fewer than 10 points or is constant (L1090);
+- **a raised ValueError** on 10 to 13 points. The function also computes partial
+  autocorrelations (`pacf(x, nlags=7)` at L1107, and `pacf` of the two differences at
+  L1118–1119). statsmodels' `pacf` refuses lags of half the sample or more;
+- **NaN** when the variance of `diff1x` or of `diff2x` is exactly 0 (L1109–1116; with one
+  lag, `_yule_walker_determinant`, L1156–1167, is that variance);
+- **the value**, from 14 points on.
 
 **Status:**
 - Gates A, B and D are cleared, and this repo's suite is green, which is the half of
   Gate F that runs here.
 - Gate C has synthetic counts only, and Gate E is owed. Both need the BIST frames and the
   private Backtesting repo, which the contributor's machine does not have.
-- One finding is the owner's to weigh: the column is close to a function of the window's
-  lag-1 and lag-2 return autocorrelations (see "Family").
+- One finding is the owner's to weigh: on synthetic paths the column is close to a
+  function of the window's lag-1 and lag-2 return autocorrelations (see "Family").
+
+**Review round 1** (2026-11-10, verdict REVISE: 1 MAJOR, 4 MINOR, 3 NIT) is fixed here:
+- "Kats' own minimum of 10" and "Kats' own lines and its own NaN guards" were false: Kats
+  raises on 10 to 13 points, and the Gate A oracle left out the lines that raise. The
+  minimum length is now 14, the oracle runs those lines, and the wording says which lines
+  are ported.
+- The guard tests did not bound the floor. A near-floor real series is now a test, and
+  the measured headroom is in Decision 4.
+- A subnormal close (1e-310) produced a confident value. It is now masked like 0.
+- The docstring's Spearman figures were unqualified. They now say synthetic, pooled and
+  per path.
+- NITs: a test band's headroom is stated, the merge-tree provenance is corrected, and
+  six trend-versus-reversal neighbours are measured.
 
 | module | category | column | range |
 |---|---|---|---|
 | `pandas_ta/statistics/diff2_acf1.py` | statistics | `DIFF2ACF1_100` | `(-1, 1)` or NaN; about −0.5 for returns with no memory |
 
-Tests: `tests/test_diff2_acf1.py` (32 tests). The two statsmodels tests skip where
-statsmodels is absent: in CI, and in `.venv`, where 30 pass and 2 are skipped.
+Tests: `tests/test_diff2_acf1.py` (37 tests). The three statsmodels tests skip where
+statsmodels is absent: in CI, and in `.venv`, where 34 pass and 3 are skipped.
 
 Numbers: `python docs/measure_diff2_acf1.py`, run from the repo root. It needs
-statsmodels for its Gate A section. Environment: Python 3.13.14, pandas 2.3.3,
+statsmodels for its first two sections. Environment: Python 3.13.14, pandas 2.3.3,
 numpy 2.5.4 (`.venv-pd2`). Measured 2026-11-10.
 
 ## Decisions
@@ -62,9 +79,11 @@ numpy 2.5.4 (`.venv-pd2`). Measured 2026-11-10.
      machine only). If it meant 100 return changes, the window would be 102 closes.
    - Measured over 100 iid paths at the same bars, 100 closes against 102 closes: Spearman
      0.9873, median absolute difference 0.0048, maximum 0.140.
-3. **`length` has a floor of 10**, which is Kats' own minimum. A smaller or missing value
-   falls back to 100, the repo's convention (`kpss`, `arch_lm`). The docstring says so,
-   and `length=9` is tested. Kats' lag cap (`nlag`) does not matter: only lag 1 is read.
+3. **`length` has a floor of 14**, the shortest input on which Kats' own call returns a
+   value (see "Source").
+   - A smaller or missing value falls back to 100, the repo's convention (`kpss`,
+     `arch_lm`). The docstring says so, and `length=13` is tested.
+   - Kats' lag cap (`nlag`) does not matter: only lag 1 is read.
 4. **A rounding guard, where Kats tests exact zero.**
    - The rule: a window is NaN when the std of its return changes is at most **64 machine
      epsilons × (1 + its largest |log return|)**, about 1.4e-14 for ordinary returns.
@@ -73,58 +92,88 @@ numpy 2.5.4 (`.venv-pd2`). Measured 2026-11-10.
    - Why it is needed: Kats returns NaN only when the variance is exactly 0. On a series
      whose return changes are pure rounding noise, it reports the autocorrelation of that
      noise.
-   - Measured, shipped against unguarded (`measure_diff2_acf1.py`):
+   - Measured, shipped against unguarded (`measure_diff2_acf1.py`). "Units" are the
+     window's std in multiples of eps × (1 + max |log return|), the largest over the
+     series:
 
-     | series (300 bars) | shipped fires | unguarded fires, median (min .. max) |
-     |---|---|---|
-     | `100 * (1 + 1e-2)^t` | 0 | 201, −0.671 (−0.760 .. −0.605) |
-     | `100 * (1 + 1e-4)^t` | 0 | 201, −0.579 (−0.648 .. −0.432) |
-     | `100 * (1 + 1e-7)^t` | 0 | 201, −0.667 (−0.722 .. −0.584) |
-     | `100 * (1 + 1e-8)^t` | 0 | 201, −0.691 (−0.763 .. −0.500) |
-     | `100 * (1 + 1e-10)^t` | 0 | 140, −0.500 (−0.500 .. −0.000) |
-     | log close = 1e-5 t² (constant return change) | 0 | 201, −0.626 (−0.703 .. −0.544) |
-     | 10.0 with one-ulp jitter | 0 | 201, −0.673 (−0.733 .. −0.577) |
+     | series (300 bars) | shipped fires | unguarded fires, median (min .. max) | units |
+     |---|---|---|---|
+     | `100 * (1 + 1e-2)^t` | 0 | 201, −0.671 (−0.760 .. −0.605) | 1.06 |
+     | `100 * (1 + 1e-4)^t` | 0 | 201, −0.579 (−0.648 .. −0.432) | 0.98 |
+     | `100 * (1 + 1e-7)^t` | 0 | 201, −0.667 (−0.722 .. −0.584) | 1.01 |
+     | `100 * (1 + 1e-8)^t` | 0 | 201, −0.691 (−0.763 .. −0.500) | 1.10 |
+     | `100 * (1 + 1e-10)^t` | 0 | 140, −0.500 (−0.500 .. −0.000) | 0.14 |
+     | `exp(linspace(0, 30, 300))`, 10% a bar | 0 | 201, −0.508 (−0.599 .. −0.466) | 7.85 |
+     | log close = 1e-5 t² (constant return change) | 0 | 201, −0.626 (−0.703 .. −0.544) | 0.96 |
+     | 10.0 with one-ulp jitter | 0 | 201, −0.673 (−0.733 .. −0.577) | 1.41 |
 
-   - The unguarded values are **plausible**: they sit in the column's ordinary range, near
-     the no-memory value. A reader could not tell them from real readings, which is why
-     the guard matters more here than a crash would.
-   - All seven cases are tests, and the unguarded module fails all seven.
+   - The unguarded values are **plausible**: medians −0.50 to −0.69 and single values
+     −0.76 to −0.00, inside the column's ordinary range. A reader could not tell them
+     from real readings.
+   - **Headroom of 64.** Rounding-only series reach at most 7.85 units, so the floor has
+     about 8× margin below it. The smallest real series measured, iid log returns of
+     standard deviation 1e-12, sits at 5.8e3 units, about 90× above it. Ordinary frames
+     sit at 7e12 units or more, and the tick series at 1.5e6 or more.
+   - All eight rounding-only cases are tests, and the unguarded module fails all eight.
+     The 1e-12 series is a test too.
+   - **The tests bound the floor from both sides** (checked by swapping the constant): a
+     floor of 2 units fails the steep-exponential test, and a floor of 1e4 units fails
+     the 1e-12 test. A floor of 1e3 passes everything.
    - Where it changes nothing: on the five Gate A frames and on a 10%-a-bar series on a
-     0.01 tick, at lengths 10, 100 and 252, the guarded and unguarded columns are
+     0.01 tick, at lengths 14, 100 and 252, the guarded and unguarded columns are
      identical on every bar (17 frame × length cases).
 5. **Bad inputs.**
-   - A window with a NaN, zero or negative close is NaN: bars 150..249 for a bad close at
-     bar 150.
-   - A price ratio that overflows or underflows is treated as missing, not as ±inf. A
-     close of 1e-310 at bar 150 makes the next ratio overflow, and bars 151..249 are NaN.
-     Bar 150 itself still fires, on the finite return into that close.
+   - A close that is NaN, infinite, zero, negative or subnormal (below 2.2e-308) is
+     missing data. Its windows are NaN: bars 150..249 for a bad close at bar 150.
+   - Subnormal closes are included because one of them, 1e-310, used to pass as a valid
+     price. Bar 150 then read −6.5e-5 where the clean value was −0.39, driven by a single
+     log return of −718.
+   - A price ratio that overflows is treated as missing, not as inf. Closes of 1e-300
+     then 1e300 are both normal floats, but their ratio is inf: bars 151..249 are NaN, and
+     bars 150 and 250 still fire on the finite returns into and out of the pair.
    - Each window is computed on its own, in chunks, so a bad tick moves exactly the bars
      whose window holds it: bars 300..399 for a tick at bar 300.
 
 ## Gate A — correctness
 
-Kats' own lines and its own NaN guards, on the log close of every window
-(`measure_diff2_acf1.py`), for lengths 10 / 63 / 100 / 252. The comparison is against the
-**unguarded** module, so the rounding guard does not enter Gate A.
+**The oracle** is `kats_diff2y_acf1` in `measure_diff2_acf1.py`. It follows the control
+flow of Kats' function as far as `diff2y_acf1` depends on it, in Kats' order:
+- the guard at L1090;
+- L1098–1105;
+- `pacf(x)` at L1107;
+- the zero-variance guard at L1109–1116;
+- the two `pacf` calls at L1118–1119;
+- the value at L975.
+
+The `pacf` results feed other features and are discarded. The calls are kept because
+they raise on short inputs. Not reproduced: the `acf(x)` and `acf(diff1x)` values
+(L1103–1104) and the feature switches, which do not affect `diff2y_acf1`.
+
+It is run on the log close of every window, for lengths 14 / 63 / 100 / 252, against the
+**unguarded** module, so the rounding guard does not enter Gate A:
 
 | frame | zero returns | NaN masks equal | max abs difference |
 |---|---|---|---|
-| AR(1) φ = 0.2, 1500 bars | 0% | 4 / 4 | 5.0e-14 |
-| iid normal, 1500 bars | 0% | 4 / 4 | 4.2e-14 |
-| GARCH(0.20, 0.75), 1500 bars | 0% | 4 / 4 | 9.6e-14 |
-| tick-rounded near 5 on a 0.01 tick | 20% | 4 / 4 | 5.8e-14 |
-| iid with 150 flat bars, 800 bars | 19% | 4 / 4 | 4.8e-14 |
+| AR(1) φ = 0.2, 1500 bars | 0% | 4 / 4 | 3.7e-14 |
+| iid normal, 1500 bars | 0% | 4 / 4 | 3.8e-14 |
+| GARCH(0.20, 0.75), 1500 bars | 0% | 4 / 4 | 7.3e-14 |
+| tick-rounded near 5 on a 0.01 tick | 20% | 4 / 4 | 4.3e-14 |
+| iid with 150 flat bars, 800 bars | 19% | 4 / 4 | 3.1e-14 |
 
-- The NaN masks are equal in all 20 cases. In the flat case, Kats' constant-input guard
-  and the port's zero-variance rule blank the same bars.
+- The NaN masks are equal in all 20 cases, and Kats' call raises in none of them. In the
+  flat case, Kats' constant-input guard and the port's zero-variance rule blank the same
+  bars.
 - The differences are rounding: Kats differences logs, and the port takes the log of the
-  ratio. The largest in each row is at length 10.
+  ratio. The largest in each row is at length 14.
 
 In the tests:
-- the Kats call is pinned at 1e-11 (skipped without statsmodels);
+- the Kats value lines are pinned at 1e-11, with the `pacf` calls run alongside
+  (skipped without statsmodels);
+- the `pacf` raise on 10 to 13 points, and its absence at 14, is pinned (skipped
+  without statsmodels; it pins statsmodels' behaviour, not the module's);
 - an independent loop with no statsmodels is pinned at 1e-12 and runs in CI;
-- a closed form: 9 alternating log returns ±a give 8 alternating return changes, so
-  DIFF2ACF1_10 = −7/8.
+- a closed form: 13 alternating log returns ±a give 12 alternating return changes, so
+  DIFF2ACF1_14 = −11/12.
 
 ## Gate B — causality
 
@@ -186,13 +235,17 @@ deviation 2%:
   to −0.59 .. −0.37.
 - **What the tests pin, on 10 paths:**
   - the ordering φ = −0.3 < 0 < +0.3;
-  - each median within 0.03 of its population value;
+  - each median within 0.03 of its population value. The 10-path medians are −0.632 /
+    −0.483 / −0.333, which is 0.017 to 0.018 off, so the band has about 0.012 of
+    headroom;
   - the GARCH median within 0.03 of the iid one.
 
   These are bands and orderings, not exact medians, because the medians depend on numpy's
   RNG stream (NEP 19).
 
 ## Family — what it restates
+
+All of this section is synthetic. Gate E on real data is owed.
 
 **The window's own return autocorrelations** (100 paths × 600 bars). Let
 `g = (2ρ̂1 − 1 − ρ̂2) / (2(1 − ρ̂1))`, the population identity evaluated on the sample
@@ -204,23 +257,23 @@ lag-1 and lag-2 autocorrelations of the same window's 99 log returns.
 | AR(1) φ = +0.3 | 0.9906 (0.961) | 0.6086 (0.277 / 0.614 / 0.823) | 0.0055 / 0.098 |
 | GARCH(0.20, 0.75) | 0.9902 (0.941) | 0.7014 (0.378 / 0.751 / 0.884) | 0.0042 / 0.172 |
 
-- **The column is close to a function of ρ̂1 and ρ̂2 of the window's returns** (Spearman
-  0.99). It carries the information of those two numbers and little else.
+- **On these paths the column is close to a function of ρ̂1 and ρ̂2 of the window's
+  returns** (Spearman 0.99). It carries the information of those two numbers and little
+  else. None of these paths has zero returns, so tick-rounded data is not covered.
 - Against the lag-1 autocorrelation alone it is 0.61–0.71 pooled, and it varies a lot by
-  path (0.28 to 0.89).
+  path (0.28 to 0.89, p10 to p90).
 - **Two open issues would add a plain return-autocorrelation column:** #94 (TS-AC1-60,
   lag-1) and #96 (TS-AGGAC-60, mean of lags 1–10).
-  - If #94 ships, it and this column will overlap. By the synthetic numbers above, the
-    Spearman is 0.61–0.71 at equal windows. That is below the 0.76 ship line, but it is
-    synthetic and the windows differ (60 against 100), so it needs its own measurement.
+  - If #94 ships, it and this column will overlap. By the numbers above, the Spearman is
+    0.61–0.71 at equal windows. That is below the 0.76 ship line, but it is synthetic and
+    the windows differ (60 against 100), so it needs its own measurement.
   - Whether the engine's 687 Gate E comparators already hold a return-autocorrelation
     column is not visible from here.
 
 **Columns in `Category` that use serial correlation.** A grep of `pandas_ta` for
 `autocorr`, `.corr(...shift(` and `.cov(...shift(` finds two modules besides this one:
-`roll_spread` and `a101_048`.
-
-Measured over 100 iid paths × 600 bars, on the bars where both columns fire:
+`roll_spread` and `a101_048`. Measured over 100 iid paths × 600 bars, on the bars where
+both columns fire:
 
 | column | what it is | Spearman | bars |
 |---|---|---|---|
@@ -234,24 +287,43 @@ Measured over 100 iid paths × 600 bars, on the bars where both columns fire:
   fires, because Roll has no reading when the covariance is not negative.
 - A101_048 flips sign with each day's change, so it does not rank bars the way this
   column does.
-- None of the three is near the 0.76 line. These are synthetic numbers.
+
+**Trend-versus-reversal columns in `Category`.** The docstring says the column reads
+trending against reversing returns, so these are its obvious neighbours. Measured over 100
+paths × 600 bars each, at their defaults unless stated; `chop` is given
+high = low = close, because these frames are close-only:
+
+| column | Spearman, iid normal | Spearman, AR(1) φ = +0.3 |
+|---|---|---|
+| ER_10 (default) | −0.0041 | −0.0222 |
+| ER_100 | −0.0259 | −0.0440 |
+| `g191_165` (default) | −0.0390 | −0.0488 |
+| CHOP (default) | −0.0370 | −0.0025 |
+| VHF (default) | +0.0351 | −0.0118 |
+| KPSS_100 (default) | −0.0037 | −0.0159 |
+
+All twelve are within ±0.05. Within one regime, where every window has the same true
+autocorrelation, the column's bar-to-bar variation is estimation noise that these columns
+do not share.
+
+None of the columns measured in this section is near the 0.76 line.
 
 ## Cost
 
 These are machine-dependent (Intel64 Family 6 Model 140). Timings are the range over 5
-runs with tracemalloc off; peak memory comes from a separate run with tracemalloc on:
+runs with tracemalloc off, across two invocations of the script; peak memory comes from a
+separate run with tracemalloc on:
 
 | n | length | time | peak memory |
 |---|---|---|---|
-| 5,000 | 100 | 0.003–0.004 s | 6 MiB |
+| 5,000 | 100 | 0.003–0.005 s | 6 MiB |
 | 5,000 | 252 | 0.006–0.008 s | 6 MiB |
 | 20,000 | 100 | 0.010–0.012 s | 7 MiB |
-| 20,000 | 252 | 0.026–0.028 s | 7 MiB |
-| 200,000 | 100 | 0.130–0.167 s | 14 MiB |
-| 200,000 | 252 | 0.321–0.394 s | 14 MiB |
+| 20,000 | 252 | 0.024–0.030 s | 7 MiB |
+| 200,000 | 100 | 0.099–0.167 s | 14 MiB |
+| 200,000 | 252 | 0.247–0.394 s | 14 MiB |
 
-Machine load moves these (the sibling ports' tables moved 3–5× between runs), so they are
-an order of magnitude.
+Machine load moves these, so they are an order of magnitude.
 
 ## Gate E — owed
 
@@ -268,7 +340,7 @@ a measurement of this port.
 ## Gate F — suites
 
 Full suite on this branch (`.venv-pd2`, CI's two deselects, `GATE_E_PENDING_OK=1`):
-5162 passed, 84 skipped, 0 failed.
+5167 passed, 84 skipped, 0 failed.
 
 Without the variable, `test_every_indicator_that_needs_a_row_has_one` fails on the owed
 rows `diff2_acf1` and `mtd_ret`; `mtd_ret` is already owed on `dev`. The Backtesting suite
@@ -289,15 +361,14 @@ All counts are as of `dev` at `19fca14`.
 
 ## Interaction with #292 (`arch_lm`) and #294 (`lumpiness`)
 
-**This PR conflicts with both** (`git merge-tree` of this tree against each branch):
+**This PR conflicts with both.** Measured with `git merge-tree` of this branch at
+`b38b54e` (on `dev` at `19fca14`) against `origin/issue-154-arch-lm` at `2f81c01` and
+`origin/issue-156-lumpiness` at `2190116`, which are both still based on `dev` at
+`4dca6d3`:
 - against #292, six files: `README.md`, `docs/IndicatorDictionary.md`,
   `docs/MLCompanionContract.md`, `pandas_ta/__init__.py`,
   `pandas_ta/statistics/__init__.py` and `tests/test_altport2_ports.py`;
 - against #294, five files: the same list without `pandas_ta/statistics/__init__.py`.
-
-The file lists were measured with this tree on `dev` at `4dca6d3`. #292 and #294 are
-still based there, and `dev` has since moved to `19fca14`, so both also need a `dev`
-merge of their own.
 
 Each of the three PRs adds +1 to the same counters. Each PR that lands after the first
 has to:

@@ -6,29 +6,33 @@ docs/Diff2Acf1Measured.md.
 
 What these pin, in order of how much it would hurt to lose:
 
-* CORRECTNESS against the source: Kats' own lines (the two list
-  comprehensions and `acf(diff2x, fft=True, nlags=nlag)[1:][0]`), on the
-  log close of every window of an AR(1) frame, length 10 and 100, within
-  1e-11 (skipped where statsmodels is absent, i.e. in CI). An independent
-  loop with no statsmodels and no module code runs everywhere. And a
-  closed form: alternating log returns +a, -a, ... make the return changes
-  alternate too, so DIFF2ACF1_10 = -7/8.
+* CORRECTNESS against the source: the `diff2y_acf1` lines of Kats'
+  `get_acfpacf_features` (the two list comprehensions and
+  `acf(diff2x, fft=True, nlags=nlag)[1:][0]`), on the log close of every
+  window of an AR(1) frame, length 14 and 100, within 1e-11 (skipped where
+  statsmodels is absent, i.e. in CI). The function's `pacf` calls, which
+  feed other features, are run too: they raise on 10 to 13 points and run
+  from 14, which is why 14 is the minimum length. An independent loop with
+  no statsmodels and no module code runs everywhere. And a closed form:
+  alternating log returns +a, -a, ... make the return changes alternate
+  too, so DIFF2ACF1_14 = -11/12.
 * SEMANTICS: iid returns read about -0.5, not 0; AR(1) returns read about
   -(1 - phi) / 2, so the column orders trending above reversing returns;
   volatility clustering (GARCH) does not move it. It is close to a
   function of the window's lag-1 and lag-2 return autocorrelations.
-* The rounding guard: a steady drift of any size (1e-2 down to 1e-10 a
-  bar), a constant return change and a flat price with one-ulp jitter are
-  NaN, not the autocorrelation of floating-point noise; real tick-level
-  variation is kept.
+* The rounding guard, from both sides: a steady drift of any size (1e-2
+  down to 1e-10 a bar, and 10% a bar by `exp`), a constant return change
+  and a flat price with one-ulp jitter are NaN, not the autocorrelation of
+  floating-point noise; real variation is kept, down to returns of
+  standard deviation 1e-12.
 * CAUSALITY by future-perturbation over 16 offsets, and a mutant (the write
   index moved one bar earlier) proved live and caught at every offset. A
   bad tick moves exactly the 100 bars whose window holds it.
 * SCALE-FREE: x8/x64 bit-identical, x10/x3.7 within 1e-9, and the column
   fires and is not constant.
-* Edge cases (flat, bad closes, a price ratio that overflows, short
-  input, length floor, chunk boundaries) and wiring (`Category`, the
-  accessor, `DIFF2ACF1_100`).
+* Edge cases (flat, bad closes including subnormal and infinite ones, a
+  price ratio that overflows, short input, length floor, chunk
+  boundaries) and wiring (`Category`, the accessor, `DIFF2ACF1_100`).
 
 The semantics tests assert bands and orderings, not exact medians: the
 medians depend on numpy's RNG stream, which NEP 19 does not freeze.
@@ -90,10 +94,13 @@ def _loop(close, length):
 # ------------------------------------------------------------ correctness
 
 
-@pytest.mark.parametrize("length", [10, 100])
+@pytest.mark.parametrize("length", [14, 100])
 def test_matches_kats_the_source_call(length):
-    """kats/tsfeatures/tsfeatures.py (a6b7e88) L1098-1105 and L975, on the
-    log close of each window. Kats differences the logs; the module takes
+    """kats/tsfeatures/tsfeatures.py (a6b7e88) `get_acfpacf_features`, on
+    the log close of each window: L1098-1105 and L975 give the value. The
+    three `pacf` calls of the same function (L1107, L1118-1119) feed other
+    features; they are run here only to show that Kats' call does not
+    raise from 14 points on. Kats differences the logs; the module takes
     the log of the ratio, so they agree to rounding, not bit for bit."""
     st = pytest.importorskip("statsmodels.tsa.stattools")
     close = _ar1(400, seed=1, phi=0.2)
@@ -105,11 +112,28 @@ def test_matches_kats_the_source_call(length):
         diff1x = [x[i] - x[i - 1] for i in range(1, len(x))]
         diff2x = [diff1x[i] - diff1x[i - 1] for i in range(1, len(diff1x))]
         ref = st.acf(diff2x, fft=True, nlags=nlag)[1:][0]
+        st.pacf(x, nlags=7)
+        st.pacf(diff1x, nlags=nlag)
+        st.pacf(diff2x, nlags=nlag)
         assert abs(out[t] - ref) < 1e-11, t
     assert np.isnan(out[:length - 1]).all()
 
 
-@pytest.mark.parametrize("length", [10, 100])
+def test_kats_own_call_raises_below_14_points():
+    """Why the minimum length is 14 and not Kats' explicit `len(x) < 10`
+    guard (L1090): with Kats' default period 7, `pacf(x, nlags=7)` at L1107
+    raises ValueError on 10 to 13 points (statsmodels 0.15.0: lags must be
+    under half the sample), so the function returns no `diff2y_acf1` there.
+    This pins statsmodels' behaviour, not the module's."""
+    st = pytest.importorskip("statsmodels.tsa.stattools")
+    x = np.log(_ar1(20, seed=1).to_numpy())
+    for n in (10, 11, 12, 13):
+        with pytest.raises(ValueError):
+            st.pacf(x[:n], nlags=7)
+    st.pacf(x[:14], nlags=7)
+
+
+@pytest.mark.parametrize("length", [14, 100])
 def test_matches_an_independent_loop(length):
     close = _ar1(400, seed=2, phi=-0.2)
     out = diff2_acf1(close, length=length).to_numpy()
@@ -118,14 +142,14 @@ def test_matches_an_independent_loop(length):
 
 
 def test_closed_form():
-    """9 log returns +a, -a, ..., +a give 8 return changes -2a, +2a, ...:
-    mean 0, sum of squares 8 * 4a^2, sum of lagged products -7 * 4a^2.
-    DIFF2ACF1_10 = -7/8."""
-    r = 0.01 * np.where(np.arange(9) % 2, -1.0, 1.0)
+    """13 log returns +a, -a, ..., +a give 12 return changes -2a, +2a, ...:
+    mean 0, sum of squares 12 * 4a^2, sum of lagged products -11 * 4a^2.
+    DIFF2ACF1_14 = -11/12."""
+    r = 0.01 * np.where(np.arange(13) % 2, -1.0, 1.0)
     close = Series(100 * np.exp(np.r_[0.0, np.cumsum(r)]))
-    out = diff2_acf1(close, length=10)
-    assert out.iloc[:9].isna().all()
-    assert out.iloc[9] == pytest.approx(-0.875, abs=1e-12)
+    out = diff2_acf1(close, length=14)
+    assert out.iloc[:13].isna().all()
+    assert out.iloc[13] == pytest.approx(-11 / 12, abs=1e-12)
 
 
 # --------------------------------------------------------------- semantics
@@ -138,8 +162,10 @@ def _pooled(make, k=10, n=600):
 def test_reads_the_return_autocorrelation():
     """AR(1) returns have a population value of -(1 - phi) / 2: -0.65,
     -0.50, -0.35 at phi = -0.3, 0, +0.3. Medians over 10 paths x 501 bars
-    sit within 0.03 of those (over 200 paths: -0.639, -0.492, -0.345), in
-    order. No memory reads -0.5, not 0."""
+    sit within 0.03 of those, in order. Measured on these 10 paths:
+    -0.632, -0.483, -0.333, i.e. 0.017 to 0.018 above the population
+    values, so the band has about 0.012 of headroom (over 200 paths:
+    -0.639, -0.492, -0.345). No memory reads -0.5, not 0."""
     meds = [np.median(_pooled(lambda n, s, p=p: _ar1(n, s, p))) for p in (-0.3, 0.0, 0.3)]
     assert meds[0] < meds[1] < meds[2]
     for med, pop in zip(meds, (-0.65, -0.50, -0.35)):
@@ -213,6 +239,13 @@ def test_one_ulp_jitter_is_nan():
     assert diff2_acf1(Series(c)).isna().all()
 
 
+def test_a_steep_exponential_is_nan():
+    """exp(linspace(0, 30, 300)): 10% a bar. The largest rounding noise
+    measured on any steady series, about 8 epsilon units against the
+    floor of 64 (docs/measure_diff2_acf1.py)."""
+    assert diff2_acf1(Series(np.exp(np.linspace(0.0, 30.0, 300)))).isna().all()
+
+
 def test_the_guard_keeps_real_tick_variation():
     """10% a bar on a 0.01 tick, 150 bars: the rounding to ticks is real
     variation, far above the floor, so every bar from 99 on fires."""
@@ -220,6 +253,16 @@ def test_the_guard_keeps_real_tick_variation():
     for _ in range(149):
         p.append(round(p[-1] * 1.1, 2))
     assert diff2_acf1(Series(p)).iloc[99:].notna().all()
+
+
+def test_the_guard_keeps_very_small_real_returns():
+    """iid log returns of standard deviation 1e-12 are real variation:
+    thousands of epsilon units above the floor (measured in
+    docs/measure_diff2_acf1.py). A floor of about 1e4 units or more, or
+    one scaled by price, would blank them."""
+    rng = np.random.default_rng(0)
+    close = Series(100 * np.exp(np.cumsum(1e-12 * rng.standard_normal(300))))
+    assert diff2_acf1(close).iloc[99:].notna().all()
 
 
 # -------------------------------------------------------------- causality
@@ -311,8 +354,11 @@ def test_flat_prices_are_nan():
     assert diff2_acf1(Series([10.0] * 150)).isna().all()
 
 
-@pytest.mark.parametrize("bad", [np.nan, 0.0, -1.0])
+@pytest.mark.parametrize("bad", [np.nan, np.inf, 0.0, -1.0, 1e-310])
 def test_a_bad_close_blanks_its_windows(bad):
+    """NaN, infinite, zero, negative and subnormal closes are all missing
+    data. 1e-310 is positive and finite, but unmasked it gave bar 150 a
+    confident value built on one log return of -718."""
     close = _ar1(300, seed=1)
     base = diff2_acf1(close)
     c2 = close.copy()
@@ -323,28 +369,31 @@ def test_a_bad_close_blanks_its_windows(bad):
 
 
 def test_a_price_ratio_that_overflows_is_missing_not_inf():
-    """A close of 1e-310 makes the next ratio overflow to inf. That return
-    is treated as missing: the windows holding it (bars 151..249) are NaN,
-    nothing raises, and every bar outside 150..249 is unchanged. Bar 150
-    still fires, on the (finite, absurd) return into the tiny close."""
+    """Closes of 1e-300 then 1e300 are both normal floats, but their ratio
+    overflows to inf. That return (150) is treated as missing: the windows
+    holding it end at bars 151..249 and are NaN, and nothing raises. Bars
+    150 and 250 still fire, on the finite returns into and out of the
+    pair; every bar outside 150..250 is unchanged."""
     close = _ar1(300, seed=1)
     base = diff2_acf1(close)
     c2 = close.copy()
-    c2.iloc[150] = 1e-310
+    c2.iloc[150] = 1e-300
+    c2.iloc[151] = 1e300
     out = diff2_acf1(c2)
     assert out.iloc[151:250].isna().all()
-    assert np.isfinite(out.iloc[150])
-    pd.testing.assert_series_equal(out.drop(range(150, 250)), base.drop(range(150, 250)))
+    assert np.isfinite(out.iloc[150]) and np.isfinite(out.iloc[250])
+    pd.testing.assert_series_equal(out.drop(range(150, 251)), base.drop(range(150, 251)))
 
 
 def test_short_input_and_length_floor():
     close = _ar1(150, seed=1)
     assert diff2_acf1(close.iloc[:99]) is None  # 100 closes needed
     assert diff2_acf1(close.iloc[:100]).notna().sum() == 1
-    # below Kats' own minimum of 10 points: falls back to the default, the
-    # repo's convention (kpss, arch_lm), disclosed in the docstring
-    assert diff2_acf1(close, length=9).name == "DIFF2ACF1_100"
-    assert diff2_acf1(close, length=10).notna().sum() == 141
+    # below 14, the shortest input Kats' own call returns a value on: falls
+    # back to the default, the repo's convention (kpss, arch_lm), disclosed
+    # in the docstring
+    assert diff2_acf1(close, length=13).name == "DIFF2ACF1_100"
+    assert diff2_acf1(close, length=14).notna().sum() == 137
 
 
 def test_chunk_boundaries_do_not_change_values(monkeypatch):
