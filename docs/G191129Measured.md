@@ -1,8 +1,7 @@
 # g191_129 — measured (issue #75)
 
-> **Status: Gates A-D cleared. Gate E: pending, run by issue-solver after this session.
-> This repo's suite green except the pre-existing breaks below (plus the now-owed Gate E
-> ledger row for this port, expected until the launcher's run is recorded).**
+> **Status: Gates A-E cleared, DISCLOSE. Shipped as `G191_129_12`.
+> This repo's suite green except the pre-existing breaks below.**
 
 12-day sum of down moves: Guotai Junan's (2017, "GTJA191", internal quant report, read via
 the HKUDS/Vibe-Trading copy, MIT) alpha `#129`, per issue #75's own instruction. Module
@@ -65,7 +64,7 @@ at the shipped default, enforced by `verify_series`.
 | B Causality | pass | Future-perturbation sweep (close series rewritten from `j` onward), 34 offsets past the 13-bar warm-up: real module **0 of 34** leaks. Write-shift mutant (final rolling-sum write index `length=12` bars into the future): caught **34 of 34**. Centered-sum mutant (`down.rolling(length, center=True)` instead of the causal trailing window, the `bos` look-ahead bug class): caught **34 of 34** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic close series (seed 11, lognormal walk, `docs/measure_g191_129.py:_walk`), shipped default: **1,488 of 1,500** bars non-NaN (99.20%), first valid at bar 12 (exactly the structural warm-up boundary, `min_length - 1`). **1,484 distinct values**. Range `[0.000000, 0.192170]`, median `0.069919` |
 | D Scale-free | pass | The down/up-day branch choice (`C-C1 < 0`) is invariant under a positive price rescale, and the rolling sum is linear in its input, so the whole column scales exactly by the same factor as `C`, cancelling against the final division by `C`. Measured on the 1,500-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754); x10/x3.7 **within float64 rounding tolerance** (max\|diff\| 4.16e-16 / 5.13e-16). `0 < 1488 fires < 1500` and `1484 > 1` distinct values rule out a constant column |
-| E Attribution | pending, run by issue-solver after this session | The 2026-10-24 prototype screen (`docs/issues/screen/candidates.csv`) measured the scale-free prototype `g191_129` at max\|ρ\| 0.7898 vs `Dist_to_BB_Upper_pct` (manifest, n=397,158), per-frame max median 0.7874 -> DISCLOSE band (0.76 <= ρ < 0.80); that is a PROTOTYPE measurement, not this port's, and is superseded by the port's own re-run |
+| E Attribution | DISCLOSE | Port's own Gate E run (issue-solver, run id `is75-g191_129-6bf7ac68`, 89 ALTPORT-1 frames, 398,849 pooled bars, 329 `compute_all` + 358 manifest = 687 comparators, canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS): `G191_129_12` max\|ρ\| **0.7898156205282925** vs `Dist_to_BB_Upper_pct` (manifest set, n=397,158); per-frame max median \|ρ\| **0.7873528430086538** (same comparator, 89 frames, 0.0% of frames >= 0.90) -> **DISCLOSE** band (0.76 <= ρ < 0.80), neither the pooled nor the per-frame-median STRUCK line (>= 0.90) is crossed. Matches the 2026-10-24 prototype screen's own number (0.7898 / 0.7874 vs the same comparator) almost exactly -- the port did not change the correlation structure. Column **ships**. |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -85,19 +84,14 @@ distinct values, so the generator tags it `SF`), checked by
 `momentum` bucket is not tracked in `CATEGORY_BUCKETS` (only `trend`/`volatility`/`volume`
 are), so no change needed there.
 
-`g191_129`'s Gate E row is NOT YET recorded in `docs/gate_e_ledger.csv` -- the launcher runs
-Gate E after this session per the rules governing this run, and a later receipt session records
-the row. Until then, `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails on `g191_129` (expected, disclosed, not held out of `Category` to silence it).
+`g191_129`'s Gate E row is recorded in `docs/gate_e_ledger.csv` (measured 2026-11-10, run id
+`is75-g191_129-6bf7ac68`, DISCLOSE).
 
 ## Suite run (this repo, this session)
 
 `python -m pytest -q`, full suite, default collection order: see the run captured at commit
 time below. `g191_129`'s own tests (`tests/test_g191_129.py`): **18 passed**. Expected failures
-at this point in the lifecycle, all pre-existing or disclosed above (CLAUDE.md "Known breaks"):
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (now also lists
-`g191_129`, owed until the launcher's Gate E run is recorded; `mtd_ret`, issue #206, was
-already on this list before this port),
+at this point in the lifecycle, all pre-existing (CLAUDE.md "Known breaks"):
 `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` (needs the
 sibling `../AlternativeRepos` checkout, absent in this worktree), and
 `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (untracked
