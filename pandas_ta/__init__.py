@@ -71,8 +71,8 @@ Category = {
     "performance": ["log_return", "percent_return", "trend_return", "max_return", "mtd_ret", "seas"],
     # Statistics
     "statistics": [
-        "entlz", "entropy", "ffd", "g191_026", "g191_044", "g191_165", "g191_189", "g191_190", "ie_asym", "kpss", "kurtosis", "lot_zeroret_60", "mad", "median", "median_ad_hl2", "osap_retskew_21", "quantile", "rank", "skew", "stdev",
-        "tf_centroid_20", "variance", "zscore", "lumpiness",
+        "entlz", "entropy", "ffd", "g191_026", "g191_044", "g191_165", "g191_189", "g191_190", "ie_asym", "kpss", "kurtosis", "lot_zeroret_60", "lumpiness", "mad", "median", "median_ad_hl2", "osap_retskew_21", "quantile", "rank", "skew", "stdev",
+        "tf_centroid_20", "variance", "zscore",
         "rolling_sum", "normalize", "covariance", "cusum", "trend_scan"
     ],
     # Trend

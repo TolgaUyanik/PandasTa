@@ -16,8 +16,11 @@ What these pin, in order of how much it would hurt to lose:
   rising with the ARCH coefficient -- and iid fat-tailed returns read
   about as high as strong clustering. Lumpiness does not tell the two
   apart.
-* The rounding guard: a steady 1% a bar is NaN, not a value made of
+* The rounding guard: a steady drift of any size (1e-2 down to 1e-10 a
+  bar) and a flat price with one-ulp jitter are NaN, not values made of
   floating-point noise; a real tick-rounded series is not blanked by it.
+  The semantics medians are pinned within 5% only (RNG-stream dependent);
+  the orderings carry the meaning.
 * CAUSALITY by future-perturbation over 16 offsets, and a mutant (the write
   index moved one bar earlier) proved live and caught at every offset. A
   bad tick moves exactly the bars whose window holds one of its returns.
@@ -116,6 +119,13 @@ def _pooled(make, k=10, n=600):
     return np.concatenate([lumpiness(make(n, 500 + i)).dropna().to_numpy() for i in range(k)])
 
 
+# Medians measured with numpy 2.5.4's default_rng. They depend on the RNG
+# stream, which NEP 19 does not freeze across numpy releases, so they are
+# pinned only within 5%; the orderings carry the meaning.
+MEASURED_MEDS = (0.0822, 0.1810, 0.3024)
+MEASURED_T3 = 0.2827
+
+
 def test_clustered_volatility_reads_higher():
     """Medians over 10 paths x 500 bars (measured): iid normal 0.0822,
     GARCH(0.10, 0.85) 0.1810, GARCH(0.20, 0.75) 0.3024 -- ordered."""
@@ -124,7 +134,7 @@ def test_clustered_volatility_reads_higher():
         lambda n, s: _garch(n, s, 0.10, 0.85),
         lambda n, s: _garch(n, s, 0.20, 0.75)))
     assert meds[0] < meds[1] < meds[2]
-    assert meds == pytest.approx(PINNED_MEDS, abs=1e-4)
+    assert meds == pytest.approx(MEASURED_MEDS, rel=0.05)
 
 
 def test_fat_tails_read_like_clustering():
@@ -135,17 +145,26 @@ def test_fat_tails_read_like_clustering():
     t3 = np.median(_pooled(lambda n, s: _iid(n, s, "t3")))
     normal = np.median(_pooled(lambda n, s: _iid(n, s)))
     assert t3 > 2 * normal
-    assert t3 == pytest.approx(PINNED_T3, abs=1e-4)
+    assert t3 == pytest.approx(MEASURED_T3, rel=0.05)
 
 
-PINNED_MEDS = (0.0822, 0.1810, 0.3024)
-PINNED_T3 = 0.2827
+@pytest.mark.parametrize("g", [1e-2, 1e-4, 1e-7, 1e-8, 1e-10])
+def test_steady_drift_is_nan_not_rounding_noise(g):
+    """100 * (1 + g)^t: the returns differ only by the rounding of
+    c / c1 - 1, which is absolute (~1e-16) whatever g is. Unguarded, the
+    z-score read that noise as medians of 0.156 (g = 1e-2) up to 4.34
+    (g = 1e-10). A guard relative to the size of the returns (the first
+    version of this module) let g <= 1e-7 through."""
+    assert lumpiness(Series(100 * (1 + g) ** np.arange(300.0))).isna().all()
 
 
-def test_steady_growth_is_nan_not_rounding_noise():
-    """100 * 1.01^t: the returns differ only by rounding (~1e-14 relative).
-    Unguarded, the z-score read that noise as a median of 0.156."""
-    assert lumpiness(Series(100 * 1.01 ** np.arange(300.0))).isna().all()
+def test_one_ulp_jitter_is_nan():
+    """A flat 10.0 whose closes flip between 10.0 and the next float up:
+    unguarded it read a median of 0.036."""
+    rng = np.random.default_rng(0)
+    c = np.full(300, 10.0)
+    c[rng.random(300) < 0.5] = np.nextafter(10.0, 20.0)
+    assert lumpiness(Series(c)).isna().all()
 
 
 def test_the_guard_keeps_real_tick_variation():
@@ -272,7 +291,10 @@ def test_an_extreme_close_blanks_its_windows(extreme, blank):
 def test_short_input_and_length_floor():
     close = _garch(150, seed=1)
     assert lumpiness(close.iloc[:100]) is None  # 100 returns need 101 closes
-    assert lumpiness(close, length=19).name == "LUMPINESS_100"  # 1 tile: constant 0
+    # below 20 there is one tile (constant 0): falls back to the default,
+    # the repo's convention (kpss, arch_lm), disclosed in the docstring
+    assert lumpiness(close, length=19).name == "LUMPINESS_100"
+    assert lumpiness(close, length=10).name == "LUMPINESS_100"
     assert lumpiness(close, length=20).notna().sum() == 130
 
 

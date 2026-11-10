@@ -7,7 +7,9 @@ from pandas_ta.utils import get_offset, verify_series
 
 TILE = 20  # Kats' default `window_size`
 CHUNK_CELLS = 1 << 18  # window cells per evaluation chunk
-FLAT_RTOL = 1e-9  # return sd at or below this times the window's RMS return is no variation
+# A window whose return sd is at most NOISE_ULPS machine epsilons of its
+# largest |1 + r| varies only by the rounding of `c / c1 - 1`: no variation.
+NOISE_ULPS = 64
 
 
 def _tiles(length):
@@ -22,12 +24,13 @@ def _lumpiness_rows(r, tiles):
     variance of the tiles' population variances."""
     z = r - r.mean(axis=1, keepdims=True)
     sd = np.sqrt((z * z).mean(axis=1, keepdims=True))
-    # No variation, or variation at floating-point rounding level (e.g. a
-    # steady 1% a bar, whose returns differ by ~1e-14 relative): z-scoring
+    # No variation, or variation at floating-point rounding level: z-scoring
     # would blow the rounding noise up to unit variance and read it as
-    # structure. NaN instead.
-    rms = np.sqrt((r * r).mean(axis=1, keepdims=True))
-    real = sd > FLAT_RTOL * rms
+    # structure. The rounding of `c / c1 - 1` is absolute -- about eps times
+    # |1 + r| -- whatever the size of r, so the floor is too (a steady 1e-10
+    # drift is as much noise as a steady 1%). NaN instead.
+    floor = NOISE_ULPS * np.finfo(float).eps * np.abs(1.0 + r).max(axis=1, keepdims=True)
+    real = sd > floor
     with np.errstate(divide="ignore", invalid="ignore"):
         z = z / np.where(real, sd, np.nan)
     v = np.stack([z[:, a:b].var(axis=1) for a, b in tiles], axis=1)
@@ -110,13 +113,15 @@ Causal: bar T reads closes T - length .. T (`length` returns). Scale-free:
 returns are price ratios, exact under a x8/x64 rescale, and z-scoring also
 removes the window's overall volatility level. A window with a NaN, zero or
 negative close, or a return whose square overflows, is NaN. So is a window
-whose returns do not vary beyond floating-point rounding (standard
-deviation at most 1e-9 times their RMS): all zero, or a steady 1% a bar,
-whose returns differ by ~1e-14 relative. Without that guard the z-score
-would scale rounding noise up to unit variance; measured on 100 * 1.01^t,
-it read a median of 0.156 and a maximum of 0.593 out of pure rounding.
-Kats does not z-score, so it has no such case; the guard belongs to the
-prototype's z-scored form. Each window is computed on its own, in chunks, so memory does
+whose returns do not vary beyond the rounding of `c / c1 - 1`: standard
+deviation at most 64 machine epsilons times the window's largest |1 + r|
+(about 1.4e-14 for ordinary returns). The rounding is absolute, so the
+floor is too: all-zero returns, a steady drift of any size, or a flat
+price jittering by one ulp. Unguarded, the z-score scales that noise up to
+unit variance -- measured, 100 * (1 + g)^t read medians of 0.156 / 0.123 /
+4.34 at g = 1e-2 / 1e-7 / 1e-10, and 10.0 with one-ulp jitter 0.036, all
+pure rounding (docs/LumpinessMeasured.md). Kats does not z-score, so it has
+no such case; the guard belongs to the prototype's z-scored form. Each window is computed on its own, in chunks, so memory does
 not grow with n * length.
 
 Calculation:

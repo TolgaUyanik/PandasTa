@@ -33,14 +33,45 @@ def flatmix(n, seed):
     return pd.Series(c)
 
 
+def _unguarded():
+    src = open(T._REAL.__file__, encoding="utf-8").read()
+    assert src.count("NOISE_ULPS = 64") == 1
+    mod = types.ModuleType("_unguarded")
+    exec(compile(src.replace("NOISE_ULPS = 64", "NOISE_ULPS = 0"), T._REAL.__file__, "exec"), mod.__dict__)
+    return mod
+
+
+def tick10(n=300):
+    p = [10.0]
+    for _ in range(n - 1):
+        p.append(round(p[-1] * 1.1, 2))
+    return pd.Series(p)
+
+
+def ulp_flat(n=300):
+    rng = np.random.default_rng(0)
+    c = np.full(n, 10.0)
+    c[rng.random(n) < 0.5] = np.nextafter(10.0, 20.0)
+    return pd.Series(c)
+
+
+FRAMES = (("GARCH(.10,.85), 1500", lambda: T._garch(1500, 1)), ("iid normal, 1500", lambda: T._iid(1500, 2)),
+          ("iid t(3), 1500", lambda: T._iid(1500, 3, "t3")), ("tick-rounded, 1500", lambda: ticky(1500, 4)),
+          ("150 flat bars, 800", lambda: flatmix(800, 5)))
+
+
 def gate_a():
+    """The oracle is Kats verbatim on the z-scored window, with the module's
+    own return form (c1 / c0 - 1), compared against the UNGUARDED module so
+    the guard does not enter Gate A; the guard is measured separately."""
     print("== Gate A: vs Kats get_lumpiness (verbatim) on the z-scored window, every bar ==")
-    for name, close in (("GARCH(.10,.85)", T._garch(1500, 1)), ("iid normal", T._iid(1500, 2)),
-                        ("iid t(3)", T._iid(1500, 3, "t3")), ("tick-rounded", ticky(1500, 4)),
-                        ("150 flat bars", flatmix(800, 5))):
-        r = np.diff(close.to_numpy()) / close.to_numpy()[:-1]
+    U = _unguarded()
+    for name, mk in FRAMES:
+        close = mk()
+        c = close.to_numpy()
+        r = c[1:] / c[:-1] - 1.0
         for L in (20, 63, 100, 252):
-            ours = T.lumpiness(close, length=L).to_numpy()
+            ours = U.lumpiness(close, length=L).to_numpy()
             ref = np.full(close.size, np.nan)
             for t in range(L, close.size):
                 w = r[t - L:t]
@@ -53,20 +84,24 @@ def gate_a():
 
 
 def guard():
-    print("== rounding guard ==")
-    steady = pd.Series(100 * 1.01 ** np.arange(300.0))
-    r = np.diff(steady.to_numpy()) / steady.to_numpy()[:-1]
-    print(f"  100*1.01^t: distinct returns {np.unique(r).size}, sd/rms {r.std() / np.sqrt((r * r).mean()):.2e}, "
-          f"non-NaN {T.lumpiness(steady).notna().sum()} of 200")
-    src = open(T._REAL.__file__, encoding="utf-8").read()
-    mod = types.ModuleType("_unguarded")
-    exec(compile(src.replace("FLAT_RTOL = 1e-9", "FLAT_RTOL = 0.0"), T._REAL.__file__, "exec"), mod.__dict__)
-    u = mod.lumpiness(steady)
-    print(f"  unguarded on the same: non-NaN {u.notna().sum()}, median {u.median():.3f}, max {u.max():.3f}")
-    for name, close in (("GARCH(.10,.85)", T._garch(1500, 1)), ("tick-rounded", ticky(1500, 4))):
-        g, n = T.lumpiness(close), mod.lumpiness(close)
-        same = np.array_equal(g.to_numpy(), n.to_numpy(), equal_nan=True)
-        print(f"  {name}: guarded == unguarded on every bar: {same}")
+    print("== rounding guard: shipped vs unguarded ==")
+    U = _unguarded()
+    rows = [(f"100*(1+{g:g})^t, 300", lambda g=g: pd.Series(100 * (1 + g) ** np.arange(300.0)))
+            for g in (1e-2, 1e-4, 1e-7, 1e-8, 1e-10)]
+    rows.append(("10.0 with one-ulp jitter, 300", ulp_flat))
+    for name, mk in rows:
+        close = mk()
+        g, u = T.lumpiness(close), U.lumpiness(close)
+        print(f"  {name}: shipped fires {g.notna().sum()}; unguarded fires {u.notna().sum()}, "
+              f"median {u.median():.3f}, max {u.max():.3f}")
+    for name, mk in FRAMES + (("10%/bar on a 0.01 tick, 300", tick10),):
+        close = mk()
+        for L in (20, 100, 252):
+            if L >= close.size:
+                continue
+            g, u = T.lumpiness(close, length=L), U.lumpiness(close, length=L)
+            same = np.array_equal(g.to_numpy(), u.to_numpy(), equal_nan=True)
+            print(f"  {name} length {L}: identical {same}, blanked by the guard only {int((g.isna() & u.notna()).sum())}")
 
 
 def semantics():
@@ -105,12 +140,13 @@ def cost():
     for n in (5000, 20000, 200000):
         close = T._iid(n, 5)
         for L in (100, 252):
-            best = min(_timed(close, L) for _ in range(3))  # tracemalloc off
+            runs = [_timed(close, L) for _ in range(5)]  # tracemalloc off
             tracemalloc.start()
             T.lumpiness(close, length=L)
             peak = tracemalloc.get_traced_memory()[1]
             tracemalloc.stop()
-            print(f"  n={n} length={L}: best of 3 {best:.3f} s; peak {peak / 2 ** 20:.0f} MiB (tracemalloc, separate run)")
+            print(f"  n={n} length={L}: 5 runs {min(runs):.3f} .. {max(runs):.3f} s; "
+                  f"peak {peak / 2 ** 20:.0f} MiB (tracemalloc, separate run)")
 
 
 def _timed(close, length):
