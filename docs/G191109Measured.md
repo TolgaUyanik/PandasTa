@@ -1,7 +1,7 @@
 # g191_109 — measured (issue #76)
 
-> **Status: Gates A-D cleared. Gate E: pending, run by issue-solver after this session.
-> This repo's suite green except the pre-existing breaks below and the owed Gate E ledger row.**
+> **Status: Gates A-E cleared, DISCLOSE band, ships. Gate E ledger row recorded 2026-11-10.
+> This repo's suite green except the pre-existing breaks below.**
 
 Range EMA over its own EMA (single mass-index ratio): Guotai Junan's (2017, "GTJA191",
 internal quant report, read via the HKUDS/Vibe-Trading copy, MIT) alpha `#109`, per issue #76's
@@ -72,7 +72,7 @@ arithmetic `g191_174` uses for its STD-then-SMA chain.
 | B Causality | pass | Future-perturbation sweep (high/low series rewritten from `j` onward), 37 offsets past the 19-bar warm-up: real module **0 of 37** leaks. Write-shift mutant (final write index `smooth2_length=10` bars into the future): caught **37 of 37**. Look-ahead-range mutant (`e` computed from `high.shift(-1) - low.shift(-1)`, one bar of look-ahead folded into the range before smoothing, the `bos` look-ahead bug class): caught **37 of 37** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic high/low series (seed 11, lognormal walk, `docs/measure_g191_109.py:_walk`), shipped default: **1,482 of 1,500** bars non-NaN (98.80%), first valid at bar 18 (exactly the structural warm-up boundary, `min_length - 1`). **1,482 distinct values**. Range `[0.753181, 1.324601]`, median `0.998151`, no negative values observed |
 | D Scale-free | pass | `H-L` is linear in a positive price rescale, and the GTJA `SMA` recursion is linear in a positive scalar multiple of its input, so BOTH `e` and `s` scale by the SAME factor and the ratio `e/s` cancels it exactly, with no extra division needed. Measured on the 1,500-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754); x10/x3.7 **within float64 rounding tolerance** (max\|diff\| 4.55e-15 / 3.00e-15). `0 < 1482 fires < 1500` and `1482 > 1` distinct values rule out a constant column; no negative value observed on the fired bars |
-| E Attribution | **pending, run by issue-solver after this session** | per CLAUDE.md "Owed, not failed" -- this session does not run Gate E or touch `../Backtesting` |
+| E Attribution | **DISCLOSE, ships** | `G191_109_10_2_10_2`: max\|rho\| **0.7950** vs `natr_Chg_5d` (manifest, n = 397,247); per-frame max median **0.7960**, also vs `natr_Chg_5d`, over 89 frames (0.0% of frames >= 0.90). 687 comparators (329 compute_all + 358 manifest), canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). Run `is76-g191_109-a6dcf32e` via `pandas_ta.volatility.g191_109`, launcher-run per this issue's override rules. Band: `0.76 <= 0.7950 < 0.80` = DISCLOSE (ships, not STRUCK). Recorded in `docs/gate_e_ledger.csv` 2026-11-10 |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -97,15 +97,15 @@ row and fills in the measured numbers above). This is expected to leave
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` failing on this
 tree until that happens (see Suite run below).
 
-## Suite run (this repo, this session)
+## Suite run (this repo, this receipt session, after the Gate E ledger row was recorded)
 
-`python -m pytest -q`, full suite, default collection order: **3 failed, 5122 passed, 83
-skipped**. `g191_109`'s own tests (`tests/test_g191_109.py`): **17 passed**. The 3 failures,
-all pre-existing or expected-until-the-launcher's-run (CLAUDE.md "Known breaks" plus this
-port's own owed Gate E ledger row, see above):
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (reports
-`['g191_109', 'mtd_ret']` missing -- `g191_109`'s row above; `mtd_ret` is a pre-existing,
-unrelated indicator, issue #206, out of this issue's scope), `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
-(needs the sibling `../AlternativeRepos` checkout, absent in this worktree) and
+`python -m pytest -q`, full suite, default collection order: **3 failed, 5129 passed, 83
+skipped**. `g191_109`'s own tests (`tests/test_g191_109.py`): **17 passed**. The 3 failures are
+all pre-existing, unrelated to this port (CLAUDE.md "Known breaks"):
+`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (now reports only
+`['mtd_ret']` missing -- a pre-existing, unrelated indicator, issue #206, out of this issue's
+scope; `g191_109`'s own row is present since this session's `docs/gate_e_ledger.py record`),
+`tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` (needs the
+sibling `../AlternativeRepos` checkout, absent in this worktree) and
 `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (untracked
 `docs/pine/` corpus). No other test regresses.
