@@ -215,7 +215,7 @@ measurement of this port.
 ## Gate F — suites
 
 Full suite on this branch (`.venv-pd2`, CI's two deselects, `GATE_E_PENDING_OK=1`):
-5104 passed, 84 skipped, 0 failed.
+5104 passed, 84 skipped, 0 failed before the dev merge; 5130 passed, 84 skipped, 0 failed after merging `dev` at `4dca6d3`.
 
 Without the variable, `test_every_indicator_that_needs_a_row_has_one` fails on the owed
 rows `arch_lm` and `mtd_ret`; `mtd_ret` is already owed on `dev`. The Backtesting suite
@@ -223,12 +223,12 @@ cannot be run here.
 
 ## Counters touched
 
-- `CATEGORY_TOTAL` 309 → 310. Statistics is not in `CATEGORY_BUCKETS`.
-- README: 310 registered, 318 callable, statistics (29).
-- `docs/MLCompanionContract.md`: 654 → 655 tagged and 297 → 298 `SF`, with a revert note
+- `CATEGORY_TOTAL` 310 → 311. Statistics is not in `CATEGORY_BUCKETS`.
+- README: 311 registered, 319 callable, statistics (29).
+- `docs/MLCompanionContract.md`: 655 → 656 tagged and 298 → 299 `SF`, with a revert note
   (newest first).
 - `docs/IndicatorDictionary.md`, regenerated with `.venv-pd2`. Its diff is the `arch_lm`
   row (`ARCHLM_100` SF, 100 warm-up), the four counts and the shortlist entry, and nothing
   else.
 
-All counts are as of `dev` at `4f9a32e`.
+All counts are as of the merge with `dev` at `4dca6d3`.
