@@ -1,6 +1,6 @@
 # g191_111 — measured (issue #71)
 
-> **Status: Gates A-D cleared. Gate E: pending, run by issue-solver after this session.**
+> **Status: Gates A-E cleared, DISCLOSE. Column kept.**
 
 Volume x close-location oscillator: Guotai Junan's (2017, "GTJA191", internal quant report, read
 via the HKUDS/Vibe-Trading copy, MIT) alpha `#111`, per issue #71's own instruction. Module
@@ -74,7 +74,7 @@ no-tie case. `min_length = max(smooth1_length, smooth2_length, mean_length)` = `
 | B Causality | pass | Future-perturbation sweep (every OHLCV bar rewritten from `j` onward), 37 offsets past the 19-bar warm-up: real module **0 of 37** leaks. Write-shift mutant (final division's write index `mean_length=20` bars into the future): caught **37 of 37**. Centered-`mean_v` mutant (`mean_v = volume.rolling(mean_length, center=True).mean()`, the `bos` look-ahead bug class): caught **37 of 37** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic OHLCV series (seed 11, lognormal price walk with independently-seeded high/low spread and uniform volume, `docs/measure_g191_111.py:_walk`), shipped default: **1,481 of 1,500** bars non-NaN (98.73%), first valid at bar 19 (exactly the structural warm-up boundary, `min_length - 1`). **1,481 distinct values**. Range `[-0.358276, 0.285084]`, median `0.000167` |
 | D Scale-free | pass | `CLV` is exactly invariant under a positive PRICE rescale (its numerator and denominator are both linear in price, the factor cancels algebraically), so `x = V*CLV` and every downstream term is price-rescale invariant; `x`, both GTJA `SMA`s and `MEAN(V,...)` are each linear in a positive VOLUME rescale, so the final ratio's volume factor cancels exactly. Measured on the 1,500-bar series: PRICE-only, VOLUME-only, and BOTH x8/x64 **all bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754); x10/x3.7 **within float64 rounding tolerance** (max\|diff\| 2.9e-14 PRICE, 1.4e-16 VOLUME, 2.9e-14 BOTH). `0 < 1481 fires < 1500` and `1481 > 1` distinct values rule out a constant column |
-| E Attribution | pending | Gate E: pending, run by issue-solver after this session |
+| E Attribution | DISCLOSE | `G191_111_11_2_4_2_20`: max\|ρ\| **0.7768** vs `CLV_Pctl` (manifest, n = 392,145); per-frame max median \|ρ\| **0.7827** vs `CLV_Pctl` (n = 89 frames, 0.0% ≥ 0.90). Pooled across 687 comparators (329 `compute_all` + 358 manifest), 397,146 non-NaN/non-zero bars, 89 ALTPORT-1 frames, canary (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS) bit-equal. Band: `0.76 ≤ 0.7768 < 0.80` → DISCLOSE, under the 0.90 STRUCK line -- column kept. Run `is71-g191_111-186de4a6`, recorded in `docs/gate_e_ledger.csv` (measured 2026-11-10) |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -92,8 +92,8 @@ distinct values, so the generator tags it `SF`), checked by
 `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL` updated to match (`305 -> 306`) and
 `CATEGORY_BUCKETS["volume"]` updated (`39 -> 40`).
 
-`g191_111`'s Gate E row will be recorded in `docs/gate_e_ledger.csv` by a later receipt session,
-once the launcher's Gate E run lands.
+`g191_111`'s Gate E row is recorded in `docs/gate_e_ledger.csv` (run `is71-g191_111-186de4a6`,
+measured 2026-11-10, DISCLOSE).
 
 ## Suite run (this repo, this session)
 
