@@ -1,7 +1,7 @@
 # g191_043 — measured (issue #69)
 
-> **Status: Gates A-D cleared, wired, this repo's suite green except the pre-existing breaks
-> below. Gate E: pending, run by issue-solver after this session.**
+> **Status: Gates A-E cleared, wired, this repo's suite green except the pre-existing breaks
+> below. Gate E: SHIP (max |rho| 0.7595 vs OBV_Range_Pos_20). Keep the column.**
 
 6-day signed volume (OBV slope): Guotai Junan's (2017, "GTJA191", internal quant report, read
 via the HKUDS/Vibe-Trading copy, MIT) alpha `#43`, per issue #69's own instruction. Module
@@ -54,7 +54,7 @@ and in `tests/test_g191_043.py::test_hand_derived_nine_bars` / `test_signed_seri
 | B Causality | pass | Future-perturbation sweep (close AND volume rewritten from `j` onward, another synthetic pair), 34 offsets past the 6-bar warm-up: real module **0 of 34** leaks (`python docs/measure_g191_043.py`). One mutant (`importlib` source read, `exec`'d in memory, the final write index shifted `length=6` bars into the future), shown live (differs from the real module) then caught at **34 of 34** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic frame (seed 11 close, seed 97 volume, `docs/measure_g191_043.py:_walk`/`_volume`), shipped default: **1,494 of 1,500** bars non-NaN (99.60%) -- exactly `n - 6`, the `length = 6`-bar warm-up, no wider gap. **1,461 distinct values** observed on this frame (not a constant column), range `[-1.000000, 1.000000]` (bounded by construction), median `0.051569` |
 | D Scale-free | pass | For ANY `k > 0`: scaling volume (`V -> k*V`) scales both the signed-volume sum and the volume sum linearly, so `k` cancels in the ratio exactly; scaling price (`C -> k*C`) changes nothing, since only `SIGN(C-C1)` is read, never its magnitude. Measured on the 1,500-bar frame: VOLUME x8/x64 **bit-identical, 0.0 max\|diff\|**; VOLUME x10/x3.7: max\|diff\| **1.11e-15**, float64 rounding from the scalar multiply itself, well under the test's 1e-9 tolerance. PRICE x8/x64/x10/x3.7 **ALL bit-identical, 0.0 max\|diff\|** (the sign ternary reads only the SIGN of a price difference, so even a non-power-of-two rescale is exact -- unlike the volume case). `0 < 1,494 fires < 1,500` and `1,461 > 1` distinct values rule out a constant column |
-| E Attribution | **pending, run by issue-solver after this session** | not run in this session, per this session's rules |
+| E Attribution | **SHIP** (band: < 0.76) | `python ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.volume.g191_043`, run by the issue-solver launcher 2026-11-10 (run dir `is69-g191_043-ef734807`), 89 ALTPORT-1 frames, n = 397,932 pooled bars, 687 comparators (329 `compute_all` + 358 `ml_features` manifest), canary bit-equal. `G191_043_6`: max \|rho\| **0.7595** vs `OBV_Range_Pos_20` (manifest), per-frame max median \|rho\| **0.7623** (also vs `OBV_Range_Pos_20`), verdict **SHIP** |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -70,8 +70,7 @@ synthetic frame and takes many distinct values, so the generator tags it `SF`).
 `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL` updated to match (303 -> 304) and
 `CATEGORY_BUCKETS["volume"]` (38 -> 39).
 
-`g191_043`'s Gate E ledger row is owed, recorded by the receipt session after the launcher's
-Gate E run.
+`g191_043`'s Gate E ledger row is recorded (`docs/gate_e_ledger.csv`, measured 2026-11-10).
 
 ## Suite run (this repo, this session)
 
@@ -82,8 +81,7 @@ plus "Owed, not failed"):
 `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` (needs the
 sibling `../AlternativeRepos` checkout, absent in this worktree),
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (owed for
-`['g191_043', 'mtd_ret']` -- `g191_043` is this port's own pending row, closed by the receipt
-session after the launcher's Gate E run; `mtd_ret` pre-dates this session, per
-`docs/G191167Measured.md`'s identical note) and
+`mtd_ret`, pre-dating this session, per `docs/G191167Measured.md`'s identical note -- `g191_043`
+itself is no longer in this list, its row recorded this session) and
 `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (untracked
 `docs/pine/` corpus, 8d8f705). No other test regresses.
