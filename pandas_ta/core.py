@@ -2926,6 +2926,12 @@ class AnalysisIndicators(BasePandasObject):
         result = eom(high=high, low=low, close=close, volume=volume, length=length, divisor=divisor, offset=offset, drift=drift, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def g191_040(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = g191_040(close=close, volume=volume, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def g191_043(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
