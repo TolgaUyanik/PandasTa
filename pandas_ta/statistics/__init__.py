@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from .arch_lm import arch_lm
 from .entlz import entlz
 from .entropy import entropy
 from .g191_026 import g191_026

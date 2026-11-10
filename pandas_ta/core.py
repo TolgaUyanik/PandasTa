@@ -1832,6 +1832,11 @@ class AnalysisIndicators(BasePandasObject):
         return self._post_process(result, **kwargs)
 
     # Statistics
+    def arch_lm(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = arch_lm(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def cusum(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = cusum(close=close, length=length, offset=offset, **kwargs)
