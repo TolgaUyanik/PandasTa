@@ -10,6 +10,7 @@ from .ie_asym import ie_asym
 from .kpss import kpss
 from .kurtosis import kurtosis
 from .lot_zeroret_60 import lot_zeroret_60
+from .lumpiness import lumpiness
 from .mad import mad
 from .median import median
 from .median_ad_hl2 import median_ad_hl2

@@ -1915,6 +1915,11 @@ class AnalysisIndicators(BasePandasObject):
         result = lot_zeroret_60(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def lumpiness(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = lumpiness(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def mad(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = mad(close=close, length=length, offset=offset, **kwargs)
