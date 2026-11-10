@@ -2,8 +2,11 @@
 """Tests for `pandas_ta.volume.g191_040` -- Guotai Junan's (2017, "GTJA191")
 alpha `#40`, per issue #77: `SUM(C>C1 ? V : 0, 26) / SUM(C<=C1 ? V : 0, 26)
 * 100`. Gate A derivation is in the module docstring and
-`docs/G191040Measured.md`. Gate E is pending (CLAUDE.md, "Owed, not
-failed").
+`docs/G191040Measured.md`. Gate E was measured by issue-solver on
+2026-11-11 (run `is77-g191_040-b7322f17`): max `|rho| = 0.8268` vs
+`OBV_Slope_norm`, verdict DISCLOSE_GAP, so the column ships with that
+disclosure; the row is in `docs/gate_e_ledger.csv` and the numbers are in
+`docs/G191040Measured.md`.
 
 What these pin, in order of how much it would hurt to lose:
 
@@ -40,8 +43,11 @@ What these pin, in order of how much it would hurt to lose:
   `fires == 874 == 900 - 26`, no interior gap) and the 1,500-bar frame of
   `docs/measure_g191_040.py` (`fires = 1474 = 1500 - 26`, longest up-run
   16 against the 26 needed). The other synthetic frames in these two files
-  are not checked for it, and how often it happens on real data is NOT
-  measured here; that waits on Gate E.
+  are not checked for it. How often it happens on real data is not isolated
+  by any run, but Gate E bounds it: 396,531 non-NaN of 398,849 pooled bars
+  against an 89 x 26 = 2,314-bar warm-up leaves AT MOST 4 bars across the
+  universe for this branch (or for a NaN close) -- see
+  `docs/G191040Measured.md`.
 * SCALE-FREE: VOLUME x8/x64 bit-identical, x10/x3.7 within tolerance (the
   `k` cancels inside the ratio of two linear sums, for ANY `k > 0`); PRICE
   x8/x64/x10/x3.7 ALL bit-identical (only the SIGN of a price difference is
@@ -301,8 +307,9 @@ def test_all_up_window_divides_by_zero_down_volume_to_nan():
     900 - 26` on the 900-bar frame (no interior gap), and the longest
     consecutive up-run on the 1,500-bar frame of
     `docs/measure_g191_040.py` is 16 bars against the 26 a rally would
-    need. How often it happens on real data is NOT measured here -- that
-    is Gate E's.
+    need. How often it happens on real data is not isolated by any run;
+    Gate E bounds it at AT MOST 4 bars over 398,849 pooled bars (Gate C of
+    `docs/G191040Measured.md`).
 
     That the NaN comes from the shipped `inf -> NaN` replace, and not from
     an upstream warm-up gap, is shown with a mutant rather than with a
