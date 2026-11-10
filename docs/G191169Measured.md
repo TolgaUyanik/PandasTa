@@ -1,7 +1,7 @@
 # g191_169 — measured (issue #72)
 
-> **Status: Gates A-D cleared, this repo's suite green except the pre-existing breaks
-> below. Gate E: pending, run by issue-solver after this session.**
+> **Status: Gates A-E cleared (Gate E: DISCLOSE, max|rho| 0.7808, under the 0.90 strike
+> line), this repo's suite green except the pre-existing breaks below. Column kept.**
 
 MACD of the smoothed lagged one-day change: Guotai Junan's (2017, "GTJA191", internal
 quant report, read via the HKUDS/Vibe-Trading copy, MIT) alpha `#169`, per issue #72's own
@@ -71,7 +71,7 @@ Total: `min_length = smooth1_length + max(fast_length,slow_length) + smooth2_len
 | B Causality | pass | Future-perturbation sweep (close series rewritten from `j` onward), 34 offsets past the 44-bar warm-up: real module **0 of 34** leaks. Write-shift mutant (final GTJA-`SMA`/division write index `smooth2_length=10` bars into the future): caught **34 of 34**. Centered-mean mutant (`fast = a.rolling(fast_length, center=True).mean()`, the `bos` look-ahead bug class): caught **34 of 34** |
 | C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic close series (seed 11, lognormal walk, `docs/measure_g191_169.py:_walk`), shipped default: **1,456 of 1,500** bars non-NaN (97.07%), first valid at bar 44 (exactly the structural warm-up boundary, `min_length - 1`). **1,456 distinct values**. Range `[-0.003517, 0.002713]`, median `-0.000076` |
 | D Scale-free | pass | `delta_c = C - DELAY(C,1)` is linear in `C` (subtraction of two linearly-scaled terms), and every downstream term built only from it (`s9`, `a`, `fast`, `slow`, `diff`, the final `SMA`) is linear too, so the whole pre-division column scales by the same `k` as `C` under a positive price rescale, cancelling exactly against the final division by `C`. Measured on the 1,500-bar series: PRICE x8/x64 **bit-identical, 0.0 max\|diff\|** (power-of-two multiplication is exact in IEEE754); x10/x3.7 **within float64 rounding tolerance** (max\|diff\| 4.77e-18 / 3.04e-18). `0 < 1456 fires < 1500` and `1456 > 1` distinct values rule out a constant column |
-| E Attribution | pending, run by issue-solver after this session | — |
+| E Attribution | DISCLOSE (`0.76 <= rho < 0.80`), column kept | `G191_169_9_1_12_26_10_1`: max\|rho\| **0.7808** vs `apo_pct_Pctl` (manifest comparator set, n=391,373); per-frame max median \|rho\| **0.7855** (also vs `apo_pct_Pctl`, 89 frames, 0% of frames >= 0.90). Against the `compute_all` set alone: max\|rho\| 0.7631 vs `ppo_PPO_12_26_9`, n=394,933. Pooled against all 687 comparators (329 compute_all + 358 manifest), 398,849 bars, 89 ALTPORT-1 BIST frames. Run `is72-g191_169-67852da3`, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS); recorded in `docs/gate_e_ledger.csv` (measured 2026-11-10) |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
 
 ## Wiring
@@ -91,13 +91,10 @@ takes many distinct values, so the generator tags it `SF`), checked by
 `momentum` bucket is not tracked in `CATEGORY_BUCKETS` (only `trend`/`volatility`/`volume`
 are), so no change needed there.
 
-`g191_169`'s Gate E row is NOT YET recorded: this session does not run `gate_e_overlap.py`
-(CLAUDE.md override for this worktree). `tests/test_gate_e_ledger.py::
-test_every_indicator_that_needs_a_row_has_one` therefore fails locally on exactly
-`['g191_169', 'mtd_ret']` -- the second name pre-dates this session (carried over from
-issue #206, per `docs/G191167Measured.md`'s identical note, unrelated to this port). This
-is expected per this session's own rules: a later receipt session fills in the measured
-Gate E numbers and records the ledger row once the launcher has run Gate E.
+`g191_169`'s Gate E row is now recorded in `docs/gate_e_ledger.csv` (run
+`is72-g191_169-67852da3`, measured 2026-11-10, verdict DISCLOSE): the launcher ran
+`gate_e_overlap.py` and this receipt session recorded the row and filled in the numbers
+above.
 
 ## Suite run (this repo, this session)
 
