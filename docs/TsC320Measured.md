@@ -2,17 +2,18 @@
 
 Issue #88 (TS-C3-20), ported 2026-11-12 on branch `issue-88-ts-c3-20`.
 Column: **`TS_C3_20_1`**, `pandas_ta/statistics/ts_c3_20.py`.
-**Status: Gates A, B and D through on synthetic frames. Gate C: synthetic
-only — the real-data counts are owed with Gate E. Gate E: pending, run by
-issue-solver after this session.** A later session records the
-`docs/gate_e_ledger.csv` row; until then
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails here by design.
+**Status: SHIPPED through Gates A–F.** Gate E ran on the committed code
+(issue-solver, 2026-11-12): `TS_C3_20_1` max \|ρ\| **0.0806** vs
+`kama_vs_SMA_20_pct`, per-frame max median 0.0940 over 89 frames →
+**SHIP**, recorded in `docs/gate_e_ledger.csv`. Gate C's real-data counts
+come from that same run and are now measured.
 
 Every number here is printed by `python docs/measure_ts_c3_20.py`
-(pandas 2.3.3 / numpy 1.26.4) or by
-`python -m pytest tests/test_ts_c3_20.py -q`. Nothing in this file was typed
-from expectation; where a number is *not* measured, the line says so.
+(pandas 2.3.3 / numpy 1.26.4), by `python -m pytest tests/test_ts_c3_20.py -q`,
+or — for Gates C and E on real data — by the launcher's Gate E run
+(`overlap_max.csv` and `meta.json` of run `is88-ts_c3_20-853aeed4`,
+2026-11-12). Nothing in this file was typed from expectation; where a number
+is *not* measured, the line says so.
 
 ## What it is
 
@@ -243,34 +244,36 @@ a tick-rounded walk, 280 of 300 bars each, identical to the unguarded form,
 
 ## Gate C — reachability
 
-**Real data: OWED.** This worktree has no BIST frames, so the pooled non-NaN
-and non-zero counts over the 89 frozen ALTPORT-1 frames come from the
-launcher's Gate E run and are **not yet measured**. The receipt session fills
-this paragraph in from `overlap_max.csv`. A 20-bar warm-up per frame gives
-89 × 20 = 1,780 NaN bars of the 398,849 — that is arithmetic, and it is a
-**floor on the NaN count, not a prediction of it**: two other things empty
-bars, each close inside a frame that is NaN, zero, negative, infinite or
-subnormal (21 bars each, see *Edge cases* below) and each window whose 20
-returns have `sd <= 9.09e-13`. In real data that second cause means **21**
-consecutive identical closes — the `length + 1` closes one value reads — a
-halted or limit-locked session, or an illiquid name; the 21 is measured, not
-derived, since a flat run planted at bar 200 of a 400-bar walk empties **0**
-bars at 20 identical closes, **1** (bar 220) at 21, and **5** (bars
-220..224) at 25. Identical closes are not the only way to reach the floor,
-only the realistic one: an exactly geometric path has 21 DISTINCT closes per
-window and is emptied too (measured, *The rounding-noise floor* below). So
-the measured non-NaN count will be at or below 397,069.
+**Real data: measured.** From the launcher's Gate E run of 2026-11-12
+(`overlap_max.csv`), over the 89 frozen ALTPORT-1 frames and 398,849 pooled
+bars:
 
-Two numbers already on the page say the floor is likely tight rather than
-loose, though neither bounds it from above. The prototype, which is
-bit-equal to this port on the 1,500-bar walk
-(A2), reported `n = 397,069` on these same 89 frames and 398,849 bars
-(issue #88, run `screen_20261024`) — exactly `398,849 − 89 × 20`, so on
-that evidence the floor is tight; but `n` there is an overlap sample size,
-not a non-NaN count, which is why this stays a bound. The neighbouring
-`lean_momersion_20` lost 11 bars beyond its own 89 × 21 warm-up on the same
-frames (`docs/LeanMomersion20Measured.md`, 396,969 non-NaN of 398,849), so
-a small shortfall is the normal outcome rather than a surprise.
+| | bars | share of 398,849 |
+|---|---|---|
+| `TS_C3_20_1` non-NaN | **397,069** | 99.554% |
+| of those, non-zero | **396,361** | 99.376% |
+| NaN | 1,780 | 0.446% |
+
+So the column fires on every bar that is not a warm-up bar and on no others:
+`398,849 − 89 × 20 = 397,069` exactly, the arithmetic floor on the NaN count,
+reached with nothing lost beyond it. Three other things could have emptied
+bars and on these frames none did — a close inside a frame that is NaN, zero,
+negative, infinite or subnormal (21 bars each, see *Edge cases* below), a
+window whose 20 returns have `sd <= 9.09e-13`, which in real data means **21**
+consecutive identical closes (a halted or limit-locked session, or an illiquid
+name), and an exactly geometric window, which reaches the same floor with 21
+DISTINCT closes (*The rounding-noise floor* below). The neighbouring
+`lean_momersion_20` lost 11 bars beyond its own warm-up on these same frames
+(`docs/LeanMomersion20Measured.md`, 396,969 non-NaN), so a tight floor is a
+measurement here, not the expected outcome.
+
+The 708 non-NaN bars that are exactly 0.0 (397,069 − 396,361) are not
+explained here; a numerator that is exactly zero needs a triple product that
+cancels to a float zero, which a zero return gives (two consecutive identical
+closes inside a window, far commoner than 21 of them). Whatever the cause,
+`0 < 396,361 < 398,849` is what Gate D's non-constant requirement asks for,
+and the prototype's own sample size on the same frames was the same 397,069
+(issue #88, run `screen_20261024`).
 
 The rest of this section is **synthetic**: 1,500-bar generated paths,
 1,480 fired bars each.
@@ -358,24 +361,36 @@ distinct values, so no constant column is passing this gate by accident.
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
+**Measured on this port, 2026-11-12**, by issue-solver running
+`../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module
+pandas_ta.statistics.ts_c3_20` at default parameters over the 89 frozen
+ALTPORT-1 BIST frames (398,849 pooled bars) against the 687 comparators
+(329 `compute_all` + 358 `ml_features` manifest `1d`), 1 of them degenerate.
+Bands `r3-perframe-0.90`. Canary: AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS
+bit-equal. Recorded in `docs/gate_e_ledger.csv`
+(`pandas_ta_src_sha1` 3defa70b1e34c01bb4cd6b960ec1bd1b61fee3b3, module sha1
+2eaede6ac813c1952e239c1cca97eee2bb95c576).
 
-The harness is `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py
-run --module pandas_ta.statistics.ts_c3_20` over the 89 frozen ALTPORT-1 BIST
-frames against the 687 comparators (329 `compute_all` + 358 `ml_features`
-manifest). This session neither ran it nor read anything under
-`../Backtesting`; a later session records the `docs/gate_e_ledger.csv` row
-and writes the measured \|ρ\|, its comparator, the sample size, the per-frame
-median and the verdict into this section.
+| column | max \|ρ\| | against | set | n | per-frame max median | frames | frames with median ≥ 0.90 | verdict |
+|---|---|---|---|---|---|---|---|---|
+| `TS_C3_20_1` | **0.0806** | `kama_vs_SMA_20_pct` | manifest | 397,069 | **0.0940** | 89 | **0 (0.0%)** | **SHIP** |
 
-What the issue reports for the **prototype** (2026-10-24, run
-`screen_20261024`) is the expectation this port will be judged against, and
-is not evidence about the port: max \|ρ\| **0.0806** vs `kama_vs_SMA_20_pct`
-(manifest, n = 397,069), top-5 per-frame max median 0.0940, next comparators
-`kama_vs_SMA_20_pct_State` 0.0765 and `kama_vs_SMA_20_pct_Pctl` 0.0758 →
-SHIP. The prototype is bit-equal to this port on a 1,500-bar walk (Gate A,
-A2), which is a reason to expect the same numbers and not a substitute for
-measuring them.
+Split by comparator set: against `compute_all` the max is **0.0428** vs
+`skew` (n = 396,268); against the manifest **0.0806** vs
+`kama_vs_SMA_20_pct` (n = 397,069). The per-frame worst comparator is the
+same `kama_vs_SMA_20_pct`, at a median of 0.0940 — so pooled and per-frame
+agree on both the comparator and the verdict, and 0.0940 is 0.806 below the
+0.90 per-frame strike line and the pooled 0.0806 is 0.679 below the 0.76
+DISCLOSE line. Nothing is struck, nothing is disclosed; the column ships as
+wired, with no waiver needed.
+
+This reproduces the issue's prototype numbers exactly: max \|ρ\| 0.0806 vs
+`kama_vs_SMA_20_pct` at n = 397,069 (2026-10-24, run `screen_20261024`), the
+same comparator and the same sample size, and the per-frame max median agrees
+too — 0.09397 unrounded here, 0.0940 as the issue reports it. The
+prototype is bit-equal to this port
+on a 1,500-bar walk (Gate A, A2), which is why the agreement is expected
+rather than a coincidence; it is now measured on the port.
 
 **Nearest shipped columns on ONE 1,500-bar synthetic walk — NOT Gate E**
 (12 shipped columns, one frame; Gate E is 687 comparators over 89 frozen BIST
@@ -404,18 +419,32 @@ synthetic frame is not evidence about the 89.
 
 ## Gate F — suites
 
-Run in this worktree, porting session:
+Porting session, in this worktree:
 
 * `python -m pytest tests/test_ts_c3_20.py -q` → **98 passed** in 2.62 s.
-* `python -m pytest -q` → **3 failed, 5668 passed, 83 skipped** in 117.99 s.
-  The three are the two `CLAUDE.md` "Known breaks"
-  (`test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`,
-  which needs the sibling `../AlternativeRepos` checkout and is deselected in
-  CI, and `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`,
-  the `supertrend` citation into the untracked `docs/pine/`) plus
-  `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-  which reports `['mtd_ret', 'ts_c3_20']` — the row this port owes, and one
-  owed before it. CI into `dev` skips that one under `GATE_E_PENDING_OK=1`.
+* `python -m pytest -q` → **3 failed, 5668 passed, 83 skipped** in 117.99 s,
+  the third failure being the Gate E row this port then owed.
+
+Receipt session (2026-11-12), after the ledger row landed:
+
+* `python -m pytest tests/test_ts_c3_20.py -q` → **98 passed** in 2.61 s.
+* `python -m pytest tests/test_gate_e_ledger.py -q` → **1 failed, 802
+  passed** in 3.40 s.
+* `python -m pytest -q` → **3 failed, 5,675 passed, 83 skipped, 0 errors** of
+  5,761 in 120.47 s (counts read from the run's own `--junitxml`; the
+  terminal's progress counter says 5,740 collected items, and the difference
+  of 21 is the `tests/config.py` module-level skips, which the XML counts as
+  tests and the collector does not).
+
+The three failures are the two `CLAUDE.md` "Known breaks"
+(`test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`,
+which needs the sibling `../AlternativeRepos` checkout and is deselected in
+CI, and `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`,
+the `supertrend` citation into the untracked `docs/pine/`) plus
+`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, which
+now reports `['mtd_ret']` — **`ts_c3_20` is gone from that list**, and the one
+name left is a row owed before this branch and not by it. CI into `dev` skips
+that test under `GATE_E_PENDING_OK=1`.
 
 The launcher runs both repos' suites in clean worktrees.
 
