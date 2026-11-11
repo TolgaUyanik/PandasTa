@@ -41,6 +41,7 @@ from .imi import imi
 from .kalman_rsi import kalman_rsi
 from .kdj import kdj
 from .kst import kst
+from .lean_momersion_20 import lean_momersion_20
 from .lrsi import lrsi
 from .macd import macd
 from .macd_area_divergence import macd_area_divergence
