@@ -6,8 +6,13 @@ yesterday's close over downside excursion past it, in percent; `100` is
 balance. No `conv` field in the issue's own `candidates.csv` row
 (`docs/issues/screen/candidates.csv:47`) -- a ratio of two price-linear
 sums is scale-free with no extra division needed. Gate A derivation is in
-the module docstring and `docs/G191110Measured.md`. Gate E is pending
-(CLAUDE.md, "Owed, not failed").
+the module docstring and `docs/G191110Measured.md`. Gate E ran on this
+port on 2026-11-11 (run `is84-g191_110-1dad5ee8`): max |rho| 0.8860 vs
+`brar_BR_26` (compute_all, n = 396,399), per-frame max median 0.8819 over
+89 frames -- DISCLOSE_GAP, so no column is struck and `G191_110_20` ships
+under the bands. The row is in `docs/gate_e_ledger.csv`. The run's own
+`top25.csv` carries `brar_BR_26` and no `brar_BR_20`, so the same-length
+duplication these tests pin was invisible to that measurement.
 
 What these pin, in order of how much it would hurt to lose:
 

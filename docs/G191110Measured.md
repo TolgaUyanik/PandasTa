@@ -1,18 +1,20 @@
 # g191_110 — measured (issue #84)
 
-> **Status: Gates A-D cleared and wired; Gate E pending, run by issue-solver after this
-> session. ⚠ RECOMMENDATION: SKIP THIS COLUMN as question-redundancy — and the owner has to
+> **Status: Gates A-F cleared on the port. Gate E ran on the committed module (2026-11-11,
+> run `is84-g191_110-1dad5ee8`): max |ρ| **0.8860** vs `brar_BR_26`, per-frame max median
+> **0.8819** → **DISCLOSE_GAP**, under the 0.90 strike line, so no column is struck and
+> `G191_110_20` ships under the bands. Ledger row recorded.
+> ⚠ RECOMMENDATION NEVERTHELESS: SKIP THIS COLUMN as question-redundancy — the owner has to
 > make that call, because Gate E cannot. This column is `brar`'s `BR` at a different window
 > length. Measured, not argued: at the SAME length the port and
 > `brar(..., length=20)["BR_20"]` have Spearman **1.0** and differ by at most
 > **5.684341886080802e-14** (one ulp), and the port's own expression re-spelled `brar`'s way
-> is **bit-identical** to `BR_20` on all 1,480 shared bars. Against the SHIPPED default
-> `BR_26` the issue's own prototype measured **0.8860** pooled on real data — DISCLOSE_GAP,
-> UNDER the 0.90 strike line — so Gate E will probably say "ships" while the algebraic
-> duplication stays invisible to it (INFERRED: the comparator set appears to carry `brar` only
-> at its default 26; see the section below, which says exactly what is measured and what is
-> inferred). The port is in this commit so the launcher can produce the Gate E row the issue
-> asks for; the revert list is at the end of "The recommendation".**
+> is **bit-identical** to `BR_20` on all 1,480 shared bars. And the Gate E run's own
+> `top25.csv` now settles what an earlier draft of this file could only infer: the 687
+> comparators carry `brar` at its default 26 only, so the same-length duplication was
+> structurally invisible to the measurement (see "What Gate E saw" below). The port ships
+> under the bands; the revert list, should the owner take the recommendation, is at the end of
+> "The recommendation".**
 
 Prior-Close Pressure Ratio: Guotai Junan's (2017, "GTJA191", internal quant report) alpha
 `#110`, per issue #84, which attributes its copy of the report to HKUDS/Vibe-Trading (MIT).
@@ -102,9 +104,9 @@ Measured: 20 bars of history return `None`; 21 bars fire exactly **once**, at ba
 |---|---|---|
 | A Correctness | derived from the issue's own stated formula, matching the issue's own prototype bit-for-bit | An 8-bar hand-derived example at `length=3` — `up = [nan,3,0,5,1,3,0,5]`, `down = [nan,0,3,0,1,0,3,0]`, bars 3-7 `[266.66666666666663, 150.0, 900.0, 100.0, 266.66666666666663]`, including an EXACT `100.0` balance bar and both floors firing — printed by `python docs/measure_g191_110.py`; an independent per-bar replay at the shipped default in plain Python scalars (no `.rolling()`, no `.clip()`, no `.replace()`) on a 900-bar frame at bars 300/600/899, agreeing to **exactly `0.0`** at all three; bit-equality with the owner's own screen candidate on all 1,480 shared bars (table above); and all three ambiguities with all four of their rejected readings measured, not dismissed (table above) |
 | B Causality | pass | Future-perturbation sweep (high/low/close rewritten JOINTLY from `j` onward with a second walk, seed 97), 37 offsets past the 21-bar warm-up: real module **0 of 37** leaks. FOUR mutants (`importlib` source read, `exec`'d in memory), each first shown LIVE (its output differs from the real module's) then caught at **37 of 37** offsets: write-shift (final write index `length=20` bars into the future); forward `DELAY` (`close.shift(-1)`, so `C1` becomes TOMORROW's close — this formula's own most plausible sign error); and a `center=True` sum on EACH of the two rolling calls separately, the numerator's and the denominator's — the `bos` look-ahead bug class CLAUDE.md documents, one mutant per call so neither arm is proven by analogy. Separately, `offset` — a user-reachable way to make THIS column read the future — is pinned by `test_a_positive_offset_only_delays_and_is_the_forks_convention`: `offset=+2`/`-2` are exactly the default column shifted later/earlier, and the registry uses `offset=0`, which the sweep covers. No claim that `offset` is the package's only look-ahead: CLAUDE.md names `ichimoku`'s `ICS_26` (`close.shift(-kijun)` at defaults) as an accepted exception |
-| C Reachability | pass on SYNTHETIC only; real data is owed with Gate E | 1,500-bar OHLC walk (seed 11), shipped default: **1,480 of 1,500** bars non-NaN (98.67%), first valid at bar **20** (the structural boundary, `min_length - 1`), **1,480 distinct values**. Range `[27.612949, 328.461817]`, median `102.285783`, **774 bars above 100 / 706 below / 0 exactly on it / 0 negative / 0 exactly zero**. The issue's own prototype screen reports n = **396,399** pooled real bars for this candidate (2026-10-24), which is the real-data reachability number this session cannot reproduce; the launcher's Gate E run supersedes it |
+| C Reachability | pass, synthetic AND real | 1,500-bar OHLC walk (seed 11), shipped default: **1,480 of 1,500** bars non-NaN (98.67%), first valid at bar **20** (the structural boundary, `min_length - 1`), **1,480 distinct values**. Range `[27.612949, 328.461817]`, median `102.285783`, **774 bars above 100 / 706 below / 0 exactly on it / 0 negative / 0 exactly zero**. The issue's own prototype screen reports n = **396,399** pooled real bars for this candidate (2026-10-24), which is the real-data reachability number the porting session could not reproduce; the Gate E run of 2026-11-11 supersedes it with **396,927** non-NaN and **396,927** non-zero of 398,849 pooled bars (99.52%) over the 89 frames |
 | D Scale-free | pass | `C1` carries no arithmetic; the `MAX(0,.)` floor is a comparison against zero and is scale-invariant for any `k > 0`; both sums are linear; so the ratio cancels `k` EXACTLY with no extra division needed (hence the empty `conv` cell). The `* 100` is a constant and commutes. Measured on the 1,500-bar walk: PRICE **x8 / x64 bit-identical** (`0.0` max \|diff\|, all 1,480 bars, NaN masks matching); **x10 / x3.7** max \|diff\| **1.3073986337985843e-12 / 1.4210854715202004e-12**, NaN masks matching. Because the floors are EXACT comparisons, the branch masks were measured too rather than assumed: **0** bars change branch in either floor at any of the four multipliers. `0 < 1480 fires < 1500` and **1,480 > 1** distinct values rule out a constant column |
-| E Attribution | **pending, run by issue-solver after this session** | Not run here: the launcher runs `gate_e_overlap.py`, and this session may not read `../Backtesting`. PRIOR (the prototype, NOT this port, 2026-10-24): max \|rho\| **0.8860** vs **`brar_BR_26`** (compute_all, n = **396,399**), top-5 per-frame max median **0.8819** -> **DISCLOSE_GAP**; next comparators `Ret_21d_vol_adj` **0.8015**, `Ret_21d_pct` **0.7947**. Fork overlap (stage 2, not Gate E, 12 frames): **0.8810** vs `brar:BR_26`, per-frame max median 0.8787. A prototype is not a port; the launcher's run on the committed module decides. ⚠ And read the redundancy section below BEFORE reading a DISCLOSE_GAP verdict as "this column earns its place" |
+| E Attribution | **DISCLOSE_GAP** — measured on the port, no column struck | `G191_110_20`: max \|ρ\| **0.8860294833052819** vs **`brar_BR_26`** (compute_all, n = **396,399**), per-frame max median **0.8818911915226397** (same comparator, 89 frames) -> **DISCLOSE_GAP** (0.80 ≤ ρ < 0.90, and the per-frame median is under 0.90 too). Full run facts in "Gate E: the measured run" below; ledger row `docs/gate_e_ledger.csv` (run `is84-g191_110-1dad5ee8`, measured 2026-11-11). ⚠ Read the redundancy section below BEFORE reading a DISCLOSE_GAP verdict as "this column earns its place" |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | See "Gate F: the suite run" below |
 
 ## Wiring
@@ -126,10 +128,67 @@ source docstring, the public `__doc__`, this file, `tests/test_g191_110.py`'s do
 `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL` updated (`317 -> 318`);
 `CATEGORY_BUCKETS` has no `momentum` key, so it is unchanged.
 
-`g191_110` has NO row in `docs/gate_e_ledger.csv` yet, which is why
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails locally --
-the expected "owed, not failed" state (CLAUDE.md; `GATE_E_PENDING_OK=1` turns it into a skip
-on PRs into `dev`). The receipt session records the row after the launcher's Gate E run.
+`g191_110`'s row is in `docs/gate_e_ledger.csv`, recorded by
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-11` in the receipt session
+(2026-11-11), which printed `g191_110:G191_110_20 DISCLOSE_GAP 0.8860 vs brar_BR_26`. The row
+is not STRUCK, so it needs no waiver.
+
+## Gate E: the measured run
+
+Run by issue-solver on the committed module (this session may not read `../Backtesting` and
+did not run the harness). Run directory `is84-g191_110-1dad5ee8`; the numbers below are copied
+from its `overlap_max.csv`, `top25.csv`, `degenerate.csv` and `meta.json`.
+
+| column | max \|ρ\| | against | set | n | per-frame max median | frames | verdict |
+|---|---|---|---|---|---|---|---|
+| `G191_110_20` | **0.8860294833052819** | `brar_BR_26` | compute_all | **396,399** | **0.8818911915226397** (`brar_BR_26`) | 89 | **DISCLOSE_GAP** |
+
+Band arithmetic, both halves of the strike rule: pooled **0.8860** is in `0.80 ≤ ρ < 0.90`
+(DISCLOSE_GAP), and the top-5 per-frame max median **0.8819** is under 0.90, so the
+`r3-perframe-0.90` rule does not strike the column on either leg. `perframe_pct_frames_ge_090`
+is **4.49438202247191%** of 89 frames, i.e. **4** frames whose per-frame \|ρ\| against
+`brar_BR_26` reaches 0.90 — the band tests the MEDIAN, not the tail, and the median is 0.8819.
+
+Run facts from `meta.json`: default parameters (`kwargs {}`, no exclusions, no rename prefix),
+**89** frames, **398,849** pooled bars, **687** comparators (`n_compute_all` **329** +
+`n_manifest` **358**), canary `AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`, pandas 2.3.3
+/ numpy 1.26.4, data stamp `1be6495ef7095ff67ad8f59a2fc0311d74f02652`, module sha1
+`a4942f1240b52afd07be67ad99d3a4ac9e73f90b`, tree sha1
+`13ca59d9a3b71ce923b921a32d8d9296bfc7f52e`. Coverage of the column itself on the real tape:
+`non_nan` **396,927** of 398,849 pooled bars (**99.52%**), `non_zero` **396,927** — which is
+the real-data Gate C number the porting session could only owe. One comparator was dropped as
+degenerate (`degenerate.csv`): `squeeze_SQZ_NO` (manifest), reason `constant`.
+
+Next comparators after `brar_BR_26` (`top25.csv`): `Ret_21d_vol_adj` **0.8015**,
+`Ret_21d_pct` **0.7947**, `SMA_20_Slope_pct` **0.7654**, `bias_ta` **0.7625**. The port
+reproduces the prototype's screen to four decimals on its top three (prototype 2026-10-24:
+0.8860 / 0.8015 / 0.7947, n = 396,399) — a prototype is still not a port, but here the two
+agree.
+
+**What the receipt session deliberately did NOT update.** `pandas_ta/momentum/g191_110.py`'s
+docstring still reads "the issue's own prototype measured 0.8860 pooled on real data" (lines
+~55-59) and still calls Gate E's verdict a prediction. That text is now stale in its framing —
+the port's own run measured the same 0.8860 — but the module is left byte-identical on purpose:
+`docs/gate_e_ledger.py record` stamped its sha1 `a4942f1240b52afd07be67ad99d3a4ac9e73f90b` and
+the tree sha1 `13ca59d9a3b71ce923b921a32d8d9296bfc7f52e` into the ledger row, and
+`tests/test_gate_e_ledger.py` fails if either moves after the run. Editing a docstring would
+invalidate the measurement it describes. `tests/test_g191_110.py`'s docstring, which is not in
+the stamp, was updated instead.
+
+### What Gate E saw — and the one thing it could not see, now measured
+
+The porting session INFERRED that the comparator set carries no 20-bar `BR`, and asked for
+that inference to be replaced by a run. It is replaced here, from the run's own `top25.csv`:
+the 25 strongest comparators out of 687 contain exactly **one** `brar` column, `brar_BR_26`,
+and no `brar_BR_20`. That is decisive rather than suggestive, because the same-length identity
+measured below is Spearman **1.0**: a `brar_BR_20` comparator would have ranked **first** at
+ρ ≈ 1.0 and would have STRUCK the column outright. It did not appear, so the set does not
+carry it.
+
+So the DISCLOSE_GAP verdict is confirmation that this column does not restate any of the 687
+comparators the engine actually computes — and it is NOT evidence that the column asks a
+question `pandas_ta`'s own `brar(length=20)` cannot answer, because that column is not in the
+comparator set. Gate E has done what it can; the keep-or-skip question below is the owner's.
 
 ## The redundancy, measured — and the recommendation
 
@@ -175,7 +234,12 @@ So on a tie-free frame the entire float gap between this port and `brar` at the 
 the `100`'s placement, measured rather than assumed. `df.ta.brar(length=20)` already produces
 this arithmetic today.
 
-**What Gate E can and cannot see — INFERRED, not measured.** The engine's comparator set
+**What Gate E can and cannot see.** ⚠ This subsection is the porting session's text, written
+BEFORE the run, and its central claim was an inference. It is now MEASURED — see "What Gate E
+saw" above: the run's `top25.csv` carries `brar_BR_26` and no `brar_BR_20`, and since the
+same-length identity is Spearman 1.0 a `brar_BR_20` comparator would have ranked first and
+struck the column. The paragraphs below are kept as written, with that correction standing
+over them. The engine's comparator set
 contains `brar_BR_26`, and that much is measured from ONE COMMITTED file:
 `docs/gate_e_ledger.csv:73` records `ovn_split`'s run hitting `brar_BR_26` (compute_all,
 n = 396,399, `n_comparators` 687) at 0.5789. It is corroborated by the issue's own screen
@@ -200,17 +264,13 @@ engine comparator computed at a 20-bar window would leave no "20" for a grep to 
 From that weakened pattern — not from a written rule, not from reading the catalogue — I
 INFER that the 687-comparator set has no 20-bar `BR`, and therefore that the near-exact
 duplication at length 20 is structurally invisible to Gate E, which would make a DISCLOSE_GAP
-verdict on this port no evidence at all that the column asks a new question. **This inference
-is weaker than it looks and must be replaced by the comparator dump the next paragraph asks
-for**; it is stated here because it is load-bearing for the recommendation, not because it is
-settled.
+verdict on this port no evidence at all that the column asks a new question.
 
-That inference is load-bearing for the recommendation below, so it should be replaced by a
-run: **the comparator catalogue lives in `../Backtesting`, which this session may not read.**
-Instruction for whoever next runs Gate E here: the run directory's comparator list (or
-`gate_e_overlap.py build`'s own manifest) should be grepped for `brar_BR_` and the result
-written into this section — if a `brar_BR_20` comparator does exist, the pooled ρ against it
-is the single number that settles the keep-or-skip question outright.
+**Resolved, 2026-11-11 (receipt session).** The run's `top25.csv` was read instead of grepped
+for: one `brar` comparator, `brar_BR_26`, at rank 1 with 0.8860, and no `brar_BR_20` anywhere
+in the top 25 of 687. Because the same-length identity below is Spearman 1.0, a `brar_BR_20`
+in the set would have been rank 1 at ρ ≈ 1.0 and STRUCK the column. The inference held: the
+set has no 20-bar `BR`, so the DISCLOSE_GAP verdict is silent on the only open question.
 
 **How much of the 0.886 is just "20 bars resembles 26 bars".** The same formula at other
 lengths, on the same frame (Spearman against the shipped `length=20`):
@@ -302,10 +362,13 @@ reasons are the repo's own written rules plus the owner's own precedent:
   (g) no `scalar`/`drift` — are better BEHAVIOUR on the same question, not a different
   question, and (d)-(f) are arguments for fixing `brar`.
 
-**Why the port is nevertheless in this commit rather than reverted now.** One reason only,
-and it is a bookkeeping reason rather than evidence about redundancy: the issue's "Gates owed"
-asks for Gate E re-run *on the port*, and only the launcher can produce that row. The port is
-retained so that row exists; the revert is the expected outcome, and its list is below. (An
+**Why the port is nevertheless shipped rather than reverted.** Two reasons, neither of them
+evidence about redundancy. First, the bands decide what a session may remove: Gate E measured
+**DISCLOSE_GAP**, not STRUCK, so the column is not removable on a gate verdict, and the
+receipt session's rule is that only a STRUCK column is removed. Second, the skip case is a
+question-redundancy judgement against `brar(length=20)` — a column that is NOT in the
+comparator set, as the run now shows — so it is the owner's call, not a gate's. The port
+therefore ships with the recommendation standing, and the revert list is below. (An
 earlier draft of this file also argued that reverting would "discard the Gate E measurement
 the issue asks for" as if that were a reason to KEEP the column — it is not, and the section
 above explains why: if the inference about the comparator set holds, Gate E's verdict is
@@ -349,9 +412,14 @@ says a measured revert closes #84 exactly as well as a ship.
 
 ## Gate F: the suite run
 
-`python -m pytest -q` in this worktree, the last run of the session: **3 failed, 5377 passed,
-83 skipped** (108.35s); `tests/test_g191_110.py`: **37 passed**. The three failures, none
-caused by this port:
+`python -m pytest -q --tb=no -p no:warnings -rf` in this worktree, the receipt session's run
+after the ledger row landed (2026-11-11): **3 failed, 5384 passed, 83 skipped** (107.95s). The
+porting session's run, before the row, read **3 failed, 5377 passed, 83 skipped** (108.35s) —
+INFERRED, not measured: the 7 extra passes are `tests/test_gate_e_ledger.py`'s per-row
+parametrised checks for the new row, since the ledger row is the only change between the two
+runs that a test reads, and that module parametrises over the ledger's rows. Measured:
+`tests/test_gate_e_ledger.py` on its own is **1 failed, 778 passed**.
+`tests/test_g191_110.py`: **37 passed**. The three failures, none caused by this port:
 
 1. `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` — the known break
    CLAUDE.md documents (commit `8d8f705` untracked the `docs/pine/` corpus the citations point
@@ -359,11 +427,11 @@ caused by this port:
 2. `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` —
    PRE-EXISTING: it needs the sibling `../AlternativeRepos` checkout, which this worktree does
    not have. Deselected by name in CI (CLAUDE.md, "CI").
-3. `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` — fails with
-   `no Gate E ledger row for ['g191_110', 'mtd_ret']`: this port's OWED row plus the
-   PRE-EXISTING `mtd_ret` (issue #206). That is the "owed, not failed" state CLAUDE.md
-   describes; `GATE_E_PENDING_OK=1` turns it into a skip on the way to `dev`, and the receipt
-   session records the row after the launcher's Gate E run.
+3. `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` — now fails
+   with `no Gate E ledger row for ['mtd_ret']` only: the PRE-EXISTING `mtd_ret` (issue #206).
+   `g191_110` is off that list since the row landed; the porting session's run read
+   `['g191_110', 'mtd_ret']`. `GATE_E_PENDING_OK=1` turns the remaining one into a skip on the
+   way to `dev`.
 
 The parent repo (`Backtesting`) suite is run by the launcher in a clean worktree; this session
 may not read `../Backtesting` at all.
