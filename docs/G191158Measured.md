@@ -1,16 +1,21 @@
 # g191_158 — measured (issue #81)
 
-> **Status: Gates A–D cleared in this session; Gate E pending, run by
-> issue-solver after this session; Gate F in this repo: 3 failures — the 2
-> CLAUDE.md "Known breaks" plus the Gate E ledger row this port owes
-> (expected, "Owed, not failed"), all three named below — the parent repo's
-> suite run by the launcher. The
-> issue's prototype measured DISCLOSE_GAP (max |ρ| 0.8834 vs `pdist_pct`),
-> which is a PRIOR for this port and not a result.**
+> **Status: SHIPPED with disclosure. Gates A–D cleared in the port session;
+> Gate E run by issue-solver on 2026-11-11 (run `is81-g191_158-4240881e`,
+> the code at commit `1de756d`) and the verdict on `G191_158` is
+> **DISCLOSE_GAP** — max |ρ| **0.8834** vs `pdist_pct`, n = 398,760,
+> top comparator's per-frame median **0.8858** over 89 frames, both below
+> the 0.90 strike line. The column is NOT struck and the port is NOT
+> reverted; the disclosure is the Gate E section below. Gate F in this repo
+> after the ledger row landed: 3 failed, 5264 passed, 83 skipped — the 2
+> CLAUDE.md "Known breaks" plus `mtd_ret`'s own owed Gate E row, which
+> pre-dates this issue; `g191_158` no longer appears in that failure, which
+> is the one thing this session changed about it. The parent repo's suite is
+> run by the launcher.**
 
 Range over close: Guotai Junan's (2017, "GTJA191", internal quant report)
 alpha `#158`, per issue #81, which attributes its copy of the report to
-HKUDS/Vibe-Trading (MIT) — a copy NOT read in this session, see the
+HKUDS/Vibe-Trading (MIT) — a copy read in NEITHER session, see the
 disclosure under Gate A. Module `pandas_ta/volatility/g191_158.py`, column
 `G191_158`. Tests: `tests/test_g191_158.py` (**26, all passing**). Numbers
 below: `python docs/measure_g191_158.py` for Gates A–D and the synthetic
@@ -120,8 +125,9 @@ whole of Gate A here is the reduction above plus the two edge cases below.
   True, measured). On real data exact OHLC ties are common — CLAUDE.md's
   FVGDEAD note measures 21.17% of BIST daily bars closing exactly at an
   extreme, which is a **different** statistic (`C == H` or `C == L`, not
-  `H == L`); the real-frame `H == L` rate is not measured here and is owed
-  to Gate E's reachability counts.
+  `H == L`). The real-frame `H == L` rate is now measured, by Gate E's own
+  reachability counts: **1,443 of 398,849** pooled bars (**0.3619%**) — see
+  the Gate E section.
 * **`C == 0.0`** → `+inf` (`NaN` if also `H == L`). Not guarded, and that
   is a decision on record: the prototype divides with a bare `/`
   (`ind_screen.py:518`) where it uses the screen's `sdiv` (inf → NaN) on
@@ -135,44 +141,92 @@ whole of Gate A here is the reduction above plus the two edge cases below.
 |---|---|---|
 | A Correctness | derived from the issue's own stated formula, whose own reduction this port ships; matched against the REAL screen candidate bit-for-bit, and against both spellings of the literal form | What carries this gate, in order: (1) a hand-derived 6-bar example with every bar's arithmetic written out (`[2/9, 4/12, 4/9, 5/15, 0.5, 6/20]`, all six bars checked — there is no warm-up to skip); (2) the REAL candidate loaded out of `docs/issues/screen/ind_screen.py` through its own registry (present in this worktree, gitignored so the test may not depend on it): same NaN mask, `max\|diff\| = 0.0`, **1,500 of 1,500** bars bit-equal — a genuine external oracle, and the one that matters, since it is the expression Gate E's prior was measured on; (3) the literal spelling, the table above. What does NOT carry it, and is not dressed up as if it did: the per-bar scalar replay at bars 0 / 300 / 600 / 899 of a 900-bar frame (bit-exact: `bar 0 module=0.01106902049904393 loop=0.01106902049904393`, likewise the other three) and the retyped prototype expression (`max\|diff\| = 0.0`) are the same one-line expression written again, so they rule out a pandas-side surprise — an alignment slip, a dtype promotion — not a wrong formula |
 | B Causality | pass | The column has no memory at all — `(H[t]-L[t])/C[t]`, no `shift`, no `rolling`, no recursion — so a leak has to be written in on purpose. Future-perturbation sweep (high/low/close jointly rewritten from `j` onward), 37 offsets: real module **0 of 37** leaks. Two mutants (`importlib` source read, `exec`'d in memory), each shown live different from the real module, then caught **37 of 37**: the final write index shifted one bar into the future, and `(high.shift(-1) - low.shift(-1)) / close` (the `bos` look-ahead bug class CLAUDE.md documents) |
-| C Reachability | pass on synthetic; real-data counts owed to Gate E | 1,500-bar synthetic high/low/close walk (seed 11, `low <= close <= high` at every bar; `docs/measure_g191_158.py:_walk`): **1,500 of 1,500** bars non-NaN (100.00%), first valid at bar **0** — no warm-up — **1,500 distinct values**, range `[0.000573, 0.044346]`, median `0.011061`, **0 negative**, **0 zero**. Tick-rounded frame (`_tick_walk`, 1,500 bars, tick 0.01): **1,500** non-NaN, **1,393** non-zero, **107** exactly zero (every one a `H == L` bar), **458** distinct values. One column, so there is no second column to check. NaN surface, measured for each input rather than argued from the shape of the expression: a single NaN planted in `high`, `low` or `close` at bar 700 moves exactly one output bar (700) and leaves every other bar bit-identical — three runs, three single-bar results |
+| C Reachability | pass on synthetic, and on real data in Gate E's run (398,849 of 398,849 pooled bars non-NaN, 397,406 non-zero — see the Gate E section) | 1,500-bar synthetic high/low/close walk (seed 11, `low <= close <= high` at every bar; `docs/measure_g191_158.py:_walk`): **1,500 of 1,500** bars non-NaN (100.00%), first valid at bar **0** — no warm-up — **1,500 distinct values**, range `[0.000573, 0.044346]`, median `0.011061`, **0 negative**, **0 zero**. Tick-rounded frame (`_tick_walk`, 1,500 bars, tick 0.01): **1,500** non-NaN, **1,393** non-zero, **107** exactly zero (every one a `H == L` bar), **458** distinct values. One column, so there is no second column to check. NaN surface, measured for each input rather than argued from the shape of the expression: a single NaN planted in `high`, `low` or `close` at bar 700 moves exactly one output bar (700) and leaves every other bar bit-identical — three runs, three single-bar results |
 | D Scale-free | pass | `(k·H − k·L)/(k·C) = (H−L)/C` for any `k > 0`, exactly; volume is not an argument at all. Measured on the 1,500-bar walk: PRICE ×8/×64 **bit-identical** (`max\|diff\| = 0.0`, 1,500 of 1,500 bars bit-equal); ×10 and ×3.7 within float64 rounding (**2.16e-16** / **1.87e-16** max \|diff\|; 168 and 29 of 1,500 bars still bit-equal), NaN masks matching at all four. `nunique = 1500 > 1` rules out a constant column. **Disclosed:** CLAUDE.md's `0 < fires < n` is vacuous in its upper half for this column — with no warm-up, `fires == n == 1500` on clean data. That clause exists to kill a constant or all-NaN column, which the distinct-value counts above do instead; the column is not held out of the gate, the gate's upper half simply has nothing to bite on here |
-| E Attribution | **pending, run by issue-solver after this session** | See the Gate E section below |
-| F Suites | this repo: 3 failed, 5257 passed, 83 skipped — the 3 are pre-known and named below; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q -p no:warnings --tb=no -rf` (this session) |
+| E Attribution | **DISCLOSE_GAP** — the column ships, with the disclosure below | Launcher run `is81-g191_158-4240881e`, 2026-11-11: max \|ρ\| **0.8833865139842065** vs `pdist_pct` (manifest), n = **398,760**; top comparator's per-frame median **0.8858124543415655** over **89** frames; **31.46%** of those frames at \|ρ\| ≥ 0.90, so the per-frame rule does not strike it (it keys on the median, not the share). See the Gate E section below |
+| F Suites | this repo: 3 failed, 5264 passed, 83 skipped — the 2 CLAUDE.md "Known breaks" plus `mtd_ret`'s owed row, which pre-dates this issue; all three named below; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q -p no:warnings --tb=no -rf` (receipt session, after the ledger row landed) |
 
 ## Gate E: attribution
 
-**Gate E: pending, run by issue-solver after this session.** This session may
-not read `../Backtesting`, so it did not run
-`gate_e_overlap.py run --module pandas_ta.volatility.g191_158`. Until the
-row lands in `docs/gate_e_ledger.csv`,
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails here naming `['g191_158', 'mtd_ret']` (measured in this session;
-`mtd_ret` pre-dates this issue). CI into `dev` sets `GATE_E_PENDING_OK=1`
-and skips it as "Gate E owed" (CLAUDE.md, "Owed, not failed").
+**Measured by the launcher, not by the port session.** Run
+`is81-g191_158-4240881e` (`gate_e_overlap.py run --module
+pandas_ta.volatility.g191_158`), measured **2026-11-11** on the code at
+commit `1de756d` — candidate module sha1 `a4d5b8a9`, `pandas_ta` tree sha1
+`304cc553`, data sha1 `1be6495e`, pandas 2.3.3 / numpy 1.26.4, no
+non-default kwargs (`"kwargs": {}` in `meta.json`), canary **bit-equal** on
+AKBNK.IS / BIENY.IS / AGHOL.IS / SASA.IS. Universe: **89** frozen ALTPORT-1
+BIST frames, **398,849** pooled bars. Comparators: **329** `compute_all` +
+**358** `ml_features` manifest `1d` = **687**, **0** degenerate.
+Recorded in `docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record … --measured 2026-11-11`.
 
-**The issue's prototype number is a PRIOR, not a result.** Issue #81
-measured the PROTOTYPE on run `screen_20261024`: max |ρ| **0.8834** vs
-`pdist_pct` (manifest, n = 398,760), top-5 per-frame max median **0.8858**,
-89 ALTPORT-1 frames, 398,849 bars, 329 + 358 comparators, canary bit-equal →
-**DISCLOSE_GAP**. Next comparators: `pdist_pct` 0.8834, `pdist_pct_Pctl`
-0.7430, `pdist_pct_State` 0.7028. Unlike most ports, that prototype
-expression is **bit-identical** to this port's column (`max|diff| = 0.0`,
-1,500 of 1,500 bars, measured against the real candidate out of the screen's
-registry), so the port's own run is expected to reproduce those numbers
-rather than merely resemble them — expected, not measured, and the
-launcher's run is what settles it.
+One shipped column, so one row:
+
+| column | max \|ρ\| | against | set | n | per-frame max median | frames | % frames ≥ 0.90 | verdict |
+|---|---|---|---|---|---|---|---|---|
+| `G191_158` | **0.8833865139842065** | `pdist_pct` | manifest | **398,760** | **0.8858124543415655** (`pdist_pct`) | 89 | 31.46% | **DISCLOSE_GAP** |
+
+Pooled max against `compute_all` alone is lower: **0.6895070502245719** vs
+`natr`, n = 397,692.
+
+**Why DISCLOSE_GAP and not STRUCK.** The band rule `r3-perframe-0.90`
+(CLAUDE.md, Gate E) strikes a column when the pooled \|ρ\| ≥ 0.90 **or** a
+top-5 comparator's **per-frame median** ≥ 0.90. Measured: pooled 0.8834 and
+the worst per-frame median 0.8858, both under 0.90 — so `0.80 ≤ ρ < 0.90`
+puts it in DISCLOSE_GAP, the column ships, and this file is the disclosure.
+The per-frame distribution is the part worth knowing before using the
+column: on `pdist_pct` it runs min **0.8308**, median **0.8858**, mean
+**0.8862**, max **0.9280** across the 89 frames, with **100.0%** of frames
+at \|ρ\| ≥ 0.80 and **31.46%** at ≥ 0.90. The rule reads the median, not the
+share, so a column can be this consistently-high-but-under-the-line and
+still ship; it also means a miner that already has `pdist_pct` gets little
+new from this column on roughly a third of the frames.
+
+Top comparators as measured (`top25.csv`, first rows):
+
+| against | set | ρ | n |
+|---|---|---|---|
+| `pdist_pct` | manifest | 0.8833865139842065 | 398,760 |
+| `pdist_pct_Pctl` | manifest | 0.7429928452443564 | 393,509 |
+| `pdist_pct_State` | manifest | 0.7027763565265513 | 393,509 |
+| `Range_ATR` | manifest | 0.6965780896111085 | 397,603 |
+| `natr` | compute_all | 0.6895070502245719 | 397,692 |
+| `Stop_2ATR_pct` | manifest | 0.6895070502245719 | 397,692 |
+
+Their per-frame medians drop away fast behind the leader: `pdist_pct_Pctl`
+0.7750, `pdist_pct_State` 0.7361, `Range_ATR` 0.7332, `natr` 0.6652
+(`perframe.csv`). Only `pdist_pct` is near the line.
+
+**The prototype prior was reproduced.** Issue #81 measured the PROTOTYPE on
+run `screen_20261024` at max |ρ| **0.8834** vs `pdist_pct` (manifest,
+n = 398,760) with top-5 per-frame max median **0.8858** → DISCLOSE_GAP. The
+port's own run lands on the same comparator, the same n, and the same
+numbers to four decimal places. That was the expectation stated before the
+run (the port's column is bit-identical to the screen candidate —
+`max|diff| = 0.0`, 1,500 of 1,500 bars, measured against the real candidate
+out of the screen's registry), and it is now the measurement.
 
 `pdist_pct` sitting at the top is structural rather than surprising:
 `pdist = 2(H-L) − |C−O| + |O−C₁|` (`pandas_ta/volatility/pdist.py:43`), so
-its leading term is twice this column's numerator. On the 900-bar synthetic
-frame below, `pdist/close` is the second-nearest comparator (ρ 0.7065,
-behind `g191_109`'s 0.7346).
+its leading term is twice this column's numerator, and the `_pct` suffix
+says the engine ships it normalised by price — that last part is read off
+the comparator's NAME, not off the engine source, which no session here may
+read. The gap from 1.0 is then what `|C−O|` and `|O−C₁|` add. On the 900-bar synthetic frame below, `pdist/close` is the
+second-nearest comparator (ρ 0.7065, behind `g191_109`'s 0.7346) — a
+synthetic frame ranks it differently from real tape, which is why Gate E and
+not that table decides the port.
 
-If the launcher's run lands STRUCK (pooled |ρ| ≥ 0.90, or a top-5
-comparator's per-frame median ≥ 0.90), the column is reverted and this file
-stays as the receipt — the issue's own "Done when" treats that as closing it
-exactly as well as a ship.
+**Reachability on real data, the counts Gate C owed.** Over the 89 frames'
+398,849 pooled bars the column is non-NaN on **398,849** (100.00% — no
+warm-up, as derived) and non-zero on **397,406**, so it is exactly `0.0` on
+**1,443** bars (**0.3619%**). Every zero is an `H == L` bar — derived, not
+separately measured: with a finite non-zero close the division cannot return
+an exact `0.0` any other way — so that count is also the real-frame
+zero-range rate the port session left owed to this gate. About **20×**
+rarer than the synthetic tick-rounded frame's 107 of 1,500 (7.13%), and
+nothing like the 21.17% `C == H or C == L` rate CLAUDE.md's FVGDEAD note
+measures, which is a different statistic. `0 < fires < n` still has nothing
+to bite on in its upper half here: fires == n == 398,849.
 
 ## The fork column this one is one factor away from
 
@@ -228,8 +282,10 @@ This is the disclosure, and it is not comfortable: a miner that already has
 `MFI_BW_SF_20` is getting the same numerator again, de-normalised by volume.
 What this column adds is the range-to-price measure **without** the volume
 factor — which is what makes it a volatility feature rather than a
-liquidity-efficiency one. Gate E decides it against the engine's 687
-comparators. For scale, `bw_mfi`'s own Gate E number is |ρ| **0.578897**
+liquidity-efficiency one. Gate E has now decided it against the engine's 687
+comparators: DISCLOSE_GAP, and `bw_mfi`'s own column is **not** in the
+measured top 25 — `pdist_pct` leads at 0.8834 (see the Gate E section). For
+scale, `bw_mfi`'s own Gate E number is |ρ| **0.578897**
 against `vol_at_low_ratio`, n = 394,399, over 89 BIST daily frames
 (`docs/AltportPortsMeasured.md:13`, pinned as a triple by
 `tests/test_altport2_ports.py:203`) — **not** the 0.536816 still printed in
@@ -238,9 +294,9 @@ rounding suppressed (`AltportPortsMeasured.md:19`). The comparator count
 behind 0.578897 is recorded twice and inconsistently in this repo — **492**
 at `AltportPortsMeasured.md:17`, **496** at `tests/test_altport2_ports.py:78`
 and `:200` — and this port is not the place to settle it; either way it is
-not today's 687. So neither figure is a prediction for this port's run; the
+not today's 687. So neither figure was a prediction for this port's run; the
 nearest fork column simply sits further from the strike line than this
-column's own 0.8834 prototype prior does.
+column's own measured **0.8834** does.
 
 ## Non-redundancy on a synthetic frame — NOT Gate E
 
@@ -251,7 +307,7 @@ seed-5 walk with lognormal volume (σ 0.6) and a moving open
 | comparator | ρ | n |
 |---|---|---|
 | `g191_109:G191_109_10_2_10_2` | **0.734603** | 882 |
-| `pdist/close` (the Gate E prior's top comparator, in shape) | 0.706474 | 899 |
+| `pdist/close` (the Gate E run's top comparator, in shape) | 0.706474 | 899 |
 | `bw_mfi:MFI_BW_SF_20` | 0.692200 | 881 |
 | `true_range/close` | 0.495485 | 899 |
 | `cvi:CVI_10_10` | 0.382558 | 881 |
@@ -289,7 +345,8 @@ Three caveats, and the first one was wrong in this file's first draft:
   owner's real-frame screen put at the top (0.8252).
 
 The real-frame number that counts against fork columns is the owner's 0.8252
-above; the one that decides the port is the launcher's Gate E run.
+above; the one that decided the port is the launcher's Gate E run — 0.8834
+vs `pdist_pct`, DISCLOSE_GAP, measured above.
 
 ## Wiring
 
@@ -320,8 +377,13 @@ not the only one), updated and checked by `tests/test_readme_counts.py`.
 `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL` 314 → 315 and
 `CATEGORY_BUCKETS["volatility"]` 32 → 33.
 
-`docs/gate_e_ledger.csv` is **not** touched by this session: the row is
-recorded after the launcher's Gate E run.
+`docs/gate_e_ledger.csv` was not touched by the port session; the
+`g191_158` row was appended in this receipt session, by
+`python docs/gate_e_ledger.py record … --measured 2026-11-11` after the
+launcher's run. No `pandas_ta/` or `tests/` file is edited in this session:
+the ledger pins the run's module sha1 (`a4d5b8a9`) and the `pandas_ta` tree
+sha1 (`304cc553`), so touching either would invalidate the row the run was
+measured against.
 
 ## Review rounds, and what they caught
 
@@ -358,24 +420,27 @@ with the read that verifies it.
 
 ## Suite run (this repo)
 
+**Receipt session (2026-11-11), after the ledger row landed.**
 `python -m pytest -q -p no:warnings --tb=no -rf`, full suite, default
-collection order: **3 failed, 5257 passed, 83 skipped** (104.77s on the
-final run, 104.78s on the previous one — wall-clock varies, the counts did
-not), re-run after every review round's fixes. This port's own module
-contributes 26 of the passes
-(`python -m pytest tests/test_g191_158.py -q`: 26 passed). The three
-failures:
+collection order: **3 failed, 5264 passed, 83 skipped** (105.80s). The port
+session's own run of the same command was 3 failed, 5257 passed, 83 skipped.
+The **+7** passes are the new ledger row's own parametrised checks:
+`tests/test_gate_e_ledger.py` parametrises six tests over the ledger rows
+(lines 168, 173, 180, 191, 198, 218) and one over the recorded indicators
+(line 210), and this session added exactly one row for one new indicator —
+read off the file, which is why the arithmetic matches. The three failures:
 
 * `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-  — "no Gate E ledger row for `['g191_158', 'mtd_ret']`", measured in this
-  session by running that test alone. Expected: Gate E is the launcher's
-  run (CLAUDE.md, "Owed, not failed"); `mtd_ret` pre-dates this issue.
+  — now "no Gate E ledger row for `['mtd_ret']`", measured in this session
+  by running that test alone. `g191_158` has dropped out of that list: its
+  row is recorded. `mtd_ret` pre-dates this issue and is still owed.
 * `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
   — needs the sibling `../AlternativeRepos` checkout, absent in this
   worktree (CLAUDE.md "Known breaks"; CI deselects it).
 * `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
   — the untracked `docs/pine/` corpus (CLAUDE.md "Known breaks").
 
-No pre-port baseline run was made in this session, so no "+N passed" delta
-is claimed here; the three failures above are the complete failure list of
-the run that was made.
+No pre-port baseline run was ever made, so nothing here is a delta against
+`dev`; the three failures above are the complete failure list of the run
+that was made. This port's own module contributes 26 of the passes
+(`python -m pytest tests/test_g191_158.py -q`: 26 passed, port session).
