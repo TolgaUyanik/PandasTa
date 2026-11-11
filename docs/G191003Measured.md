@@ -1,16 +1,21 @@
 # g191_003 — measured (issue #79)
 
-> **Status: Gates A–D and F (this repo) cleared; Gate E pending, run by
-> issue-solver after this session.**
+> **Status: Gates A–E cleared; Gate F green in this repo, the parent repo's
+> suite run by the launcher. Gate E measured 2026-11-11 by issue-solver:
+> `G191_003_6` max |ρ| **0.8525** vs `FWMA_Slope_pct` (manifest,
+> n = 397,247), per-frame max median 0.8563 over 89 frames → **DISCLOSE_GAP**.
+> The column SHIPS with disclosure; no strike, no waiver.**
 
 6-day accumulation/distribution sum: Guotai Junan's (2017, "GTJA191",
 internal quant report) alpha `#3`, per issue #79, which attributes its
-copy of the report to HKUDS/Vibe-Trading (MIT) — a copy not read in this
-session, see the disclosure under Gate A. Module
+copy of the report to HKUDS/Vibe-Trading (MIT) — a copy read in neither
+the port nor the receipt session, see the disclosure under Gate A. Module
 `pandas_ta/momentum/g191_003.py`, column
 `G191_003_6`. Tests: `tests/test_g191_003.py` (**27, all passing**).
-Numbers below: `python docs/measure_g191_003.py`. Environment: this
-worktree's pinned pandas/numpy. Measured 2026-11-11.
+Numbers below: `python docs/measure_g191_003.py` for Gates A–D and the
+synthetic frames, the issue-solver Gate E run
+`is79-g191_003-dc24beac` for Gate E and the real-data counts in Gate C.
+Environment: this worktree's pinned pandas/numpy. Measured 2026-11-11.
 
 ## Gate A: derivation from the published formula, not the prototype
 
@@ -142,10 +147,71 @@ volume, prototype ρ 0.9077 against this candidate) into itself. Only
 |---|---|---|
 | A Correctness | derived from the issue's own stated formula with three readings fixed and disclosed above, then matched against the prototype BIT-FOR-BIT | A hand-derived 7-bar example (`length=3`) with the arithmetic written out: per-bar contributions `[nan, 3, -3, 6, -7, 12, -13]`, column `[nan, nan, nan, 0.4, -0.5, 0.55, -1.1428571428571428]`, bar-by-bar to `abs=1e-12`. An independent per-bar replay (plain Python loop over numpy scalars — no `.rolling()`, no `.shift()`, no `np.where`) at the shipped default on a 900-bar frame: `t=300 module=-0.01447584866997064 loop=-0.01447584866997064`, `t=600` and `t=899` likewise exact. The retyped prototype expression: same NaN mask, `max\|diff\| = 0.0` on both the 1,500-bar walk (measure script) and a 900-bar seed-29 frame (test). The REAL candidate loaded out of `docs/issues/screen/ind_screen.py` through its own registry — present in this worktree, gitignored so the test may not depend on it: port vs candidate `max\|diff\| = 0.0`, retyped vs candidate `max\|diff\| = 0.0`, so the retyping hides no slip |
 | B Causality | pass | Future-perturbation sweep (high/low/close jointly rewritten from `j` onward), 37 offsets past the 7-bar warm-up: real module **0 of 37** leaks. Two mutants (`importlib` source read, `exec`'d in memory), each shown live different from the real module, then caught **37 of 37**: the final write index shifted `length=6` bars into the future, and `rolling(length, center=True)` in place of the causal trailing window (the `bos` look-ahead bug class CLAUDE.md documents) |
-| C Reachability | synthetic only (real-data reachability comes from Gate E's pooled count, not re-derived here) | 1,500-bar synthetic high/low/close walk (seed 11, `low <= close <= high` at every bar; see `docs/measure_g191_003.py:_walk`), shipped default: **1,494 of 1,500** bars non-NaN (99.60%) — exactly `n - length` — first valid at bar **6**, the structural warm-up boundary (`min_length - 1`). **1,494 distinct values**. Range `[-0.116513, 0.115872]`, median `0.001073`, **767 positive / 727 negative** |
+| C Reachability | pass, on real data and on synthetic | REAL DATA, from the Gate E run of 2026-11-11 (`overlap_max.csv`, 89 ALTPORT-1 BIST frames, 398,849 pooled bars): **398,315 non-NaN** (99.87%) and **397,142 non-zero**. The 534 NaN bars are exactly `89 frames × 6` warm-up bars, so no frame produces an all-NaN column; the 1,173 non-NaN bars that are exactly `0.0` are windows whose six contributions sum to zero, which on tick-rounded prices is where the `C == C1 ? 0` branch shows up (that attribution is a read of the formula, not a per-bar count). SYNTHETIC: 1,500-bar synthetic high/low/close walk (seed 11, `low <= close <= high` at every bar; see `docs/measure_g191_003.py:_walk`), shipped default: **1,494 of 1,500** bars non-NaN (99.60%) — exactly `n - length` — first valid at bar **6**, the structural warm-up boundary (`min_length - 1`). **1,494 distinct values**. Range `[-0.116513, 0.115872]`, median `0.001073`, **767 positive / 727 negative** |
 | D Scale-free | pass | Both branch tests are scale-invariant and `MIN`/`MAX` select rather than compute, so a positive rescale factors straight through the window sum and cancels against the `/close`. Measured on the 1,500-bar walk: PRICE ×8/×64 **bit-identical, 0.0 max\|diff\|**; ×10/×3.7 within float64 rounding tolerance (**3.99e-16 / 4.06e-16**), NaN masks matching at all four. The exact-float branch masks (`C > C1`, `C == C1`) are measured too, since a rescale could in principle move a bar between branches: **0 bars changed branch** at any of the four multipliers. `0 < 1494 fires < 1500` and `1494 > 1` distinct values rule out a constant column |
-| E Attribution | **pending, run by issue-solver after this session** | Not run here (the launcher runs `gate_e_overlap.py`; this session may not read `../Backtesting`). Issue #79 measured the PROTOTYPE at max \|ρ\| 0.8525 vs `FWMA_Slope_pct` (n = 397,247), top-5 per-frame max median 0.8563 → DISCLOSE_GAP — a prototype is not a port, so that number is an expectation, not this column's result. See the synthetic non-redundancy check below, which is **not** Gate E and lands higher than the issue's own fork-overlap number |
+| E Attribution | **DISCLOSE_GAP** — ships with disclosure | Measured 2026-11-11 by issue-solver, run `is79-g191_003-dc24beac`: see the Gate E section below |
 | F Suites | this repo only; parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see run below |
+
+## Gate E: attribution — measured 2026-11-11 (DISCLOSE_GAP)
+
+Run by issue-solver (this session may not read `../Backtesting`), run
+directory `is79-g191_003-dc24beac`, harness
+`gate_e_overlap.py run --module pandas_ta.momentum.g191_003` (Backtesting
+#107), verdict schema `r3-perframe-0.90`.
+
+**Run facts** (`meta.json`): 89 ALTPORT-1 BIST frames, **398,849 pooled
+bars**, **687 comparators** (329 `compute_all` + 358 `ml_features`
+manifest `1d`), **0 degenerate** comparators, shipped defaults
+(`kwargs {}`, nothing excluded, no rename prefix), canary
+`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`, pandas 2.3.3 /
+numpy 1.26.4. Module sha1 `f00a2bdd`, `pandas_ta` tree sha1 `e0c25359`,
+data stamp `1be6495e`, universe stamp `fa3060e6`.
+
+**Result, per column:**
+
+| column | max \|ρ\| | against | set | n | per-frame max median | frames | % frames ≥ 0.90 | verdict |
+|---|---|---|---|---|---|---|---|---|
+| `G191_003_6` | **0.8524960084840167** | `FWMA_Slope_pct` | manifest | 397,247 | **0.8562563250749456** (`FWMA_Slope_pct`) | 89 | **0.0%** | **DISCLOSE_GAP** |
+
+Pooled-only verdict agrees (`DISCLOSE_GAP`); the per-frame rule does not
+tighten it. Highest comparator inside `compute_all` alone: **0.8346** vs
+`week_trend` (n = 398,315).
+
+Top-5 comparators, pooled and per-frame (`top25.csv`, `perframe.csv`):
+
+| against | set | pooled \|ρ\| | n | per-frame median | per-frame max (single frame) | % frames ≥ 0.90 |
+|---|---|---|---|---|---|---|
+| `FWMA_Slope_pct` | manifest | 0.8525 | 397,247 | 0.8563 | 0.8947 | 0.0 |
+| `Dist_to_Tenkan_pct` | manifest | 0.8484 | 398,137 | 0.8506 | 0.8845 | 0.0 |
+| `Ret_5d_pct` | manifest | 0.8346 | 398,315 | 0.8379 | 0.8738 | 0.0 |
+| `week_trend` | compute_all | 0.8346 | 398,315 | 0.8379 | 0.8738 | 0.0 |
+| `kdj_J_9_3` | compute_all | 0.8310 | 397,781 | 0.8363 | 0.8698 | 0.0 |
+
+**Band (CLAUDE.md, Gate E):** 0.80 ≤ 0.8525 < 0.90 pooled and
+0.8563 < 0.90 per-frame → **DISCLOSE_GAP**. Not STRUCK, so the column
+**ships with disclosure**; no waiver is owed and nothing is reverted.
+Issue #79's "Done when" is met by the ship branch.
+
+**The disclosure itself:** `G191_003_6` carries a large shared component
+with short-horizon slope/return features — `FWMA_Slope_pct`,
+`Dist_to_Tenkan_pct`, `Ret_5d_pct`/`week_trend` all sit at 0.83–0.86, and
+no single frame of the 89 reaches 0.90 against any of them. Expect it to
+double-weight a 5–6 bar directional signal in a miner that already has
+those columns; what it adds over them is the range-referenced
+(`MIN(L,C1)` / `MAX(H,C1)`) rather than close-to-close measure of each
+bar's move.
+
+**Against the issue's prototype expectation:** issue #79 measured the
+PROTOTYPE at 0.8525 vs `FWMA_Slope_pct` (n = 397,247) with a top-5
+per-frame max median of 0.8563 → DISCLOSE_GAP. The port's run reproduces
+those numbers, consistent with Gate A's `max|diff| = 0.0` against the real
+candidate.
+
+**And it answers the synthetic worry below:** `kdj:J_9_3`, the comparator
+that crossed 0.90 on the 900-bar synthetic frame, lands at pooled
+**0.8310** / per-frame median **0.8363** / single-frame max **0.8698** on
+the 89 real frames, with **0.0% of frames ≥ 0.90**. The synthetic number
+was the frame's artefact, as the section below guessed it might be.
 
 ## Non-redundancy on a synthetic frame — NOT Gate E, and it is not comfortable
 
@@ -175,9 +241,10 @@ bound what that means, and neither is a reason to ignore it:
   number sits ~0.07 higher; that explanation is a read, not a
   measurement.
 
-The authoritative number is the launcher's Gate E run. If it strikes the
-column, the port is reverted with this file kept as the receipt — which
-issue #79 counts as done exactly as well as a ship.
+The authoritative number is the Gate E run above, which settled this:
+`kdj:J_9_3` measures **0.8310** pooled / **0.8363** per-frame median over
+the 89 real frames, closer to the owner's 0.8394 stage-2 number than to
+the synthetic 0.906. Nothing is struck and nothing is reverted.
 
 ## Wiring
 
@@ -198,22 +265,30 @@ many distinct values, so the generator tags it `SF`), checked by
 (313 → 314); no `CATEGORY_BUCKETS` entry needed (that dict tracks only
 `trend`/`volatility`/`volume`, not `momentum`).
 
-Gate E will be run by the launcher (`gate_e_overlap.py`, Backtesting
-#107); `docs/gate_e_ledger.csv` carries no row for `g191_003` yet, so
+`docs/gate_e_ledger.csv` now carries the `g191_003` row, recorded in this
+receipt session with
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-11`
+(output: `g191_003:G191_003_6 DISCLOSE_GAP 0.8525 vs FWMA_Slope_pct`), so
+`g191_003` is off the owed list in
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails here by design (CLAUDE.md, "Owed, not failed"). A later receipt
-session records the row and fills in the Gate E numbers above.
+— that test still fails here, now naming only `['mtd_ret']`, which
+pre-dates this issue.
 
-## Suite run (this repo, this session)
+## Suite run (this repo)
 
+Re-run in the receipt session after recording the ledger row,
 `python -m pytest -q -p no:warnings --tb=no -rf`, full suite, default
-collection order: **3 failed, 5221 passed, 83 skipped** (104s).
-`g191_003`'s own tests: **27 passed**. The three failures:
+collection order: **3 failed, 5228 passed, 83 skipped** (107s). The same
+three failures as the port session (which measured 3 failed, 5221 passed,
+83 skipped), with the Gate E one no longer naming `g191_003`. The
+**+7 passed** is the new ledger row itself:
+`tests/test_gate_e_ledger.py` is parametrized per row and column and now
+collects 745 tests (measured with `--collect-only -q`).
 
 * `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-  — "no Gate E ledger row for `['g191_003', 'mtd_ret']`". Owed by design
-  for `g191_003` (this session may not run Gate E); the `mtd_ret` half
-  pre-dates this session.
+  — now "no Gate E ledger row for `['mtd_ret']`", measured in the receipt
+  session with the module's test run alone. `mtd_ret` pre-dates this
+  issue; `g191_003`'s row is recorded.
 * `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
   — needs the sibling `../AlternativeRepos` checkout, absent in this
   worktree (CLAUDE.md "Known breaks"; CI deselects it).
