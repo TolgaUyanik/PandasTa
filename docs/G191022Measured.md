@@ -267,7 +267,9 @@ A single NaN in `close` empties `bias_length = 6` bars of the mean and
 input (carrying its previous value forward) instead of emptying its output. So
 on the 1,500-bar walk with `close[700] = NaN`: **no output bar changes
 NaN-ness**, and **448** of the 1,481 firing bars move — from bar **700** to bar
-**1,147**, past which the displacement falls below float64 resolution. Pinned by
+**1,147**, past which the displacement falls below float64 resolution. Where it falls
+below resolution is platform float detail: CI's runner measured **647** moved bars, so
+the test pins only the start (bar 700) and a lower bound (>= 400 bars). Pinned by
 `test_a_single_nan_close_empties_no_output_bar_but_displaces_many`. Nothing is
 guarded: a NaN close is not a bar this fork models, and the prototype does not
 guard it either.

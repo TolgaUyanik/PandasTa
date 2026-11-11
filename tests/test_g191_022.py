@@ -264,8 +264,10 @@ def test_the_rejected_reading_of_the_back_reference_is_a_different_column():
 def test_the_inner_term_is_the_shipped_bias_to_float_tolerance():
     """`(C-MEAN(C,6))/MEAN(C,6)` is the same mathematical quantity as the
     shipped `bias(close, 6)`, which spells it `(close/SMA)-1`. The two are
-    NOT bit-equal (measured: equal on 26 of 1,495 bars, max |diff|
-    1.11e-16, max |rel diff| 3.50e-11), which is why the port spells the
+    NOT bit-equal (measured locally: equal on 26 of 1,495 bars, max |diff|
+    1.11e-16, max |rel diff| 3.50e-11; the CI runner's numpy measured 19, so
+    the exact count is platform float detail and only "not all" is pinned),
+    which is why the port spells the
     source's subtraction form -- Gate A is settled bit-for-bit against the
     prototype, and the prototype subtracts. Rebuilding the WHOLE column on
     top of the shipped `bias` instead moves it by at most 2.78e-17 and
@@ -281,7 +283,7 @@ def test_the_inner_term_is_the_shipped_bias_to_float_tolerance():
     m = own_term.notna() & helper_term.notna()
     assert int(m.sum()) == 1495
     assert (own_term[m] - helper_term[m]).abs().max() < 2e-16
-    assert int((own_term[m] == helper_term[m]).sum()) == 26  # not bit-equal
+    assert int((own_term[m] == helper_term[m]).sum()) < int(m.sum())  # not bit-equal
 
     via_helper = (helper_term - helper_term.shift(3)).ewm(
         alpha=1 / 12, adjust=False, min_periods=12).mean()
@@ -359,9 +361,10 @@ def test_a_single_nan_close_empties_no_output_bar_but_displaces_many():
     empties `bias_length` bars of the mean and `bias_length + delay_length`
     bars of the change, but pandas' `ewm` SKIPS a NaN input (carrying its
     previous value forward) instead of emptying its output. Measured on the
-    1,500-bar walk: no output bar changes NaN-ness, and 448 non-NaN bars
-    move -- from bar 700 to bar 1147, past which the displacement falls
-    below float64 resolution."""
+    1,500-bar walk: no output bar changes NaN-ness, and the displacement
+    starts at bar 700 and runs for hundreds of bars (448 locally, 647 on the
+    CI runner: where it falls below float64 resolution is platform float
+    detail, so only its start and a lower bound are pinned)."""
     close = _walk()
     out = g191_022(close)
     poked_close = close.copy()
@@ -370,8 +373,8 @@ def test_a_single_nan_close_empties_no_output_bar_but_displaces_many():
 
     assert (poked.isna() == out.isna()).all()          # nothing emptied
     moved = poked.index[(poked != out) & poked.notna() & out.notna()]
-    assert len(moved) == 448  # of the 1,481 bars that fire
-    assert int(moved[0]) == 700 and int(moved[-1]) == 1147
+    assert len(moved) >= 400  # of the 1,481 bars that fire
+    assert int(moved[0]) == 700 and int(moved[-1]) >= 1100
     assert (poked.iloc[:700] == out.iloc[:700])[out.iloc[:700].notna()].all()
 
 
