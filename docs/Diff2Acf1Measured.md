@@ -340,7 +340,7 @@ a measurement of this port.
 ## Gate F — suites
 
 Full suite on this branch (`.venv-pd2`, CI's two deselects, `GATE_E_PENDING_OK=1`):
-5167 passed, 84 skipped, 0 failed.
+5302 passed, 84 skipped, 0 failed (after merging `dev` at `5859c0f`).
 
 Without the variable, `test_every_indicator_that_needs_a_row_has_one` fails on the owed
 rows `diff2_acf1` and `mtd_ret`; `mtd_ret` is already owed on `dev`. The Backtesting suite
@@ -348,16 +348,16 @@ cannot be run here.
 
 ## Counters touched
 
-- `CATEGORY_TOTAL` 311 → 312. Statistics is not in `CATEGORY_BUCKETS`.
-- README: 312 registered, 320 callable, statistics (29).
-- `docs/MLCompanionContract.md`: 656 → 657 tagged and 299 → 300 `SF`, with a revert note
+- `CATEGORY_TOTAL` 315 → 316. Statistics is not in `CATEGORY_BUCKETS`.
+- README: 316 registered, 324 callable, statistics (29).
+- `docs/MLCompanionContract.md`: 660 → 661 tagged and 303 → 304 `SF`, with a revert note
   (newest first).
 - `docs/IndicatorDictionary.md`, regenerated with `.venv-pd2`. Its diff is the
   `diff2_acf1` row (`DIFF2ACF1_100` SF, 99 warm-up), the four counts and the shortlist
   entry, and nothing else.
 - `Category`: `diff2_acf1` is placed alphabetically, before `entlz`.
 
-All counts are as of `dev` at `19fca14`.
+All counts are as of `dev` at `5859c0f`, which this branch has merged.
 
 ## Interaction with #292 (`arch_lm`) and #294 (`lumpiness`)
 
@@ -377,11 +377,11 @@ has to:
 3. re-apply its +1;
 4. regenerate the dictionary.
 
-Counted from `dev` at `19fca14` (311 / 319 / statistics (28) / 656 / 299 `SF`), with no
+Counted from `dev` at `5859c0f` (315 / 323 / statistics (28) / 660 / 303 `SF`), with no
 other port landing in between:
 
 | order | `CATEGORY_TOTAL` | README registered / callable / statistics | MLCompanionContract tagged / `SF` |
 |---|---|---|---|
-| first | 312 | 312 / 320 / (29) | 657 / 300 |
-| second | 313 | 313 / 321 / (30) | 658 / 301 |
-| third | 314 | 314 / 322 / (31) | 659 / 302 |
+| first | 316 | 316 / 324 / (29) | 661 / 304 |
+| second | 317 | 317 / 325 / (30) | 662 / 305 |
+| third | 318 | 318 / 326 / (31) | 663 / 306 |
