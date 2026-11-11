@@ -76,8 +76,11 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    before the hole moves.
 
 Every number above comes from `docs/measure_lean_hurst_100.py`, whose run is
-transcribed in `docs/LeanHurst100Measured.md`. Gate E is owed: the launcher
-runs it after the porting session.
+transcribed in `docs/LeanHurst100Measured.md`. Gate E was run by the launcher
+on 2026-11-11 (run `is85-lean_hurst_100-f47bf26c`): `LEAN_HURST_100_20` pooled
+max |rho| 0.2491 vs `mad_pct`, n = 390,038, per-frame max median 0.2241 over 89
+frames, 0 of them at or above 0.90 -- SHIP, recorded in
+`docs/gate_e_ledger.csv`.
 """
 import importlib
 import math

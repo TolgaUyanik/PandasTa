@@ -2,11 +2,14 @@
 
 Issue #85 (LEAN-HURST-100), ported 2026-11-11 on branch `issue-85-lean-hurst-100`.
 Column: **`LEAN_HURST_100_20`**, `pandas_ta/statistics/lean_hurst_100.py`.
+**Status: shipped, Gates A–F through** — Gate E measured 2026-11-11 at
+\|ρ\| 0.2491 (SHIP), ledger row in `docs/gate_e_ledger.csv`.
 
 Every number here is printed by `python docs/measure_lean_hurst_100.py`
-(pandas 2.3.3 / numpy 1.26.4) or by `python -m pytest tests/test_lean_hurst_100.py -q`.
-Nothing in this file was typed from expectation; where a number is *not* measured,
-the line says so.
+(pandas 2.3.3 / numpy 1.26.4), by `python -m pytest tests/test_lean_hurst_100.py -q`,
+or — for Gate E and the real-data counts in Gate C — read out of the launcher's
+Gate E run `is85-lean_hurst_100-f47bf26c`. Nothing in this file was typed from
+expectation; where a number is *not* measured, the line says so.
 
 ## What it is
 
@@ -167,8 +170,14 @@ of any instrument.)
 
 ## Gate C — reachability
 
-⚠ **Synthetic only.** This worktree has no BIST frames; the real-data counts are
-owed to Gate E's run and belong in this file when the receipt session fills it in.
+**Real data, from the Gate E run** (`is85-lean_hurst_100-f47bf26c`,
+`overlap_max.csv`, 2026-11-11): over the 89 frozen ALTPORT-1 frames and 398,849
+pooled bars, `LEAN_HURST_100_20` is non-NaN on **390,038** bars and non-zero on
+**390,038** of those, so `0 < 390038 < 398849`. The 8,811-bar gap is the 99-bar
+warm-up per frame (89 × 99 = 8,811), which accounts for it exactly.
+
+The remaining rows of this section are **synthetic**: this worktree has no BIST
+frames, so the distribution shape below is measured on generated paths.
 
 1,500-bar paths, 1,401 fired bars each, 1,401 distinct values each:
 
@@ -216,18 +225,53 @@ the module takes one logarithm of a ratio.
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
+**Measured on the port, 2026-11-11**, run `is85-lean_hurst_100-f47bf26c` (the
+launcher's Gate E run on this branch's HEAD, harness
+`gate_e_overlap.py run --module pandas_ta.statistics.lean_hurst_100`).
 
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails locally until the row exists; CI into `dev` sets `GATE_E_PENDING_OK=1` and
-skips it with a reason starting "Gate E owed". The receipt session records the
-ledger row and writes the measured numbers here.
+| column | max \|ρ\| | against | set | n | per-frame max median | verdict |
+|---|---|---|---|---|---|---|
+| `LEAN_HURST_100_20` | **0.2491** | `mad_pct` | manifest | 390,038 | **0.2241** (`mad_pct`) | **SHIP** |
 
-What the issue reports for the **prototype** (2026-10-24; a prototype is not a
-port, and these are NOT this column's numbers): pooled max \|ρ\| 0.2491 vs
-`mad_pct`, n = 390,038, top-5 per-frame max median 0.2241 → SHIP; next
-comparators `ADX` 0.1958 and `Cloud_Thickness_pct` 0.1947; fork overlap (stage 2,
-12 frames) 0.3140 vs `ht_dcperiod:HT_DCPERIOD`.
+Run facts, from the run's `meta.json` and `overlap_max.csv`: 89 frozen ALTPORT-1
+frames, 398,849 pooled bars, 687 comparators (329 `compute_all` + 358
+`ml_features` manifest), default parameters (`kwargs: {}`), canary `AKBNK.IS,
+BIENY.IS, AGHOL.IS, SASA.IS bit-equal`, module sha1
+`5a79ff3cee3c5c34092ba5114e52b3fddf452fb3`, `pandas_ta` tree sha1
+`1ce4645126d27c8709cba0bcf36c55f823485b06`, data stamp
+`1be6495ef7095ff67ad8f59a2fc0311d74f02652`. One comparator was dropped as
+degenerate (`squeeze_SQZ_NO`, constant). The highest comparator inside
+`compute_all` alone is `ADX` at 0.1958, n = 390,038.
+
+**0 of 89 frames** reach \|ρ\| ≥ 0.90 against the pooled-max comparator
+(`perframe_pct_frames_ge_090` 0.0), and the per-frame max median over the top-5
+comparators is 0.2241 — so neither the pooled band (0.2491 < 0.76) nor the
+per-frame band puts this column anywhere near DISCLOSE, let alone STRUCK.
+**Verdict SHIP, nothing struck, nothing waived.** Ledger row recorded in
+`docs/gate_e_ledger.csv` (`python docs/gate_e_ledger.py record … --measured
+2026-11-11`).
+
+Top comparators, pooled (`top25.csv`, first ten):
+
+| \|ρ\| | comparator | set |
+|---|---|---|
+| 0.2491 | `mad_pct` | manifest |
+| 0.1958 | `ADX` | compute_all |
+| 0.1947 | `Cloud_Thickness_pct` | manifest |
+| 0.1947 | `ICHI_CLOUD_THICK` | compute_all |
+| 0.1683 | `dist_low_60` | compute_all |
+| 0.1594 | `CKSP_Width_pct` | manifest |
+| 0.1493 | `Swing_Range_pct` | manifest |
+| 0.1469 | `MACD_Cross_Age` | manifest |
+| 0.1468 | `BB_BWidth` | compute_all |
+| 0.1440 | `mad_pct_Pctl` | manifest |
+
+The port reproduces the prototype's screen numbers (issue #85, 2026-10-24:
+0.2491 vs `mad_pct`, n = 390,038, per-frame max median 0.2241, next comparators
+`ADX` 0.1958 and `Cloud_Thickness_pct` 0.1947) to the digits reported there.
+That agreement is an outcome, not evidence that was available before the run.
+The issue's stage-2 fork overlap (0.3140 vs `ht_dcperiod:HT_DCPERIOD`, 12
+frames) is not Gate E and was not re-measured here.
 
 **Nearest neighbours on one 1,500-bar synthetic walk — NOT Gate E** (13 shipped
 columns, one frame; Gate E is 687 comparators over 89 frozen BIST frames):
@@ -256,17 +300,30 @@ near the 0.90 line on this frame, and the frame is not evidence about the 89.
 
 Run in this worktree:
 
+Porting session, before the Gate E row existed:
+
 * `python -m pytest tests/test_lean_hurst_100.py -q` → **65 passed** in 7.91 s.
 * `python -m pytest -q` → **3 failed, 5450 passed, 83 skipped** in 115 s. The
-  three failures are the two `CLAUDE.md` "Known breaks"
+  three failures were the two `CLAUDE.md` "Known breaks"
   (`test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`,
   which needs the sibling `../AlternativeRepos` checkout and is deselected in
   CI, and `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`,
   the `supertrend` citation into the untracked `docs/pine/`) plus
   `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, which
-  reports `['lean_hurst_100', 'mtd_ret']`: the Gate E row this port owes, and
+  reported `['lean_hurst_100', 'mtd_ret']`: the Gate E row this port owed, and
   one owed before it. CI into `dev` skips that one under
   `GATE_E_PENDING_OK=1`.
+
+Receipt session, 2026-11-11, after recording the ledger row:
+
+* `python -m pytest -q` → **3 failed, 5457 passed, 83 skipped** in 115.80 s. The
+  same two `CLAUDE.md` "Known breaks", plus the ledger test, which now reports
+  `['mtd_ret']` only — `lean_hurst_100` is no longer owed, and `mtd_ret` was
+  owed before this branch. The run passes 7 more tests than the porting
+  session's (5457 vs 5450): read in `tests/test_gate_e_ledger.py`, a new row
+  adds six row-parametrised tests (module name, module sha1, output
+  fingerprint, verdict bands, STRUCK waiver, fires-on-real-data) and one
+  indicator-parametrised one (`test_ledger_columns_are_the_default_output`).
 
 The launcher runs both repos' suites in clean worktrees.
 
@@ -317,18 +374,20 @@ warm-up 99); `docs/MLCompanionContract.md` 663 → 664 tagged and 306 → 307 `S
 
 ## Recommendation
 
-**Ship it, pending Gate E.** Nothing measured here argues against the column:
+**Ships.** Gates A–F are through, and nothing measured argues against the
+column:
 
 * it is the formula the issue states, agreeing with the screen's own candidate
   to 1.8e-15 with identical NaN masks and a hand-derived closed-form window hit
   to 1.1e-16;
 * it is causal (0/34 leaks on three frames, four live mutants caught 34/34 each)
   and exactly scale-free (1401/1401 bit-identical at ×8 and ×64);
-* it asks a question the shipped set does not obviously already ask — its
-  nearest synthetic neighbour is `kpss` at 0.52 — and the prototype's own Gate E
-  was 0.2491, far under the 0.76 ship line. (How that compares with the other
-  candidates of the 2026-10-24 screen was not checked in this session; the one
-  comparison that matters is this column's own run, which is owed.)
+* Gate E on the port is **0.2491** vs `mad_pct` over 687 comparators and 89
+  frames (per-frame max median 0.2241, 0 frames ≥ 0.90) — far under the 0.76
+  ship line, so the column is kept as shipped and nothing is struck or waived.
+  Its nearest synthetic neighbour was `kpss` at 0.52 on one frame; the real
+  run's nearest shipped-engine comparator is `ADX` at 0.1958. (How this compares
+  with the other candidates of the 2026-10-24 screen was not checked.)
 
 Two caveats a reader should carry, both measured and neither disqualifying:
 
