@@ -245,7 +245,7 @@ receipt (7.105427e-15 / 1198 / 1479, 19|12|11 and 36|36|36|27|33 of 36, 58 and 1
 0.1940 and 0.0334, 50.1300 / 11.2276 / 35 / 65, Spearman 0.382917), the 104 tests pass,
 the full suite lands on exactly the claimed "3 failed, 5562 passed, 83 skipped" with
 exactly the claimed three failures, Gate E is correctly left owed, and all five wiring
-touch points plus 320/328/83/320/665/308 are real. And you still shipped the lie. The
+touch points plus 320, 328, 83, 320, 665 and 308 are real. And you still shipped the lie. The
 sentence round 2 struck -- that the quotient of two distinct doubles can round to 1.0 --
 is sitting in `ulp_walk`'s docstring in the file whose own stdout refutes it, and the
 test header still claims a rescale "can neither reorder two closes nor fuse two distinct
