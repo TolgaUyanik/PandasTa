@@ -5,8 +5,14 @@
 own prototype (`docs/issues/screen/ind_screen.py:317-321`). Gate A
 derivation, including the one reading of the source string the string does
 not fix on its own, is in the module docstring and
-`docs/G191022Measured.md`. Gate E is pending (CLAUDE.md, "Owed, not
-failed").
+`docs/G191022Measured.md`. Gate E is MEASURED (issue-solver run
+`is82-g191_022-19d9fa07`, 2026-11-11): `G191_022_6_3_12_1` max |rho| 0.8842
+vs `smi_SMIo_5_20_5` (manifest, n = 397,158), per-frame max median 0.8861
+over 89 frames -> DISCLOSE_GAP, under the 0.90 strike line, so the column
+ships; row in `docs/gate_e_ledger.csv`. The module docstring still says
+"Gate E is pending" and is deliberately NOT edited: the ledger row pins that
+file's sha1 and the `pandas_ta` tree sha1 as measured, and touching either
+would invalidate the recorded run.
 
 What these tests pin, in order of how much it would hurt to lose:
 
