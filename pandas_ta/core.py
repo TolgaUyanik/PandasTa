@@ -1874,6 +1874,11 @@ class AnalysisIndicators(BasePandasObject):
         result = ffd(close=close, d=d, threshold=threshold, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def firstzero_ac(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = firstzero_ac(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def g191_026(self, mean_length=None, corr_length=None, lag=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
