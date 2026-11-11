@@ -2,14 +2,17 @@
 
 Issue #87 (LEAN-TDD-20), ported 2026-11-11 on branch `issue-87-lean-tdd-20`.
 Column: **`LEAN_TDD_20`**, `pandas_ta/statistics/lean_tdd_20.py`.
-**Status: Gates A–D through, Gate E owed.**
+**Status: SHIPPED through Gates A–F. Gate E measured 2026-11-11:
+`DISCLOSE_GAP`, max \|ρ\| 0.8123 against `ui`. Nothing struck; the column
+ships as wired.**
 
-Every number here is printed by `python docs/measure_lean_tdd_20.py`
-(pandas 2.3.3 / numpy 1.26.4) or by
-`python -m pytest tests/test_lean_tdd_20.py -q`. Nothing in this file was
-typed from expectation; where a number is *not* measured, the line says so.
-Gate E is the one section with no numbers of its own yet: the launcher runs
-it after this session and a later receipt session writes it in.
+Every number in Gates A–D and the edge cases is printed by
+`python docs/measure_lean_tdd_20.py` (pandas 2.3.3 / numpy 1.26.4) or by
+`python -m pytest tests/test_lean_tdd_20.py -q`. The Gate E numbers, and the
+real-data counts in Gate C, come from the issue-solver's harness run
+`is87-lean_tdd_20-46cda3b2` and are quoted from its `overlap_max.csv` and
+`meta.json`. Nothing in this file was typed from expectation; where a number
+is *not* measured, the line says so.
 
 ## What it is
 
@@ -248,9 +251,12 @@ two bars earlier. The sweeps cover the default `offset=0`, which is what
 
 ## Gate C — reachability
 
-**Real data: owed with Gate E.** The launcher's run reports the pooled
-non-NaN and non-zero counts over the 89 frozen ALTPORT-1 BIST frames; a later
-receipt session writes them here. The rows below are **synthetic**.
+**Real data, from the Gate E run** (`is87-lean_tdd_20-46cda3b2`, 89 frozen
+ALTPORT-1 BIST frames, 398,849 pooled bars): `LEAN_TDD_20` is non-NaN on
+**397,069** bars and non-zero on **397,065** of them. So it fires on 99.55%
+of the pooled bars — the 1,780 NaN bars are the 20-bar warm-up × 89 frames
+(1,780 exactly) — and only **4** of the fired bars are an exact zero, which
+is a window with no down bar at all. The rows below are **synthetic**.
 
 1,500-bar paths, 1,480 fired bars each (`fired`, `distinct` and `zeros` are
 counted on the column; `zeros` means exactly 0.0):
@@ -328,7 +334,7 @@ pins it so nobody reads this column the way `lean_hurst_100` or
 and the median ratio of the column to `sd / sqrt(2)` is 1.014690. So on a
 symmetric synthetic frame the column shares about the level of 20-bar
 realized volatility and keeps a good deal of its own rank information; the
-real-data figure that matters is Gate E's, and the screen's prototype run put
+real-data figure that matters is Gate E's, and this port's own Gate E run put
 it at 0.8123 against `ui` (DISCLOSE_GAP).
 
 **Drift moves the level, and barely the ranks.** Walk vs the same walk at
@@ -405,46 +411,96 @@ values** and 0 exact zeros, so the column is not a constant.
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
+**Measured 2026-11-11 by the issue-solver's run `is87-lean_tdd_20-46cda3b2`**
+(`gate_e_overlap.py run --module pandas_ta.statistics.lean_tdd_20`, default
+parameters, `kwargs {}`), on the 89 frozen ALTPORT-1 BIST frames, 398,849
+pooled bars, against 687 comparators (329 `compute_all` + 358 `ml_features`
+manifest `1d`), 1 of them degenerate on this universe. Canary: AKBNK.IS,
+BIENY.IS, AGHOL.IS, SASA.IS **bit-equal**. pandas 2.3.3 / numpy 1.26.4;
+module sha1 `fd1785de`, tree sha1 `e3c3ea01`, data stamp `1be6495e`.
+Verdict schema `r3-perframe-0.90`.
 
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails here until then (measured in this session: it reports
-`['lean_tdd_20', 'mtd_ret']` — the row this port owes, and one owed before
-it). CI into `dev` skips it under `GATE_E_PENDING_OK=1`.
-`docs/gate_e_ledger.csv` is untouched by this session; the receipt session
-records the row.
+| column | max \|ρ\| | against | set | n | per-frame max median | frames | frames ≥ 0.90 | verdict |
+|---|---|---|---|---|---|---|---|---|
+| `LEAN_TDD_20` | **0.8123** | `ui` | compute_all | 396,535 | **0.8020** (`ui`) | 89 | **0.0%** | **DISCLOSE_GAP** |
 
-**What the screen measured on the PROTOTYPE** (2026-10-24, run
-`screen_20261024`; the owner's numbers from the issue, not this session's):
-max \|ρ\| **0.8123** vs `ui` over n = 396,535, top-5 per-frame max median
-0.8020 → **DISCLOSE_GAP**; next comparators `natr` 0.7332 and
-`Stop_2ATR_pct` 0.7332. The port is **bit-equal to that prototype** on a
-1,500-bar walk (Gate A2), so the port's own run is expected to land in the
-same band — expected, not measured: the prototype's numbers are not the
-port's, and 0.8123 is 0.0877 away from the 0.90 strike line.
+Exactly: pooled 0.8122808091846513, per-frame max median 0.8019944862566607.
+The strongest comparator in the manifest half is `Stop_2ATR_pct` at
+**0.7332** (0.7332026530163992, n = 397,069) — which is the issue's third
+listed comparator, and under the 0.76 ship line on its own.
 
-**If the run comes back STRUCK** (pooled \|ρ\| ≥ 0.90, or a top-5
-comparator's per-frame median ≥ 0.90), the column is reverted or waived
-before the release, per `CLAUDE.md`'s Gate E row. Nothing in this session
-assumes otherwise.
+**Verdict: DISCLOSE_GAP, so the column ships and the overlap is disclosed.**
+`CLAUDE.md`'s Gate E row strikes a column at pooled \|ρ\| ≥ 0.90 or a top-5
+comparator's per-frame median ≥ 0.90; this is 0.8123 and 0.8020, so **0.0877
+and 0.0980 below the two strike lines** and inside the 0.80 ≤ ρ < 0.90
+disclose band. Nothing was struck, and nothing was removed from the port.
+What is disclosed is the thing the module docstring and Gate C already say in
+their own words: **on real data this column is mostly 20-bar volatility**,
+and the shipped column it most nearly restates is `ui`, the Ulcer Index.
+A miner that already holds `ui` holds something whose rank agrees with this
+column at ρ = 0.81 pooled and at a median of 0.80 per frame, which is close
+enough that the two should be read as near-neighbours rather than as two
+independent risk features.
+
+**The port's run reproduced the screen's prototype numbers.** The screen
+(2026-10-24, run `screen_20261024`) measured the prototype at max \|ρ\|
+0.8123 vs `ui` over n = 396,535 with per-frame max median 0.8020 — the same
+three figures as the port's run above, and the same comparator. That is the
+consequence of Gate A2, where the port is bit-equal to the screen's own
+registry candidate on 1,480 of 1,480 fired bars: the screen's numbers were
+about this code.
+
+Recorded in `docs/gate_e_ledger.csv`
+(`python docs/gate_e_ledger.py record … --measured 2026-11-11`) as row
+`lean_tdd_20,pandas_ta.statistics.lean_tdd_20,LEAN_TDD_20,DISCLOSE_GAP`. The
+row carries no waiver, because only a STRUCK row needs one.
 
 ## Gate F — suites
 
-Run in this worktree:
+Run in this worktree. The port session's runs are kept because they are what
+Gates A–D were read off; the receipt session's runs are the current state.
+
+Port session (2026-11-11, Gate E still owed):
 
 * `python -m pytest tests/test_lean_tdd_20.py -q` → **109 passed** in 3.05 s.
 * `python -m pytest -q` → **3 failed, 5679 passed, 83 skipped** in 119.57 s,
-  the last full run of this session (the earlier ones gave the same three
+  the last full run of that session (the earlier ones gave the same three
   counts, except for one run in which the review log also tripped
   `test_pine_coverage_csv.py::test_no_other_document_retypes_the_split` by
   writing five counts slash-joined; that is fixed and the log says so).
-  The three failures are the two `CLAUDE.md` "Known breaks"
-  (`test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`,
-  which needs the sibling `../AlternativeRepos` checkout and is deselected in
-  CI, and `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`,
-  the `supertrend` citation into the untracked `docs/pine/`) plus
+  The third failure was
   `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-  the owed Gate E row.
+  then owed for `['lean_tdd_20', 'mtd_ret']`.
+
+Receipt session (2026-11-11, after the Gate E row was recorded):
+
+* `python -m pytest tests/test_lean_tdd_20.py -q` → **109 passed** in 2.89 s.
+* `python -m pytest -q` → **3 failed, 5686 passed, 83 skipped** in 120.99 s.
+  The passed count is **7 higher** than the port session's, and the 7 are
+  the new ledger row's own parametrized cases in `tests/test_gate_e_ledger.py`:
+  that module parametrizes over the live rows four times
+  (`test_row_names_the_module_that_defines_the_indicator`,
+  `test_row_still_describes_its_module`, `test_row_output_has_not_moved`,
+  `test_struck_rows_carry_the_waiver_for_this_exact_measurement`), over all
+  rows twice (`test_verdict_follows_the_bands`,
+  `test_every_column_fires_on_real_data`) and over the indicators named by
+  live rows once (`test_ledger_columns_are_the_default_output`) — 4 + 2 + 1
+  for one added row.
+
+The failures are the same three in both runs, and `lean_tdd_20` is no longer
+one of their causes:
+
+1. `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
+   — needs the sibling `../AlternativeRepos` checkout, deselected in CI
+   (`CLAUDE.md` "Known breaks").
+2. `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` — the
+   `supertrend` citation into the untracked `docs/pine/`, the second
+   "Known break".
+3. `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` —
+   now reports `no Gate E ledger row for ['mtd_ret']`, measured in the
+   receipt session. `lean_tdd_20` has dropped off that list; `mtd_ret` is an
+   unrelated indicator whose row was owed before this branch and is not this
+   issue's to record.
 
 The launcher runs both repos' suites in clean worktrees.
 
