@@ -1,0 +1,314 @@
+# g191_022 — measured (issue #82)
+
+> **Status: Gates A–D cleared and measured here. Gate E is PENDING — it is run
+> by issue-solver after this session, and nothing below pre-judges it. Gate F:
+> this repo's suite is run below; the parent repo's (`Backtesting`) is run by
+> the launcher in a clean worktree. The issue's prototype measured
+> DISCLOSE_GAP (max |ρ| 0.8842 vs `smi_SMIo_5_20_5`), which is NOT a verdict on
+> this port's own column — the port's run decides. On this session's synthetic
+> walk the same comparator measures **0.9116**, above the strike line; that is a
+> synthetic frame and not Gate E, but it is disclosed up front rather than left
+> in a table.**
+
+Smoothed 3-day change of the 6-day bias: Guotai Junan's (2017, "GTJA191",
+internal quant report) alpha `#22`, per issue #82, which attributes its copy of
+the report to HKUDS/Vibe-Trading (MIT) — a copy this session did **not** read,
+see the disclosure under Gate A. Module `pandas_ta/momentum/g191_022.py`, column
+`G191_022_6_3_12_1`. Tests: `tests/test_g191_022.py` (**29, all passing**).
+Every number in the gate rows and tables below comes from
+`python docs/measure_g191_022.py` in this worktree, on synthetic frames; the
+test count comes from that module's own pytest run and the suite line at the end
+from the full-suite run quoted there. The environment is this worktree's pinned
+pandas/numpy. Measured 2026-11-11.
+
+## Gate A: derivation from the published formula, not the prototype
+
+Issue #82 states GTJA191 alpha `#22`:
+
+    #22: SMA((C-MEAN(C,6))/MEAN(C,6) - DELAY(that,3), 12, 1)
+
+**What this session could NOT do, disclosed up front:** `docs/pine/` and web
+access are both unavailable in this worktree, so the issue's own named copy —
+HKUDS/Vibe-Trading (MIT) — was never read. Everything below is derived from the
+issue's own stated formula string, per the issue's own rule ("Gate A starts from
+the source formula, not the prototype"), then cross-checked against the issue's
+own prototype (`docs/issues/screen/ind_screen.py:317-321`):
+
+    @cand("g191_022", "smoothed 3-day change of the 6-day bias", G,
+          "#22: SMA((C-MEAN(C,6))/MEAN(C,6) - DELAY(that,3), 12, 1)")
+    def _(o, h, l, c, v):
+        b = (c - mean(c, 6)) / mean(c, 6)
+        return sma(b - delay(b, 3), 12, 1)
+
+with the operators read off the same module source: `delay(x, n) = x.shift(n)`
+(`ind_screen.py:45`), `mean(x, n) = x.rolling(n).mean()` (`:47`) and
+`sma(x, n, m) = x.ewm(alpha=m/n, adjust=False).mean()` (`:57-59`), GTJA's own
+recursive smoother `Y[t] = (m*A[t] + (n-m)*Y[t-1]) / n`, **not** this fork's
+`pandas_ta.overlap.sma`. The issue's string and the prototype agree, including
+all four lengths (6, 3, 12, 1).
+
+### The one reading the string does not fix on its own
+
+**`DELAY(that,3)` refers to the BIAS, not to the whole bracket.** `that` is the
+immediately preceding expression `(C-MEAN(C,6))/MEAN(C,6)`, so the smoothed
+quantity is `bias[t] - bias[t-3]`. The alternative reading — `that` = the whole
+subtraction — gives `bias - (bias - DELAY(bias,3)).shift(3)`. Three independent
+things fix the reading taken here: the prototype names the bias `b` and writes
+`b - delay(b, 3)`; the issue's own one-line title is "smoothed 3-day change of
+the 6-day **bias**"; and the alternative is self-referential in the limit (its
+`that` contains a `that`).
+
+It is **not** a cosmetic difference, which is why it was measured rather than
+waved through. On the 1,500-bar walk, over the 1,478 bars both define:
+
+| | shipped reading | rejected reading |
+|---|---|---|
+| bit-equal bars | — | **0** |
+| max \|diff\| | — | **0.02137858239070601** |
+| Spearman ρ | — | **0.131234** |
+
+The shipped column's own full range is `[-0.01020038, 0.01319801]`, i.e. a span
+of 0.02339839, so the maximum disagreement (0.02137858) is **1.62× the column's
+largest magnitude and 91% of its full span** — the two readings are different
+indicators, not two spellings of one.
+`tests/test_g191_022.py::test_the_rejected_reading_of_the_back_reference_is_a_different_column`
+pins all three numbers.
+
+### The fork's `min_periods` is a convention, not the source's
+
+The prototype's own `sma` omits `min_periods` (`ind_screen.py:59`); this fork's
+sibling GTJA ports spell the identical operator with `min_periods=n`
+(`pandas_ta/volatility/g191_109.py:101`, `g191_152.py:144`, both read in this
+session), and this port
+follows the fork. Measured consequence on the 1,500-bar walk, so the warm-up is
+not credited to the source:
+
+* with `min_periods=12` (shipped): **1,481** non-NaN, first fire bar **19**;
+* without it (the prototype's own spelling): **1,492** non-NaN, first fire bar
+  **8**;
+* on the **1,481** bars both define: `max |diff| = 0.0`, **bit-equal on all
+  1,481**.
+
+So the fork's convention masks 11 extra bars and changes no value.
+`test_the_forks_min_periods_only_masks_bars_it_does_not_change_them` pins it.
+
+### The shipped `bias` is the same inner term, in the other spelling
+
+`pandas_ta.momentum.bias` at `length=6, mamode="sma"` computes
+`(close / SMA(close,6)) - 1` — the same mathematical quantity as
+`(C - MEAN(C,6)) / MEAN(C,6)`. This port spells the SOURCE's subtraction form,
+because Gate A is settled bit-for-bit against the prototype and the prototype
+subtracts. The two spellings differ in float64, measured on the 1,500-bar walk:
+
+| comparison | n | max \|diff\| | bit-equal | max \|rel diff\| |
+|---|---|---|---|---|
+| inner term vs `BIAS_SMA_6` | 1,495 | 1.11e-16 | **26** of 1,495 | 3.50e-11 |
+| whole column vs the column rebuilt on `BIAS_SMA_6` | 1,481 | 2.78e-17 | 49 of 1,481 | — |
+
+Spearman between the column and the `bias`-built version is **1.0** (printed as
+`1.00000000`). So the spelling is a float-rounding detail, not a different
+indicator — and the port is the spelling that matches the prototype bit-for-bit.
+`test_the_inner_term_is_the_shipped_bias_to_float_tolerance` pins it.
+
+### What it measures
+
+`bias` is where today's close sits relative to its own 6-bar mean, as a fraction
+of that mean. `change = bias - DELAY(bias,3)` is how far that lead/lag moved in
+three bars — the first difference of a mean-reversion gap, i.e. an
+acceleration-like quantity. The final GTJA `SMA` (`alpha = 1/12`) smooths it.
+What the column adds over the shipped `bias` is exactly that differencing and
+smoothing; how much overlap remains against the engine's comparators is Gate E's
+question, and Gate E is pending.
+
+## Gates
+
+| Gate | Result | Evidence |
+|---|---|---|
+| A Correctness | derived from the issue's own stated formula with the one `that` reading fixed and disclosed above, then matched against the prototype BIT-FOR-BIT | A hand-derived 8-bar example at `bias_length=2, delay_length=1, smooth_length=2, smooth_weight=1` with every bar's arithmetic written out (including the `adjust=False` seeding: the recursion starts AT its first valid input, which `min_periods` then masks): column `[nan, nan, nan, -0.045548654244306416, 0.04063146997929607, -0.0028324131585001112, -0.03845324361628709, 0.035006182424660685]`. An independent per-bar replay at the shipped defaults (plain Python loop over numpy scalars — no `.rolling()`, no `.shift()`, no `.ewm()`) on a 900-bar frame: bar 19 `module=-0.009856101951829276` / `loop=-0.009856101951829295`, bar 300 `-0.0012465408500817363` / `-0.0012465408500817547`, bar 600 `0.004575053647730131` / `0.004575053647730138`, bar 899 `0.0039009482213807596` / `0.00390094822138076` — agreement to **2e-17 absolute**, not bit-for-bit, because pandas sums the rolling window and runs the recursion in a different order. The retyped prototype expression in the fork's spelling: same NaN mask, `max\|diff\| = 0.0`, **bit-equal on all 1,481** firing bars. The REAL candidate loaded out of `docs/issues/screen/ind_screen.py` through its own registry (present in this worktree, gitignored so the test may not depend on it): port vs candidate `max\|diff\| = 0.0`, bit-equal on all 1,481 shared bars; retyped vs candidate bit-equal on all **1,492** bars, so the retyping hides no slip |
+| B Causality | pass | Future-perturbation sweep (`close` rewritten from `j` onward with another walk), **37** offsets past the 19-bar warm-up: real module **0 of 37** leaks. Three mutants (`importlib` source read, `exec`'d in memory), each shown live different from the real module, then caught **37 of 37**: the final write index shifted `smooth_length=12` bars into the future; `rolling(bias_length, center=True)` in place of the causal trailing mean (the `bos` look-ahead bug class CLAUDE.md documents); and `bias.shift(-delay_length)` in place of the backward `DELAY` — this formula's own most plausible sign slip |
+| C Reachability | pass on synthetic; real-data counts owed to the Gate E run | SYNTHETIC: 1,500-bar close-only lognormal walk (seed 11, σ 0.015; `docs/measure_g191_022.py:_walk`), shipped defaults: **1,481 of 1,500** bars non-NaN (98.73%) — exactly `n - 19` — first valid at bar **19**, the structural warm-up boundary (`min_length - 1`). **1,481 distinct values** (every firing bar distinct). Range `[-0.01020038, 0.01319801]`, median `0.00006976`, **749 positive / 732 negative / 0 exactly zero**. REAL DATA: not available in this session (no `../Backtesting` access); the pooled non-NaN / non-zero counts come with the launcher's Gate E run and belong in the receipt session |
+| D Scale-free | pass | A rolling mean is linear, so `close -> k*close` sends `bias` to `(k*C - k*mean)/(k*mean) = bias` — the `k` cancels exactly for any positive `k`, and everything downstream is built from `bias` alone. Measured on the 1,500-bar walk: PRICE ×8/×64 **bit-identical** (`max\|diff\| = 0.0`, bit-equal on all 1,481 bars); ×10/×3.7 within float64 rounding (**8.33e-17 / 5.81e-17**); NaN masks matching at all four multipliers; and **0 bars change sign** at each of the four (printed by the measure script as `sign-changed bars=0`) — informative at ×10/×3.7 only, since ×8/×64 reproduce the bits exactly and make the sign check vacuous there. The column is signed, so a sign flip would break it even at unchanged magnitude. `0 < 1481 fires < 1500` and **1,481 > 1** distinct values rule out a constant column. Volume is not an input, so there is nothing to rescale on that side |
+| E Attribution | **Gate E: pending, run by issue-solver after this session** | Not run here (this session may not read `../Backtesting`). `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails in this worktree while the row is owed — expected, per CLAUDE.md "Owed, not failed, on the way to `dev`". The receipt session records the row with `python docs/gate_e_ledger.py record <run dir> --measured <date>` |
+| F Suites | this repo only; the parent repo (`Backtesting`) is run by the launcher in clean worktrees | `python -m pytest -q` (this session): see the run below |
+
+## Gate E: pending, run by issue-solver after this session
+
+No Gate E number in this file is this port's. For context only — and it is the
+PROTOTYPE's, not the port's — issue #82 reports the prototype at max |ρ|
+**0.8842** vs `smi_SMIo_5_20_5` (manifest, n = 397,158) with a top-5 per-frame
+max median of 0.8861 → DISCLOSE_GAP, next comparators `Dist_to_hma_pct` 0.8602
+and `Dist_to_hma_pct_Pctl` 0.8461, plus a stage-2 fork overlap of 0.8898 vs
+`smi:SMIo_5_20_5` over 12 frames **with a per-frame max median of 0.8900** —
+**0.0100** under the 0.90 per-frame strike line (and 0.0002 above its own
+pooled 0.8898) — the closest real-tape number in this issue's evidence to a
+strike, since CLAUDE.md strikes on a top-5 comparator's per-frame median
+≥ 0.90 and not on the pooled value alone. Gate A above measures the port
+bit-identical to that prototype on every bar they share, which is a reason to
+EXPECT a similar number and not a substitute for measuring it: the band (SHIP /
+DISCLOSE / DISCLOSE_GAP / STRUCK) is decided by the launcher's run on the 89
+frozen ALTPORT-1 frames against the 687 comparators. If that run comes back
+STRUCK, the column is reverted (or waived) and this file stays as the receipt.
+
+**And one synthetic number says the strike line is genuinely in play:** on this
+session's 1,500-bar walk the column measures Spearman **0.9116** against
+`smi:SMIo_5_20_5` — the same comparator, above the 0.90 line, on a frame that is
+not Gate E's. See the non-redundancy section below for what does and does not
+follow from that.
+
+## Non-redundancy on a synthetic frame — NOT Gate E
+
+Spearman ρ of `G191_022_6_3_12_1` against the nearest shipped columns, on the
+1,500-bar walk with a synthetic OHLCV frame wrapped around it
+(`python docs/measure_g191_022.py`). These are fork columns on a synthetic
+frame, not the engine's 687 comparators on real frames, so they bound nothing
+about Gate E's verdict:
+
+| comparator | ρ | n |
+|---|---|---|
+| `smi:SMIo_5_20_5` (the issue's Gate E top comparator for the prototype) | **0.911597** | 1,481 |
+| `bias:BIAS_SMA_6` (the inner term itself) | **0.808845** | 1,481 |
+| `roc:ROC_10` | 0.440859 | 1,481 |
+| the UNSMOOTHED `bias - bias.shift(3)` | 0.395114 | 1,481 |
+| `cmo:CMO_14` | 0.371478 | 1,481 |
+| `rsi:RSI_14` | 0.371478 | 1,481 |
+| `bias:BIAS_SMA_26` (the shipped default) | 0.337055 | 1,475 |
+| `g191_167:G191_167_12` | 0.289808 | 1,481 |
+| `g191_129:G191_129_12` | -0.280635 | 1,481 |
+| `slope:SLOPE_1` | 0.270294 | 1,481 |
+| `smi:SMI_5_20_5` (the same indicator's first line) | 0.232162 | 1,481 |
+| `ppo:PPO_12_26_9` | -0.206086 | 1,475 |
+| `g191_002:G191_002_1` | -0.017952 | 1,481 |
+
+Three of these deserve a sentence rather than a row:
+
+* **`SMIo_5_20_5` at 0.9116 is ABOVE the 0.90 strike line on this frame**, and
+  it is the exact column issue #82 measured the PROTOTYPE against on real data,
+  where it came in at 0.8842 pooled / 0.8861 per-frame max median
+  (DISCLOSE_GAP). So the synthetic frame reads ~0.027 higher than the real
+  tape did for the same pair. Two facts bound what that means and neither
+  dismisses it: (i) this is a 1,500-bar i.i.d.-lognormal walk, not the 89 frozen
+  ALTPORT-1 frames, and Gate E's bands are defined only on the latter
+  (`g191_003` is the precedent: `kdj:J_9_3` measured 0.906 synthetic and 0.831
+  on the real frames); (ii) the port is bit-identical to the prototype on every
+  bar they share (Gate A), so the prototype's own 0.8842 is the better prior for
+  the port's real-data number than this 0.9116 is. The launcher's run settles
+  it, and if it comes back ≥ 0.90 the column is reverted (or waived) with this
+  file as the receipt. The column is selected BY NAME in the measure script
+  (`df.ta.smi()["SMIo_5_20_5"]`) rather than positionally, because `df.ta.smi()`
+  returns three columns and `iloc[:, 0]` would quietly measure `SMI_5_20_5` —
+  which sits at 0.2322 and would have flattered this table.
+* **`BIAS_SMA_6` at 0.8088 is the structural one**, and it is the column this
+  port is built out of. On this frame the smoothed 3-bar difference still tracks
+  the level it differences — below the 0.90 strike line, but inside the
+  DISCLOSE_GAP band were this Gate E, which it is not. Whether `bias` at
+  `length=6` is even among the engine's 687 comparators is not known in this
+  session.
+* **The unsmoothed change, at 0.3951, is the LOWER correlation** — the final
+  `SMA` does not merely de-noise the difference, it changes what the column
+  ranks like. `rsi:RSI_14` and `cmo:CMO_14` tie at 0.371478 because `CMO = 2·RSI
+  − 100` is monotone in `RSI`, so Spearman cannot tell them apart; that is a
+  property of the comparators, not of this column.
+
+## Wiring
+
+`Category` **315 → 316** (`momentum` **80 → 81**); dictionary probe **317 → 318**
+indicators, `df.ta.<name>()` accessors **323 → 324** (both counts re-emitted by
+`python docs/gen_indicator_dictionary.py`). Touch points:
+`pandas_ta/momentum/g191_022.py` (module), `pandas_ta/momentum/__init__.py`
+(export), `pandas_ta/__init__.py` → `Category["momentum"]` (discovery),
+`pandas_ta/core.py` → `AnalysisIndicators.g191_022` (accessor),
+`tests/test_g191_022.py` (tests). `README.md`'s headline and `momentum (81)`
+row, and `docs/IndicatorDictionary.md` (regenerated), both updated and checked
+by `tests/test_readme_counts.py`. `docs/MLCompanionContract.md`'s running tag
+count updated **660 → 661 / 303 → 304 `SF`** (`G191_022_6_3_12_1` probes cleanly
+at the dictionary's synthetic frame with a 19-bar warm-up and takes many
+distinct values, so the generator tags it `SF`), checked by
+`tests/test_ml_companions.py::test_the_contract_quotes_the_dictionarys_actual_ml_form_counts`.
+`tests/test_altport2_ports.py`'s `CATEGORY_TOTAL` updated to match (315 → 316);
+no `CATEGORY_BUCKETS` entry needed (that dict tracks only
+`trend`/`volatility`/`volume`, not `momentum`).
+
+`docs/gate_e_ledger.csv` is **not** touched here: the run that would feed its
+row is the launcher's.
+
+## NaN handling, measured because it is counter-intuitive
+
+A single NaN in `close` empties `bias_length = 6` bars of the mean and
+`bias_length + delay_length = 9` bars of `change`, but pandas' `ewm` SKIPS a NaN
+input (carrying its previous value forward) instead of emptying its output. So
+on the 1,500-bar walk with `close[700] = NaN`: **no output bar changes
+NaN-ness**, and **448** of the 1,481 firing bars move — from bar **700** to bar
+**1,147**, past which the displacement falls below float64 resolution. Pinned by
+`test_a_single_nan_close_empties_no_output_bar_but_displaces_many`. Nothing is
+guarded: a NaN close is not a bar this fork models, and the prototype does not
+guard it either.
+
+## Review record
+
+Four `/brutally-honest-review` rounds (the owner's cap; BHR's own cap is 3),
+all four **REVISE**: **17 findings** — 1 CRITICAL, 6 MAJOR, 4 MINOR, 6 NIT
+(round 1: 3 MAJOR + 2 MINOR + 1 NIT; round 2: 1 MAJOR + 2 MINOR + 1 NIT;
+round 3: 1 CRITICAL + 1 MAJOR + 2 NIT; round 4: 1 MAJOR + 2 NIT), counted
+from the four verdicts in the log rather than estimated.
+Full verdicts and the fix-by-fix log:
+`docs/reviews/auto-2026-11-11-g191-022/01-g191-022.md`.
+
+**Not one finding was a mathematics error.** Every round re-ran the measure
+script and the suites and reproduced every number; what failed, four times
+running, was prose attached to a correct computation — a subtraction never
+done ("larger than the column's entire range"; "0.0002 under the strike
+line" when 0.90 − 0.8900 = 0.0100), citations never opened (`wilder_rma`'s
+non-existent `min_periods`, twice), unmeasurable universals ("GTJA's `m` is
+always…", "every other `g191_*` port"), and one over-broad guard claim
+("any `m > smooth_length` raises", false at `12 ≤ m < 13`).
+
+Two findings changed the delivery rather than its wording: the `smi`
+comparator was being selected positionally, so the issue's own Gate E top
+comparator was never measured (fixing it produced the 0.9116 above), and the
+`smooth_weight` band at `alpha = 1.0` silently disables the smoother (now two
+tests and the table below).
+
+⚠ **Round 4's fixes landed with the cap spent and were NOT re-reviewed:** the
+three-band `smooth_weight` note and its two tests, the reflowed Gate E
+paragraph, the `pandas_ta/volatility/g191_109.py:101` citation, this section,
+the table below, and the test/suite counts that moved with them (26 → 29
+tests, 5,291 → 5,294 passed). Everything in that list was measured in this
+session; none of it has been through the gate.
+
+## The `smooth_weight` guard's three bands, measured
+
+`m` is cast with `int()` and nothing validates `alpha = m/n`, so the one
+tunable with no measured value besides its default has three behaviours, all
+three now pinned (the guard itself is left sibling-consistent with `g191_152`
+rather than widened — the narrower change, logged as an assumption):
+
+| `smooth_weight` | `alpha = int(m)/12` | what happens |
+|---|---|---|
+| `0.5` | 0.0 | pandas' `ewm` raises `ValueError` |
+| `12`, `12.5` | **1.0** | **accepted** — no smoothing at all: the column equals the raw 3-bar change bit-for-bit on all 381 firing bars of a 400-bar frame, named `G191_022_6_3_12_12` |
+| `13`, `20` | 13/12, 5/3 | pandas' `ewm` raises `ValueError` |
+
+The middle row is why the public docstring does not promise an exception for
+"any `m > smooth_length`": an earlier draft did, and
+`test_a_weight_of_alpha_one_silently_disables_the_smoother` is what
+disproved it.
+
+## Suite run (this repo)
+
+`python -m pytest -q -p no:warnings --tb=no -rf`, full suite, default collection
+order: **3 failed, 5294 passed, 83 skipped** (106.56s) — re-run after the last
+review round, so the count includes this port's 29 tests.
+
+* `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+  — "no Gate E ledger row for `['g191_022', 'mtd_ret']`". EXPECTED: Gate E is
+  the launcher's run (`mtd_ret` pre-dates this issue). CI into `dev` sets
+  `GATE_E_PENDING_OK=1` and skips it; a local run fails it.
+* `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
+  — needs the sibling `../AlternativeRepos` checkout, absent in this worktree
+  (CLAUDE.md "Known breaks"; CI deselects it).
+* `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
+  — the untracked `docs/pine/` corpus (CLAUDE.md "Known breaks").
+
+No other test fails. The pre-port baseline was not re-run in this session, so
+the passed count is reported as measured rather than decomposed into "this
+port's 29 tests plus X".
