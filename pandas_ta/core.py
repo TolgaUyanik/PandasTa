@@ -1113,6 +1113,15 @@ class AnalysisIndicators(BasePandasObject):
                            offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def g191_022(self, bias_length=None, delay_length=None, smooth_length=None,
+                 smooth_weight=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_022(close=close, bias_length=bias_length,
+                           delay_length=delay_length,
+                           smooth_length=smooth_length,
+                           smooth_weight=smooth_weight, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def g191_093(self, length=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         low = self._get_column(kwargs.pop("low", "low"))
