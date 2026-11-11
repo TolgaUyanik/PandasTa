@@ -18,6 +18,7 @@ from .g191_076 import g191_076
 from .g191_080 import g191_080
 from .g191_111 import g191_111
 from .g191_144 import g191_144
+from .g191_145 import g191_145
 from .g191_191 import g191_191
 from .kvo import kvo
 from .maxvol_adv import maxvol_adv
