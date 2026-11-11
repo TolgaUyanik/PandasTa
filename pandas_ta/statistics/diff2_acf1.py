@@ -113,11 +113,12 @@ Source: Kats tsfeatures (Meta, MIT), `get_acfpacf_features` ->
 `diff2y_acf1` (`kats/tsfeatures/tsfeatures.py` L1049-1151, L973-975 at
 commit a6b7e88): `acf(diff2x, fft=True, nlags=nlag)[1:][0]` with
 `diff2x = diff(diff(x))`, after Hyndman's tsfeatures `diff2_acf1`.
-statsmodels 0.15.0 `tsa/stattools.py`: `acf` L847-1060 (acovf / acovf[0]),
-`acovf` L488-623 (demeaned once, divisor n). Kats applies it to a whole
-series; the 100-bar window and log close as the input are the choices of
-the 2026-10-25 screen prototype (candidate kats_diff2_acf1_100,
-docs/issues/screen/ind_screen_r5.py, local to the owner's machine).
+statsmodels 0.15.0 `tsa/stattools/_stattools.py`: `acf` L847-1060
+(acovf / acovf[0]), `acovf` L488-623 (demeaned once, divisor n). Kats
+applies it to a whole series; the 100-bar window and log close as the
+input are the choices of the 2026-10-25 screen prototype (candidate
+kats_diff2_acf1_100, docs/issues/screen/ind_screen_r5.py, local to the
+owner's machine).
 PandasTa issue #153.
 
 Only the `diff2y_acf1` lines are ported. The same Kats function also

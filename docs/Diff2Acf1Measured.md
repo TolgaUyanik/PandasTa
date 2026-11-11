@@ -15,8 +15,8 @@ diff2y_acf_list = acf(diff2x, fft=True, nlags=nlag)[1:]                 # L1105
 diff2y_acf1 = diff2y_acf_list[0]                                        # L975
 ```
 
-- `acf` is `statsmodels.tsa.stattools.acf` (0.15.0, `tsa/stattools.py` L847–1060). It
-  returns `acovf[:nlags + 1] / acovf[0]`.
+- `acf` is `statsmodels.tsa.stattools.acf` (0.15.0,
+  `tsa/stattools/_stattools.py` L847–1060). It returns `acovf[:nlags + 1] / acovf[0]`.
 - `acovf` (L488–623) demeans the series once by its full mean and divides every lag by
   n.
 - So the value is `sum(x[t] * x[t-1]) / sum(x²)` on the demeaned twice-differenced
