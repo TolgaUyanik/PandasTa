@@ -26,6 +26,7 @@ from .ewmac import ewmac
 from .fisher import fisher
 from .g191_002 import g191_002
 from .g191_003 import g191_003
+from .g191_055 import g191_055
 from .g191_093 import g191_093
 from .g191_129 import g191_129
 from .g191_146 import g191_146
