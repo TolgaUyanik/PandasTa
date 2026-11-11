@@ -2653,6 +2653,13 @@ class AnalysisIndicators(BasePandasObject):
                            smooth_weight=smooth_weight, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def g191_188(self, smooth_length=None, smooth_weight=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        result = g191_188(high=high, low=low, smooth_length=smooth_length,
+                           smooth_weight=smooth_weight, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def garman_klass(self, length=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         high = self._get_column(kwargs.pop("high", "high"))
