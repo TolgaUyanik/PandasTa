@@ -205,6 +205,10 @@ def semantics():
         ys.append(v[m])
     print(f"Spearman vs the window's lag-1 return autocorrelation (30 paths, phi -0.3 / 0 / +0.3, "
           f"every 10th bar): {spearmanr(np.concatenate(xs), np.concatenate(ys))[0]:.3f}")
+    # the 8 paths the tests pool (seeds 500..507, 600 bars, every bar)
+    for phi in (-0.3, 0.0, 0.6, 0.9):
+        v = np.concatenate([fz(ar1(600, 500 + i, phi)).dropna().to_numpy() for i in range(8)])
+        print(f"test paths, phi = {phi:+.1f}: median {np.median(v):.0f}")
     # persistence of the column itself
     v = fz(ar1(5000, 99, 0.0)).to_numpy()[100:]
     print(f"iid, 4900 bars: the value changes on {np.mean(v[1:] != v[:-1]):.3f} of bars; "
@@ -216,6 +220,21 @@ def sentinel():
     c = np.r_[np.full(150, 100.0), np.full(150, 101.0)]
     o = fz(Series(c)).to_numpy()
     print(f"flat, one step at bar 150: bars 150..249 read {np.unique(o[150:250]).astype(int).tolist()}")
+    # why: the sign pattern of a single move at each position p of n returns
+    for n in (5, 20, 100, 252):
+        ok = True
+        for p in range(n):
+            x = np.zeros(n)
+            x[p] = 0.01
+            x = x - x.mean()
+            ac = np.array([np.dot(x[k:], x[:-k]) for k in range(1, n)]) / np.dot(x, x)
+            k = np.arange(1, n)
+            neg = k <= max(p, n - 1 - p)
+            ok &= bool((ac[neg] < 0).all() and (ac[~neg] > 0).all())
+            hit = (ac[:-1] > 0) & (ac[1:] < 0)
+            ok &= not hit.any()
+        print(f"one move at every position of {n} returns: negative exactly for k <= max(p, n - 1 - p), "
+              f"positive beyond, no positive-to-negative pair: {ok}")
     rng = np.random.default_rng(5)
     for p_move in (0.5, 0.2, 0.05, 0.02):
         cnt = n = 0

@@ -127,11 +127,15 @@ how long returns stay positively autocorrelated. Sine returns of period P
 read about the first lag above P / 4 (P = 22 reads 6). AR(1) returns read a
 median of 14 at phi = 0.9 and 6 at phi = 0.6, but 3 at phi = 0.3, 0 and
 -0.3: below strong persistence it does not order the autocorrelation, and its
-Spearman with the window's lag-1 return autocorrelation is 0.02. For iid
+Spearman with the window's lag-1 return autocorrelation is 0.02 (phi -0.3 /
+0 / +0.3, synthetic). For iid
 returns its p10 to p90 is 2 to 7, and it changes on about 1 bar in 9.
 
-A window whose returns are zero except for one move has no crossing (every
-autocorrelation is negative), so it reads `length`. On returns that move
+A window whose returns are zero except for one move has no crossing, so it
+reads `length`: demeaned, the lags that pair the move with another bar have
+negative autocorrelation and the lags too long to reach it have positive, so
+the sign runs negative then positive, never positive then negative (docs/
+FirstzeroAcMeasured.md, "The `length` sentinel"). On returns that move
 on only 2% of bars, 36% of the bars that fire read `length`; at 5%, 3%.
 
 Source: Kats tsfeatures (Meta, MIT), `get_special_ac` -> `firstzero_ac`
@@ -142,8 +146,10 @@ a6b7e88): `AC = acf(x, fft=True, nlags=len(x))[1:]`, then
 (`avf[: nlags + 1] / avf[0]`, L1013; `nlags = len(x)` is truncated to the
 len(x) - 1 lags `acovf` returns), `acovf` L488 (demeaned once, divisor n,
 FFT padded to `_next_regular(2n + 1)`, L609-613). The module repeats that
-FFT, so its autocorrelations are statsmodels' to rounding and the signs
-Kats compares are the same. Kats applies it to a whole series; the 100-bar
+FFT; its autocorrelations agree with statsmodels' to 2.2e-16, and the signs
+Kats compares matched on all 20,138 windows compared in Gate A. An
+autocorrelation within rounding of 0 could still differ in sign. Kats
+applies it to a whole series; the 100-bar
 window and one-bar returns as the input are the choices of the 2026-10-25
 screen prototype (candidate kats_firstzero_ac_100,
 docs/issues/screen/ind_screen_r5.py, local to the owner's machine).

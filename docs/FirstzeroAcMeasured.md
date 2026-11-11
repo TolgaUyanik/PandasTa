@@ -46,6 +46,11 @@ port. From 3 points on, `length` (no crossing) cannot be confused with a crossin
   Gate F that runs here.
 - Gate C has synthetic counts only, and Gate E is owed. Both need the BIST frames and the
   private Backtesting repo, which the contributor's machine does not have.
+- **Review round 1** (2026-11-11, REVISE: 1 MAJOR, 5 MINOR, 4 NIT) is fixed here. The MAJOR:
+  this text said a single move makes "every autocorrelation negative". That is false for a
+  move inside the window; the value is still `length`, for the reason now given under
+  "The `length` sentinel". The square-overflow test did not reach the `r * r` mask; it does
+  now. The rest were wording and numbers.
 - Two findings are the owner's to weigh: the `length` sentinel on sparse returns, and the
   column's tag, `ORD` rather than `SF` (see "For the owner").
 
@@ -62,13 +67,15 @@ given with each block. Synthetic data only.
 ## Window
 
 Bar T reads closes T − length .. T: `length` one-bar returns `c / c1 − 1`, the convention
-of `arch_lm` (#154) and `lumpiness` (#156), the two other Kats return features. The first
-value is at bar `length` (bar 100 at the default). Returns are price ratios, so a ×2^k
+of `arch_lm` (issue #154) and `lumpiness` (issue #156), Kats return ports still in review.
+`diff2_acf1` (issue #153), also in review, reads `length` closes instead. None of the three
+is on `dev` yet. The first value is at bar `length` (bar 100 at the default). Returns are price ratios, so a ×2^k
 rescale is exact.
 
 The module repeats statsmodels' FFT (same padding, transform and divisor) on each chunk of
-windows at once, rather than calling `acf` per window. The signs Kats compares come out the
-same (Gate A).
+windows at once, rather than calling `acf` per window. Its autocorrelations agree with
+statsmodels' to 2.2e-16, and the signs Kats compares matched on all 20,138 windows Gate A
+compared. An autocorrelation within rounding of 0 could still differ in sign.
 
 ## Gate A — correctness (`gate_a`)
 
@@ -101,8 +108,9 @@ In the tests: the Kats lines at lengths 5, 10 and 100 and the `_next_regular` co
 in CI; and three closed forms:
 - alternating returns read 3;
 - sine returns of period 10 and 22 read 3 and 6 at every bar;
-- one step in a flat price reads `length` on the 100 windows holding it (demeaned,
-  AC(k) = −k / (n − 1) × a positive factor: all negative, so no crossing).
+- one step in a flat price reads `length` on the 100 windows holding it, wherever the
+  step sits (why: "The `length` sentinel"). The test also checks the sign pattern with
+  the step mid-window: lags 1 .. 50 negative, 51 .. 99 positive.
 
 ## The rounding guard (`guard`)
 
@@ -124,13 +132,14 @@ the size of r, so the floor is too. This is the guard `lumpiness` (#156) uses.
 | 1.1^t | 0 | 200 | 2 .. 9 | 0.38 |
 | flat 10.0, one-ulp jitter | 0 | 200 | 3, 4, 5, 6 | 0.79 |
 
-- Unguarded, rounding noise reads 2 to 9: the ordinary range of the column, so it cannot
-  be told from a real reading.
+- Unguarded, rounding noise reads 2 to 9, the ordinary range of the column, so it cannot
+  be told from a real reading; or `length` (100), on the 1e-10 drift.
 - Real variation clears the floor by a wide margin: iid returns of sd 1e-13 sit at 393
   units or more and fire on 200 of 200 bars; sd 1e-12, at 3811 or more.
-- The headroom is therefore 5.69 below the floor (the steepest noise measured) and 393
-  above it (the smallest real series measured). Swapping the constant in the module shows
-  the tests bound it from both sides:
+- Noise reaches at most 5.69 units (the steep exponential) and the smallest real series
+  measured sits at 393, against a floor of 64: about 11× margin on the noise side and 6×
+  on the real side. Swapping the constant in the module shows the tests bound it from
+  both sides:
   - with no guard, 7 of the 10 guard and flat-price tests fail;
   - with a floor of 2, `test_a_steep_exponential_is_nan` fails;
   - with a floor of 1000 or 1e4, `test_the_guard_keeps_very_small_real_returns` fails.
@@ -153,7 +162,9 @@ the size of r, so the floor is too. This is the guard `lumpiness` (#156) uses.
 
 - **It reads strong persistence, not autocorrelation in general.** φ = 0.9 reads later
   lags than 0.6, and 0.6 later than iid. Below that the medians are 3 or 4 whatever the
-  sign of φ. Against the window's own lag-1 return autocorrelation the Spearman is 0.022
+  sign of φ. On the 8 paths the tests pool (seeds 500 .. 507, 600 bars) the medians are
+  3 / 4 / 6 / 14 at φ = −0.3 / 0 / 0.6 / 0.9. Against the window's own lag-1 return
+  autocorrelation the Spearman is 0.022
   (30 paths, φ = −0.3 / 0 / +0.3, every 10th bar).
 - **It reads cycle length.** Returns `0.01 sin(2πk / P)` read about the first lag above P / 4: P = 10
   reads 3, P = 22 reads 6, P = 40 reads 10 or 11, P = 70 reads 17 to 20. P = 40 plus iid
@@ -166,9 +177,20 @@ the size of r, so the floor is too. This is the guard `lumpiness` (#156) uses.
 ## The `length` sentinel (`sentinel`)
 
 With no positive-to-negative pair the value is `length`. On ordinary returns this does not
-happen: 0 of the bars above read 100. A window whose returns are zero except for one move
-has every autocorrelation negative, so it always reads `length`. On sparse returns that is
-common:
+happen: 0 of the bars above read 100.
+
+A window whose returns are zero except for one move always reads `length`, wherever the move
+sits:
+- Demeaned, with the move at position p of n returns, AC(k) = (n − k − c·n) / (n(n − 1)),
+  where c is the number of lag-k pairs that include the move.
+- So AC(k) is negative while k ≤ max(p, n − 1 − p) and positive beyond. The sign runs
+  negative then positive, never positive then negative, and Kats' loop runs out.
+- It is not "every autocorrelation negative". That holds only for a move at either end of
+  the window. With the move mid-window about half the lags are positive.
+- Checked at every position of n = 5, 20, 100 and 252 returns: negative exactly for
+  k ≤ max(p, n − 1 − p), positive beyond, and no positive-to-negative pair.
+
+On sparse returns this is common:
 
 | returns of ±1% on … of bars, 0 otherwise (20 paths × 1100 bars) | share of fired bars reading 100 |
 |---|---|
@@ -194,9 +216,9 @@ is ported as is; see "For the owner".
 
 - The path swap, which the other ports use, does not catch this mutant. The column is a
   whole number that changes on about 1 bar in 9, and the mutant's leaked bar differs from
-  the real one by a single return, which rarely moves it. A ×1000 jump makes every
-  autocorrelation of the windows holding it negative, which always moves it. The test uses
-  the jump.
+  the real one by a single return, which rarely moves it. A return of 999 dominates every
+  window holding it, and it moved the leaked bar at all 16 offsets. The test uses the
+  jump.
 - A bad tick (close × 1000 at bar 300) changes the returns at bars 300 and 301. It moves
   exactly bars 300 .. 400 (101 bars), the windows holding either return; every other bar
   is bit-identical.

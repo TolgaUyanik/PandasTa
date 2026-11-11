@@ -14,7 +14,8 @@ What these pin, in order of how much it would hurt to lose:
   1..4999. An independent loop with no FFT and no module code runs
   everywhere. Closed forms: alternating returns read 3; sine returns of
   period 22 read 6; one price jump in a flat window reads `length`
-  (every autocorrelation is negative, so there is no crossing).
+  wherever the jump sits (the sign of the autocorrelation runs negative
+  then positive, so there is no positive-to-negative crossing).
 * SEMANTICS: it reads how long returns stay positively autocorrelated.
   AR(1) at phi = 0.9 reads later lags than at 0.6, and 0.6 later than
   iid. It is not monotone in phi below that: phi = -0.3 and iid both read
@@ -29,9 +30,9 @@ What these pin, in order of how much it would hurt to lose:
   another path from the offset on, as the other ports do, does NOT catch
   this mutant (0 of 16, measured): the column is a whole number that
   changes on about 1 bar in 9, and one changed return rarely moves it. A
-  jump makes every autocorrelation of the windows holding it negative,
-  which always moves it. A bad tick moves exactly the 101 bars whose
-  window holds one of its two returns.
+  return of 999 dominates every window holding it, and moved the column
+  at all 16 offsets (measured). A bad tick moves exactly the 101 bars
+  whose window holds one of its two returns.
 * SCALE-FREE: x8/x64 and x10/x3.7 equal value for value on this frame,
   and the column fires and is not constant.
 * Edge cases (flat, bad closes including subnormal and infinite ones, a
@@ -145,17 +146,26 @@ def test_sine_returns_read_about_a_quarter_period(period, lag):
 
 
 def test_one_jump_in_a_flat_window_reads_length():
-    """Flat at 100, one step to 101 at bar 150, flat again. A window whose
-    only non-zero return is that step has every autocorrelation negative
-    (demeaned, AC(k) = -k / (n - 1) times a positive factor), so there is
-    no positive-to-negative crossing and Kats' loop runs out: `length`.
-    Windows of only zero returns are NaN (the guard)."""
+    """Flat at 100, one step to 101 at bar 150, flat again. The windows
+    ending at bars 150..249 hold the step at every position. Demeaned, with
+    the step at position p of n returns, AC(k) = (n - k - c n) / (n (n - 1))
+    where c is the number of lag-k pairs that include the step: negative
+    while k <= max(p, n - 1 - p), positive beyond. The sign runs negative
+    then positive, never positive then negative, so Kats' loop runs out:
+    `length`. Windows of only zero returns are NaN (the guard)."""
     c = np.r_[np.full(150, 100.0), np.full(150, 101.0)]
     out = firstzero_ac(Series(c))
     assert out.iloc[:150].isna().all()
     assert (out.iloc[150:250] == 100).all()
     assert out.iloc[250:].isna().all()
     assert (firstzero_ac(Series(c), length=20).iloc[150:170] == 20).all()
+    # the step mid-window (bar 199 reads the returns at bars 100..199; the
+    # step, the return at bar 150, sits at position 50): lags 1..50 are
+    # negative and 51..99 positive, as stated
+    r = np.diff(c)[99:199] / c[99:199]
+    x = r - r.mean()
+    ac = np.array([np.dot(x[k:], x[:-k]) for k in range(1, 100)]) / np.dot(x, x)
+    assert (ac[:50] < 0).all() and (ac[50:] > 0).all()
 
 
 # --------------------------------------------------------------- semantics
@@ -178,9 +188,11 @@ def test_negative_autocorrelation_reads_like_iid():
     """phi = -0.3: AC(1) < 0, AC(2) > 0, AC(3) < 0 most of the time, so
     it reads 3, about as iid returns do. The column does not order
     negative against no autocorrelation. Medians over 40 paths: 3 and 3;
-    on these 8 paths, 3 and 4. Asserted: both within [3, 4]."""
+    on these 8 paths, 3 and 4 (docs/measure_firstzero_ac.py,
+    `semantics`). Asserted: phi = -0.3 within [3, 4], iid within [2, 4]
+    (the band of the test above), and the two within 1 of each other."""
     neg, iid = np.median(_pooled(-0.3)), np.median(_pooled(0.0))
-    assert 3 <= neg <= 4 and 3 <= iid <= 4
+    assert 3 <= neg <= 4 and 2 <= iid <= 4 and abs(neg - iid) <= 1
 
 
 # ------------------------------------------------------- the rounding guard
@@ -260,9 +272,8 @@ def test_mutant_is_caught():
 
 def test_a_bad_tick_moves_exactly_its_windows():
     """close x1000 at bar 300 changes the returns at bars 300 and 301; the
-    windows holding either end at bars 300..400. Each of them moves (the
-    spike makes their autocorrelations negative); every other bar is
-    bit-identical."""
+    windows holding either end at bars 300..400. Each of them moves
+    (measured: 101 of 101); every other bar is bit-identical."""
     close = _ar1(seed=4)
     base = firstzero_ac(close)
     bad = close.copy()
@@ -325,19 +336,20 @@ def test_a_bad_close_blanks_its_windows(bad):
 
 
 def test_a_return_whose_square_overflows_is_missing_not_inf():
-    """Closes of 1e-300 then 1e300 are normal floats, but the return
-    between them (bar 151) is 1e600, whose square overflows. It is missing:
-    the windows holding it end at bars 151..250 and are NaN, and nothing
-    raises. Bar 150 reads the return into 1e-300 (about -1), which is
-    finite, so it still fires."""
+    """Closes of 1e-150 then 1e150: the return between them (bar 151) is
+    about 1e300, finite, but its square overflows. It is missing: the
+    windows holding it end at bars 151..250 and are NaN, and nothing
+    raises. Bars 150 and 251 read only the finite returns into and out of
+    the pair (about -1 each), so they still fire. With the mask on `r`
+    alone instead of `r * r`, this test fails (checked)."""
     close = _ar1(300, seed=1)
     base = firstzero_ac(close)
     c2 = close.copy()
-    c2.iloc[150] = 1e-300
-    c2.iloc[151] = 1e300
+    c2.iloc[150] = 1e-150
+    c2.iloc[151] = 1e150
     out = firstzero_ac(c2)
     assert out.iloc[151:251].isna().all()
-    assert np.isfinite(out.iloc[150])
+    assert np.isfinite(out.iloc[150]) and np.isfinite(out.iloc[251])
     pd.testing.assert_series_equal(out.drop(range(150, 252)), base.drop(range(150, 252)))
 
 
