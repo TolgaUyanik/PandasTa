@@ -1,16 +1,20 @@
 # g191_145 — measured (issue #78)
 
-> **Status: Gates A–D cleared, wired, tests green. Gate E: pending, run by issue-solver after
-> this session. Gate F: this repo green except the pre-existing breaks listed below; the parent
-> repo is the launcher's run, not this session's.**
+> **Status: Gates A–E cleared, wired, tests green. Gate E measured 2026-11-11 by the
+> issue-solver launcher: `G191_145_9_26_12` max \|ρ\| **0.8359** vs `pvo_PVO_12_26_9`
+> (compute_all, n = 396,588), per-frame max median **0.8432** over 89 frames →
+> **DISCLOSE_GAP** — the column ships with disclosure, no strike, no waiver. Gate F: this repo
+> green except the pre-existing breaks listed below; the parent repo is the launcher's run, not
+> this session's.**
 
 Volume oscillator 9/26 over 12: Guotai Junan's (2017, "GTJA191", internal quant report; the
 issue cites the HKUDS/Vibe-Trading copy, MIT, which this session could not read — see Gate A)
 alpha `#145`, per issue #78. Module `pandas_ta/volume/g191_145.py`, column
 `G191_145_9_26_12`. Tests: `tests/test_g191_145.py` (23, all passing). Numbers below:
 `python docs/measure_g191_145.py` and `python -m pytest -q`. Four exceptions, each named where
-it appears and listed here so the sentence is not a blanket one: the Gate E row, which does not
-exist yet; the **563**-line dictionary count, which is `python docs/gen_indicator_dictionary.py`'s
+it appears and listed here so the sentence is not a blanket one: the Gate E numbers, which come
+from the launcher's own run (`gatee/is78-g191_145-88681c5e`, `overlap_max.csv` and `meta.json`)
+and not from this worktree; the **563**-line dictionary count, which is `python docs/gen_indicator_dictionary.py`'s
 own output; the **5162** suite baseline, quoted from `docs/G191040Measured.md` and not re-run
 here; and the prototype-screen figures (0.8359 / 0.8432 / 396,588 / 398,849 / 0.8165 / 0.7616),
 quoted from issue #78. Environment: this worktree's pinned pandas/numpy (2.3.3 / 1.26.4).
@@ -101,9 +105,9 @@ windows negates the column exactly, bar for bar, on 300 bars.
 |---|---|---|
 | A Correctness | pass — derived from the issue's own stated formula, using the prototype's own `mean`/`sdiv` spellings; **no** disclosed interpretation choice, because the port reproduces the prototype's own expression bit-for-bit | 7-bar hand-derived example at `fast=2, slow=4, norm=3` with the arithmetic written out per bar (`tests/test_g191_145.py::test_hand_derived_seven_bars`): `result[3..6] = [33.33333333333333, 25.0, 20.0, -12.5]`, matching the module's float64 output exactly (`python docs/measure_g191_145.py`: `hand-derived bars 0..6`). Bar 6 exercises the negative branch. Matches an independent per-bar computation built from plain numpy slicing (not the module's own `.rolling()` calls) at the shipped defaults, 3 spot-checked bars (300, 600, 899) on a 900-bar synthetic volume frame, asserted at `rel=1e-9` because they do **not** all agree bit-for-bit — the slice-sum order differs from pandas' rolling mean. Per bar, from the script: bar 300 `bit-identical=True`, `\|diff\| = 0.0`; bar 600 `bit-identical=False`, `\|diff\| = 1.15e-14`; bar 899 `bit-identical=False`, `\|diff\| = 1.42e-14` (~2e-15 relative). Full reprs: `module=11.78486842895055 loop=11.78486842895055`, `module=5.819758045630176 loop=5.819758045630188`, `module=7.084239310949412 loop=7.084239310949426`. Against the REAL prototype candidate loaded out of `ind_screen.py` on the full 1,500-bar frame: `max\|diff\| = 0.0`, NaN masks equal, 1,475 overlapping bars, `bit-identical=True` |
 | B Causality | pass | Future-perturbation sweep (volume rewritten from `j` onward with another synthetic series, seed 59), 34 offsets past the 25-bar warm-up: real module **0 of 34** leaks (`python docs/measure_g191_145.py`; the test file re-runs the same sweep on a 900-bar frame over `range(50, 900, 25)`). One mutant (`importlib` source read, `exec`'d in memory, the final write index shifted `slow = 26` bars into the future), shown live (differs from the real module) then caught at **34 of 34** |
-| C Reachability | pass on synthetic; **real data is Gate E's, not measured here** | 1,500-bar synthetic volume frame (seed 97, `rng.uniform(1e4, 1e6)`, `docs/measure_g191_145.py:_volume`), shipped defaults: **1,475 of 1,500** bars non-NaN (98.33%) — exactly `n - 25`, the `max(fast, slow, norm) - 1 = 25`-bar warm-up, with **0** interior NaN bars after the first fire. **1,475 distinct values** (not a constant column), range `[-71.518821, 41.346734]`, median `0.273379`. Both signs occur, pinned by `::test_both_signs_occur` — a one-sided column would have a dead sign half. The 900-bar frame of `::test_fires_and_is_not_constant` gives `fires == 875 == 900 - 25`, likewise with no interior gap. Real-data fire counts arrive with the launcher's Gate E run, which is also what `tests/test_gate_e_ledger.py::test_every_column_fires_on_real_data` will check |
+| C Reachability | pass on synthetic **and** on real data: Gate E's run reports `non_nan = 396,588` and `non_zero = 396,588` of the **398,849** pooled bars over 89 BIST frames — the 2,261-bar shortfall is the per-frame 25-bar warm-up (89 × 25 = 2,225) plus 36 bars, and no bar is a non-NaN zero (`overlap_max.csv`, run `is78-g191_145-88681c5e`) | 1,500-bar synthetic volume frame (seed 97, `rng.uniform(1e4, 1e6)`, `docs/measure_g191_145.py:_volume`), shipped defaults: **1,475 of 1,500** bars non-NaN (98.33%) — exactly `n - 25`, the `max(fast, slow, norm) - 1 = 25`-bar warm-up, with **0** interior NaN bars after the first fire. **1,475 distinct values** (not a constant column), range `[-71.518821, 41.346734]`, median `0.273379`. Both signs occur, pinned by `::test_both_signs_occur` — a one-sided column would have a dead sign half. The 900-bar frame of `::test_fires_and_is_not_constant` gives `fires == 875 == 900 - 25`, likewise with no interior gap. Real data: the Gate E run's own counts, quoted in the Result column, and `tests/test_gate_e_ledger.py::test_every_column_fires_on_real_data[g191_145:G191_145_9_26_12]` re-checks them off the recorded row — **passing** in this session's suite run |
 | D Scale-free | pass | Algebraically, for ANY `k > 0`: `MEAN(k*V, n) = k * MEAN(V, n)`, so `100 * (k·fast − k·slow) / (k·norm) = 100 * (fast − slow) / norm` — the `k` cancels inside the division itself, not merely at powers of two. There is **no comparison operator anywhere in the chain**, so unlike `g191_040` there is no near-tie a rescale could flip; the only residual is float64 rounding from the scalar multiply. Measured on the 1,500-bar frame: volume **×8 and ×64 bit-identical, 0.0 max\|diff\|**, NaN masks equal; **×10 and ×3.7 max\|diff\| 7.11e-14** each (`bit-identical=False`, which the script prints), well under the test's `1e-6` tolerance. **No price rescale is measured, because there is none to measure**: the function's signature is `('volume', 'fast', 'slow', 'norm', 'offset')` — the script prints it — so a price column cannot reach the result. `::test_no_price_input_so_a_price_scale_cannot_reach_the_column` asserts that signature AND drives the `df.ta` accessor on a frame whose OHLC columns are all multiplied by 7.3, where the output stays bit-identical. `0 < 1,475 fires < 1,500` and `1,475 > 1` distinct values rule out a constant column. **Zero-denominator**: see the section below |
-| E Attribution | **pending, run by issue-solver after this session** | Not run here: this session may not read or write `../Backtesting`. `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` therefore fails on `['g191_145', 'mtd_ret']` until the launcher's run is recorded — expected, and the indicator is **not** held out of `Category` to silence it. The issue's own prototype figure is quoted below as a prior, not as this port's number |
+| E Attribution | **DISCLOSE_GAP** — ships with disclosure, no strike | `G191_145_9_26_12`: pooled max \|ρ\| **0.835858534426807** vs `pvo_PVO_12_26_9` (compute_all), n = **396,588**; per-frame max median **0.8432316009538046** vs the same comparator over **89** frames, **0.0%** of frames at \|ρ\| ≥ 0.90. Manifest leg: **0.8164992072362767** vs `pvo_PVO_12_26_9_Pctl`, n = 391,337. Both the pooled and the per-frame leg land in `0.80 ≤ \|ρ\| < 0.90`, so the band is DISCLOSE_GAP under `r3-perframe-0.90`. Run `is78-g191_145-88681c5e`, measured 2026-11-11 by the launcher; ledger row in `docs/gate_e_ledger.csv`. Section below |
 | F Suites | this repo only; the parent repo (`Backtesting`) is the launcher's clean-worktree run | `python -m pytest -q` (this session): see **Suite run** below |
 
 ## Zero-denominator: three cases, all pinned, none reached by the measured frames
@@ -206,32 +210,56 @@ So on this frame neither the averaging kernel nor the denominator choice alone a
 gap. **These are synthetic numbers on one frame and they decide nothing** — real-data overlap
 against the engine's 687 comparators is Gate E's.
 
-**The strongest available prior for the band Gate E will land in is the issue's own prototype
-screen, and it is not this port's number.** Issue #78 records, for the `g191_145` prototype:
-max \|ρ\| **0.8359** vs `pvo_PVO_12_26_9` (compute_all, n = 396,588), top-5 per-frame max median
-**0.8432** → **DISCLOSE_GAP**; next comparators `pvo_PVO_12_26_9_Pctl` 0.8165 and
-`pvo_PVO_12_26_9_State` 0.7616; run `screen_20261024`, 89 ALTPORT-1 frames, 398,849 bars,
-329 + 358 comparators, canary bit-equal. A prototype is not a port — the issue says so itself —
-but here the port reproduces the prototype's expression bit-for-bit on a 1,500-bar frame (Gate A
-above), so unlike `g191_040` there is no known behavioural difference that would move the
-figure. **DISCLOSE_GAP (0.80 ≤ \|ρ\| < 0.90) is therefore the band to expect**: the column
-ships with disclosure rather than being struck. If the launcher's run lands ≥ 0.90 on either
-leg, the column is reverted (or waived) and this file stays as the receipt.
+**The real-data figure is now measured, and it confirms the prototype prior.** Issue #78
+recorded, for the `g191_145` prototype: max \|ρ\| 0.8359 vs `pvo_PVO_12_26_9` (compute_all,
+n = 396,588), top-5 per-frame max median 0.8432 → DISCLOSE_GAP; next comparators
+`pvo_PVO_12_26_9_Pctl` 0.8165 and `pvo_PVO_12_26_9_State` 0.7616; run `screen_20261024`, 89
+ALTPORT-1 frames, 398,849 bars, 329 + 358 comparators, canary bit-equal. The launcher's run on
+the port lands on the same comparator with the same pooled and per-frame figures and the same
+band — see the Gate E section. A prototype is not a port, but here the port reproduces the
+prototype's expression bit-for-bit (Gate A above), and the two measurements agree.
 
-## Gate E: pending, run by issue-solver after this session
+## Gate E: measured — DISCLOSE_GAP, the column ships with disclosure
 
-Not run here. `../Backtesting` is outside this worktree and this session may not read or write
-it, so `gate_e_overlap.py` was never invoked. The launcher runs
-`gate_e_overlap.py run --module pandas_ta.volume.g191_145` after this session, and a later
-receipt session records the row with
-`python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD` and replaces this section
-with the measured numbers.
+Run by the issue-solver launcher, not by the session that wrote the port:
+`gate_e_overlap.py run --module pandas_ta.volume.g191_145`, outputs
+`gatee/is78-g191_145-88681c5e`. Every figure in this section is read off that run's
+`overlap_max.csv` and `meta.json`; nothing here was computed in this worktree.
 
-Until then `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails
-locally with `no Gate E ledger row for ['g191_145', 'mtd_ret']` — quoted verbatim from this
-session's own run. `mtd_ret` pre-dates this issue and is the owner's to record. Under
-`GATE_E_PENDING_OK=1`, which `ci.yml` and `gate-e-guard.yml` set for PRs into `dev`, that
-failure becomes a skip whose reason starts "Gate E owed".
+| column | max \|ρ\| | against | set | n | per-frame max median | per-frame comparator | frames | % frames ≥ 0.90 | verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| `G191_145_9_26_12` | **0.835858534426807** | `pvo_PVO_12_26_9` | compute_all | **396,588** | **0.8432316009538046** | `pvo_PVO_12_26_9` | **89** | **0.0** | **DISCLOSE_GAP** |
+
+Per leg, from the same row: compute_all **0.835858534426807** vs `pvo_PVO_12_26_9`
+(n = 396,588); manifest **0.8164992072362767** vs `pvo_PVO_12_26_9_Pctl` (n = 391,337). The
+pooled-only verdict is DISCLOSE_GAP as well, so the per-frame leg did not change the band.
+
+**Band, applied to the measured numbers** (`CLAUDE.md`, Gate E row, bands `r3-perframe-0.90`):
+STRUCK needs pooled \|ρ\| ≥ 0.90 **or** a top-5 comparator's per-frame median ≥ 0.90. Measured:
+pooled 0.8359 < 0.90 and the per-frame max median 0.8432 < 0.90, with 0.0% of the 89 frames at
+or above 0.90. Both land in `0.80 ≤ \|ρ\| < 0.90`, so the verdict is **DISCLOSE_GAP**: the
+column ships with this disclosure, it is **not** struck, and it needs **no waiver**.
+
+Run facts, from `meta.json`: **89** frames, **398,849** pooled bars, **329** compute_all +
+**358** manifest = **687** comparators, canary `AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`,
+no excluded comparators, default parameters (`kwargs: {}`), data stamp
+`1be6495ef7095ff67ad8f59a2fc0311d74f02652`, pandas 2.3.3 / numpy 1.26.4, module sha1
+`6a4a91351de17b1965b5579d70d7c4301eaf68ab`, tree sha1
+`a08796e688f5bc5093163b515c79899fc60b5253`. One comparator was degenerate on this column
+(`n_degenerate = 1`) and is excluded from the maximum by the harness.
+
+**Against the prototype prior.** Issue #78's prototype screen recorded max \|ρ\| 0.8359 vs
+`pvo_PVO_12_26_9` at n = 396,588 with a top-5 per-frame max median of 0.8432 — the port's
+measured numbers above match that prior to every digit the issue quoted, which is what Gate A's
+bit-for-bit agreement with the prototype expression predicted.
+
+The ledger row is recorded with
+`python docs/gate_e_ledger.py record /home/tolga/.issue-solver/runs/20261111-020111-78/gatee/is78-g191_145-88681c5e --measured 2026-11-11`
+(`docs/gate_e_ledger.csv`), which printed
+`g191_145:G191_145_9_26_12 DISCLOSE_GAP 0.8359 vs pvo_PVO_12_26_9 -> docs/gate_e_ledger.csv`.
+`record` compares the run's `pandas_ta_src_sha1` against this tree and refuses a non-default
+parameter set, a universe other than the 89 frames, a comparator set other than 687, or a canary
+that is not bit-equal; it did not refuse.
 
 ## Wiring
 
@@ -250,25 +278,31 @@ re-derives from the dictionary. `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL
 
 ## Suite run (this repo)
 
-`python -m pytest -q`, full suite, default collection order: **3 failed, 5186 passed, 83
-skipped** (104s). `g191_145`'s own tests (`tests/test_g191_145.py`): **23 passed**. The three
-failures:
+`python -m pytest -q`, full suite, default collection order, re-run in the receipt session after
+the Gate E row was recorded: **3 failed, 5193 passed, 83 skipped** (106.57s).
+`g191_145`'s own tests (`tests/test_g191_145.py`): **23 passed**. The three failures:
 
 - `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` — needs
   the sibling `../AlternativeRepos` checkout, absent in this worktree (CI deselects it by
   name). Pre-existing.
 - `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` — the untracked
   `docs/pine/` corpus, `8d8f705` (`CLAUDE.md`, "Known breaks"). Pre-existing.
-- `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` — owed for
-  `['g191_145', 'mtd_ret']`, the expected state described above.
+- `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` — now owed for
+  `['mtd_ret']` only, quoted verbatim from this session's run:
+  `no Gate E ledger row for ['mtd_ret']`. `mtd_ret` pre-dates this issue and is the owner's to
+  record; `g191_145` dropped out of that list when its row was recorded. Pre-existing.
 
-No other test regresses. The passing count is **24** above the **5162** the previous session
+No other test regresses. The passing count is **31** above the **5162** the `g191_040` session
 recorded in `docs/G191040Measured.md` for the same suite (that baseline is quoted from that
-file, not re-run here). The 24 decompose as the **23** tests of `tests/test_g191_145.py` plus
-exactly **1** parametrized ledger test —
-`python -m pytest tests/test_gate_e_ledger.py -k g191_145 --collect-only -q` lists
-`test_every_new_indicator_has_gate_b_and_d_tests[g191_145]` and nothing else, because the
-other `g191_145` ledger checks are keyed off a recorded row that does not exist yet.
+file, not re-run here). The 31 decompose as the **23** tests of `tests/test_g191_145.py` plus
+the **8** parametrized ledger tests the recorded row switches on —
+`python -m pytest tests/test_gate_e_ledger.py -k g191_145 --collect-only -q` lists exactly
+those 8, among them `test_verdict_follows_the_bands[g191_145:G191_145_9_26_12]` (the band
+arithmetic re-derived from the row) and
+`test_every_column_fires_on_real_data[g191_145:G191_145_9_26_12]`, both passing. Before the row
+existed the same command listed **1**
+(`test_every_new_indicator_has_gate_b_and_d_tests[g191_145]`), which is the **5186** the port
+session recorded.
 
 ## Review history
 
@@ -292,3 +326,11 @@ beside it.
 Round 4 is the cap (one round plus three re-runs). Its three findings were applied rather than
 left standing, because all three were documentation strings measured to be wrong; no code was
 touched. The **Suite run** section above is the run made after those edits.
+
+**Receipt session (2026-11-11), after the launcher's Gate E run.** No review round: the session's
+only changes are the recorded ledger row (`docs/gate_e_ledger.csv`) and this file's Gate C / Gate
+E / suite-count sections, rewritten from the run's `overlap_max.csv` and `meta.json`. No module,
+test or wiring file was touched — the ledger pins the module sha1
+`6a4a91351de17b1965b5579d70d7c4301eaf68ab` and the output fingerprint of the measured code, so
+editing either would fail `test_row_still_describes_its_module` / `test_row_output_has_not_moved`
+(both passing here).
