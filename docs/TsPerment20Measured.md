@@ -2,10 +2,13 @@
 
 Issue #91 (TS-PERMENT-20), ported 2026-11-12 on branch `issue-91-ts-perment-20`.
 Column: **`TS_PERMENT_20_3`**, `pandas_ta/statistics/ts_perment_20.py`.
-**Status: Gates A–D cleared in this session; Gate C's real-data counts and
-Gate E are owed.** Gate E is run by issue-solver after this session, on the
-committed code; this file is the receipt either way, and a later session
-writes the measured numbers into the *Gate E* section and the ledger row.
+**Status: SHIPPED through Gates A–F.** Gates A–D were cleared in the porting
+session; the launcher ran Gate E on the committed code afterwards (run
+`is91-ts_perment_20-cff57e6c`, measured 2026-11-12) and this receipt session
+wrote its numbers into the *Gate E* and *Gate C* sections below and recorded
+the ledger row in `docs/gate_e_ledger.csv`. The single column
+`TS_PERMENT_20_3` is **SHIP**: pooled max \|ρ\| **0.2848** vs `inertia`, well
+under the 0.76 ship line.
 
 Every number here is printed by `python docs/measure_ts_perment_20.py` (its
 sections can be run one at a time, e.g. `… gate_b`) on pandas 2.3.3 / numpy
@@ -134,9 +137,10 @@ is against the code the screen ran and not a paraphrase of it.
 **Consequence for Gate E.** Issue #91's screen numbers (max \|ρ\| 0.2046 vs
 `psl`, top-5 per-frame max median 0.1715, SHIP) were measured on the
 four-pattern prototype and do **not** transfer to this port, which correlates
-0.55 with it. The launcher re-runs Gate E on the shipped module; until that
-run lands, this port has **no** Gate E evidence, and the issue's figures must
-not be quoted as if it did.
+0.55 with it. The launcher re-ran Gate E on the shipped module, and the §Gate E
+numbers below are that run: the port's own figure is **0.2848 vs `inertia`**,
+not 0.2046 vs `psl`. Both land SHIP, but they are different measurements of
+different columns and the issue's must not be quoted for this port.
 
 ## Gate A — correctness
 
@@ -386,17 +390,32 @@ default `offset=0` the sweep covers.
 
 ## Gate C — reachability
 
-**Real data: owed.** The 89 frozen ALTPORT-1 frames live with the private
-Backtesting engine, which is outside this worktree; the non-NaN and non-zero
-counts come from the launcher's Gate E run and a later session writes them
-here. The denominator, **398,849 pooled bars** over those 89 frames, is the
-one every `docs/gate_e_ledger.csv` run reports (see `docs/TsC320Measured.md`,
-run `is88-ts_c3_20-853aeed4`); it is not a number this worktree can measure.
-`89 × 19 = 1,691` is the arithmetic floor on the NaN count (19 warm-up
-bars a frame), so expect **at most** `398,849 − 1,691 = 397,158` non-NaN bars;
-anything lower means a frame carried a non-finite close. Bars that are exactly
-0.0 are **expected to be non-zero in number** on real data, because a monotone
-or flat 20-bar run reads 0.0 — see the `trending` row below.
+**Real data: measured** by the launcher's Gate E run
+`is91-ts_perment_20-cff57e6c` (2026-11-12), over the 89 frozen ALTPORT-1
+frames, **398,849 pooled bars**:
+
+| | bars | share of 398,849 |
+|---|---|---|
+| non-NaN | **397,158** | 99.576% |
+| of those, non-zero | **397,152** | 99.575% |
+| exactly 0.0 | **6** | 0.0015% |
+| degenerate (constant) frames | **0** of 89 | — |
+
+`TS_PERMENT_20_3` therefore fires on real data, and `0 < 397,158 < 398,849`,
+so Gate C and Gate D's non-constant requirement hold on the frozen universe
+and not only on synthetic frames.
+
+The porting session predicted this cell before it was run and the prediction
+was exact: `89 × 19 = 1,691` is the arithmetic floor on the NaN count (19
+warm-up bars a frame), so at most `398,849 − 1,691 = 397,158` bars can be
+non-NaN, and **397,158 is what the run reports** — no frame carried a
+non-finite close.
+
+The porting session also expected a non-zero number of exactly-0.0 bars,
+because a monotone or flat 20-bar run reads 0.0 (see the `trending` row
+below). That is confirmed but it is **rare on real data: 6 bars in 397,158**,
+against 1,236 of 1,481 on the synthetic drift-2.5σ path. BIST daily closes are
+not monotone over 20 bars at any useful rate.
 
 The rest of this section is **synthetic**: 1,500-bar generated paths, 1,481
 fired bars each. "distinct" counts RAW float64 values; "at 1e-12" is after
@@ -551,25 +570,65 @@ figures are a sanity check, not a Gate E result.
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
-
-The harness is
+**Measured: SHIP.** Run by issue-solver on the committed code after the
+porting session, with
 `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module
-pandas_ta.statistics.ts_perment_20`, at default parameters, over the 89 frozen
-ALTPORT-1 BIST frames against the 687 comparators (329 `compute_all` + 358
-`ml_features` manifest `1d`), bands `r3-perframe-0.90`. It cannot run in this
-worktree: the engine, the BIST cache and the manifest are in the sibling
-Backtesting checkout, which this session must not read.
+pandas_ta.statistics.ts_perment_20` at default parameters (`kwargs {}`, no
+exclusions, no rename prefix), bands `r3-perframe-0.90`.
 
-Two things a later session must not confuse:
+| column | max \|ρ\| | against | n | per-frame max median | verdict |
+|---|---|---|---|---|---|
+| `TS_PERMENT_20_3` | **0.2847825** (ρ = −0.2847825) | `inertia` (`compute_all`) | 395,984 | **0.2746913** vs `inertia`, over 89 frames | **SHIP** |
 
-* The issue's **0.2046 vs `psl`** is a measurement of the four-pattern
-  prototype, not of this port (see *The port is not the column the screen
-  measured*). It is a prior, not a result.
-* `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-  fails locally until the row is recorded. That is expected and is what
-  "owed, not failed" means in `CLAUDE.md`; CI into `dev` skips it under
-  `GATE_E_PENDING_OK=1`.
+Both halves of the band rule are clear of the 0.90 strike line by a wide
+margin, and of the 0.76 ship line: pooled 0.2848, per-frame max median 0.2747,
+and **0 of the 89 frames** reaches \|ρ\| ≥ 0.90 against the top comparator
+(`perframe_pct_frames_ge_090` = 0.0). `verdict_pooled_only` is SHIP too, so the
+verdict does not hinge on which of the two rules is applied. No column is
+removed and no waiver is needed.
+
+The strongest comparator in each set:
+
+| set | max \|ρ\| | against | n |
+|---|---|---|---|
+| engine `compute_all` (329 columns) | **0.2847825** | `inertia` | 395,984 |
+| `ml_features` manifest `1d` (358 columns) | **0.2723871** | `ATR_Bars_Above` | 397,158 |
+
+Run facts, from `meta.json` and `overlap_max.csv` of the output folder
+`is91-ts_perment_20-cff57e6c`:
+
+| | |
+|---|---|
+| measured | 2026-11-12 |
+| universe | 89 frozen ALTPORT-1 BIST frames, 398,849 pooled bars |
+| comparators | **687** = 329 `compute_all` + 358 manifest `1d` |
+| degenerate comparators dropped | 0 |
+| canary | `AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS` **bit-equal** |
+| module sha1 | `0f4f4fc76fa084516246f2ee6454564e48966aad` |
+| `pandas_ta` tree sha1 | `d987c08d647ddf5cb89b532d645418e84e4c906b` |
+| data stamp | `1be6495ef7095ff67ad8f59a2fc0311d74f02652` |
+| versions | pandas 2.3.3 / numpy 1.26.4 |
+
+Recorded with `python docs/gate_e_ledger.py record <run dir> --measured
+2026-11-12`, which re-checks the module sha1 against this tree, the 89-frame
+universe, the 687 comparators and the bit-equal canary before writing the row;
+it printed `ts_perment_20:TS_PERMENT_20_3 SHIP 0.2848 vs inertia`.
+
+Two readings worth keeping straight:
+
+* **This is not the issue's number.** Issue #91's screen measured **0.2046 vs
+  `psl`** on the four-pattern prototype; the port measures **0.2848 vs
+  `inertia`** — a different, higher figure against a different comparator,
+  which is what a column correlating 0.55 with the prototype should produce
+  (see *The port is not the column the screen measured*). The issue listed
+  `inertia` 0.1830 as the prototype's *second* comparator, so the port moved
+  it to first and raised it; the screen's `psl` is not in the port's top row at
+  all. Both verdicts are SHIP, by different measurements.
+* **A low \|ρ\| here is partly structural.** The column takes 88–119 distinct
+  values at 1e-12 over 1,481 synthetic bars (§The attainable values), so a rank
+  statistic against a continuous comparator carries many tied ranks by
+  construction and the attainable \|ρ\| is depressed. 0.2848 is a pass, not
+  proof of unusual independence.
 
 ## Gate F — suites
 
@@ -587,6 +646,26 @@ the `supertrend` citation into the untracked `docs/pine/` — plus
 reports `['mtd_ret', 'ts_perment_20']`: this port's owed row, and one owed
 before this branch. CI into `dev` skips that test under
 `GATE_E_PENDING_OK=1`.
+
+Receipt session, after recording the Gate E row, in this worktree:
+
+* `python -m pytest -q --tb=no -p no:warnings -r f` → **3 failed, 6,092
+  passed, 83 skipped** in 133.74 s.
+
+The same three test IDs fail, but the ledger one now reports **`['mtd_ret']`**
+only: `ts_perment_20`'s row is recorded, and the remaining name is the row
+owed before this branch and not this port's. The other two are the two *Known
+breaks*. So this branch adds no failure, and the local pass count rose by 7
+(6,085 → 6,092): `tests/test_gate_e_ledger.py` parametrises seven checks over
+the ledger's rows — four over `LIVE` (module named, module unmoved, output
+unmoved, waiver when STRUCK), two over `ROWS` (verdict follows the bands,
+column fires on real data) and one over the indicators in `LIVE` (the row's
+columns are the default output) — so a row that did not exist adds exactly
+seven test items, all passing, including
+`test_verdict_follows_the_bands[ts_perment_20:TS_PERMENT_20_3]`.
+
+The launcher runs both repos' suites in clean worktrees; this file does not
+claim them.
 
 The launcher runs both repos' suites in clean worktrees; this file does not
 claim them. The same counts, and the four review rounds that produced them,
