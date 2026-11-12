@@ -72,7 +72,7 @@ Category = {
     # Statistics
     "statistics": [
         "entlz", "entropy", "ffd", "g191_026", "g191_044", "g191_165", "g191_189", "g191_190", "ie_asym", "kpss", "kurtosis", "lean_hurst_100", "lot_zeroret_60", "mad", "median", "median_ad_hl2", "osap_retskew_21", "quantile", "rank", "skew", "stdev",
-        "tf_centroid_20", "ts_c3_20", "variance", "zscore",
+        "tf_centroid_20", "ts_binent_20", "ts_c3_20", "variance", "zscore",
         "rolling_sum", "normalize", "covariance", "cusum", "trend_scan"
     ],
     # Trend
