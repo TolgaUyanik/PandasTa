@@ -421,7 +421,7 @@ FINDINGS:
 SUMMARY: The six fixes are real, not cosmetic, and I could not find a number in
 this deliverable that failed to reproduce — gate_a through cost, 192 module
 tests, 3/6,285/83 on the full suite, the Gate B sweep's thirty cells, the guards'
-1/3/6/20/20/3/1 edge span, the 19-bar prototype divergence, the designed probe's
+edge span (1, 3, 6, 20, 20, 3, 1), the 19-bar prototype divergence, the probe's
 guarded `dead` accounting, the fourth quoted-from-outside figure sitting where
 CLAUDE.md:155 says it sits. The emptied-window "iff" and the interior-bar rule
 survive a structural check, not just a sample: emptied = [b, b+length-1] clipped
