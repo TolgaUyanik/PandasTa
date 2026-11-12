@@ -625,7 +625,9 @@ def test_the_difference_of_logarithms_spelling_would_not_be_scale_identical():
     m = ~np.isnan(ratio)
     assert int(m.sum()) == 1499
     assert (ratio[m] == ratio8[m]).all()
-    assert int((plain[m] == plain8[m]).sum()) == 821
+    # 821 locally, 857 on a CI runner: the count is CPU float detail, so
+    # only "some but not all" is pinned.
+    assert 0 < int((plain[m] == plain8[m]).sum()) < 1499
 
 
 @pytest.mark.parametrize("frame_fn", [_walk, _tick_rounded, _nonlinear])
