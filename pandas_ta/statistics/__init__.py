@@ -23,6 +23,7 @@ from .stdev import stdev
 from .tf_centroid_20 import tf_centroid_20
 from .ts_binent_20 import ts_binent_20
 from .ts_c3_20 import ts_c3_20
+from .ts_perment_20 import ts_perment_20
 from .variance import variance
 from .zscore import zscore
 from .rolling_sum import rolling_sum
