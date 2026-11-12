@@ -2,19 +2,24 @@
 
 Issue #92 (TS-PEAKS-20), ported 2026-11-12 on branch `issue-92-ts-peaks-20`.
 Column: **`TS_PEAKS_20_2`**, `pandas_ta/statistics/ts_peaks_20.py`.
-**Status: Gates A–D cleared in this session; Gate E owed.**
-*Gate E: pending, run by issue-solver after this session.* A later receipt
-session writes its numbers into the *Gate E* and *Gate C* sections below and
-records the row in `docs/gate_e_ledger.csv`; until then
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails locally (measured: it names `['mtd_ret', 'ts_peaks_20']`), which is the
-expected "owed, not failed" state described in `CLAUDE.md`.
+**Status: Gates A–F cleared. SHIP.**
+Gate E was run by issue-solver on the committed module after the porting
+session (run `is92-ts_peaks_20-7852eb1c`, measured 2026-11-13): max \|ρ\|
+**0.2453** vs `BB_Lower` (compute_all, n = 397,158), top-5 per-frame max
+median **0.2345**, 0 of 89 frames at \|ρ\| ≥ 0.90 → **SHIP**, below the 0.76
+ship line. The row is in `docs/gate_e_ledger.csv`; the numbers and the run's
+real-data reachability counts are in the *Gate E* and *Gate C* sections below.
+Nothing was struck and nothing removed.
 
-Every number this session **measured** comes from one of exactly four
+Every number the **porting** session measured comes from one of exactly four
 commands: `python docs/measure_ts_peaks_20.py` (its sections can be run one at
 a time, e.g. `… gate_b`), `python -m pytest tests/test_ts_peaks_20.py -q`,
-`python -m pytest -q` (the Gate F suite line and the owed ledger row) and
+`python -m pytest -q` (the Gate F suite line and the then-owed ledger row) and
 `python docs/gen_indicator_dictionary.py` (the ML form tag and the warm-up).
+The **Gate E** numbers and the real-data counts in *Gate C* come from one more
+run, which the porting session could not make: issue-solver's
+`gate_e_overlap.py run --module pandas_ta.statistics.ts_peaks_20`, read out of
+that run's `overlap_max.csv`, `top25.csv`, `perframe.csv` and `meta.json`.
 Figures *quoted from outside* those runs are labelled where they appear, and
 there are four: the screen's Gate E numbers
 (`docs/issues/091-ts-peaks-20.md`, the owner's tracker), commit 22fe27b's CI
@@ -123,20 +128,25 @@ clean data.** The prototype's comparisons are `False` at a NaN and its
 port refuses (§Guards). Measured, one NaN planted at bar 200 of a 400-bar
 walk: the port is NaN where the prototype emits a number on **19** bars
 (200 … 218 — the prototype's own `.where(c.shift(19).notna())` masks the
-20th), and on the 361 bars where both fire they agree **361/361**. How often a
-non-finite close occurs on the 89 BIST frames is part of Gate E's real-data
-counts, which are owed.
+20th), and on the 361 bars where both fire they agree **361/361**. How often
+the guard fires on real data is now answered by Gate E's counts: the run's
+1,691 NaN bars are exactly 19 × 89, the warm-up (see *Gate C*), so the
+divergence above did not occur on the 89 BIST frames.
 
-⚠ **That still does not transfer the screen's Gate E numbers.** The issue
-quotes max \|ρ\| **0.2453** vs `BB_Lower` (n = 397,158, top-5 per-frame max
-median 0.2345) from run `screen_20261024`, taken by the Gate E harness on the
-*prototype module* against that date's comparator snapshot. Being bit-equal
-to the prototype makes those figures **indicative**, not a receipt: the
-measurement that decides ship/revert is the launcher's run on
-`pandas_ta.statistics.ts_peaks_20`, and the ledger row for this column is
-owed. `test_the_screens_gate_e_numbers_are_not_this_modules` asserts the
-ledger carries no `TS_PEAKS*` row yet, so nobody can mistake the screen's
-number for this module's.
+**The screen's Gate E numbers still are not this module's receipt** — but the
+port's own run landed on the same figures. The issue quotes max \|ρ\|
+**0.2453** vs `BB_Lower` (n = 397,158, top-5 per-frame max median 0.2345) from
+run `screen_20261024`, taken by the Gate E harness on the *prototype module*
+against that date's comparator snapshot. Issue-solver's run on
+`pandas_ta.statistics.ts_peaks_20` (`is92-ts_peaks_20-7852eb1c`) reports
+0.24525200672691871 vs `BB_Lower`, n = 397,158, per-frame max median
+0.23452801812896362 — the screen's numbers to every digit it printed. The
+agreement is a *result* of the two runs, not an assumption either made; both
+used 89 frames and 329 + 358 comparators, and whether anything else in the
+snapshot moved between 2026-10-24 and 2026-11-13 is not something this
+repository can see.
+`test_the_ledger_row_is_this_modules_gate_e_run` now pins the recorded row
+against the module on disk instead of asserting the row is absent.
 
 ## Gate A — correctness
 
@@ -361,8 +371,25 @@ unchanged for the module **and** for the `back_date_two` mutant.
 
 ## Gate C — reachability
 
-**Synthetic only in this session. The real-data counts are owed with Gate E**
-(the harness reports non-NaN and non-zero counts over the 89 frames).
+**Real data, from the Gate E run** (`is92-ts_peaks_20-7852eb1c`, 89 ALTPORT-1
+BIST frames, 398,849 pooled bars):
+
+| column | non-NaN | non-zero | degenerate frames |
+|---|---|---|---|
+| `TS_PEAKS_20_2` | **397,158** of 398,849 | **372,473** of 398,849 | **0** |
+
+So the single shipped column fires on real data and is not constant there:
+`0 < 372,473 < 398,849`, and the harness's `n_degenerate` is 0.
+
+Two readings of those counts:
+
+* the **1,691 NaN bars are exactly 19 × 89** — the warm-up, one frame's worth
+  each. Nothing beyond the warm-up was masked, so the §Guards NaN path did not
+  fire on these frames (the harness reports no per-frame NaN breakdown; this is
+  the arithmetic, which also implies every frame is at least 20 bars long).
+* **24,685 fired bars read 0** (6.22% of the fired bars): a window with no
+  confirmed peak at all. On the synthetic frames below that share runs from
+  0.34% (walk) to 98.9% (trending), so the real frames sit near the choppy end.
 
 Measured over seven 1,500-bar synthetic frames (`gate_c_d`):
 
@@ -418,43 +445,114 @@ not be read as "tick-size-free".
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
+**Run by issue-solver on the committed module, 2026-11-13.** Verdict
+**SHIP** — nothing struck, nothing removed.
 
-The run to come: `python scripts/analysis/gate_e_overlap.py run --module
-pandas_ta.statistics.ts_peaks_20` from `../Backtesting/Backtesting`, over the
-89 frozen ALTPORT-1 BIST frames against the 329 + 358 = 687 comparators, with
-the bands of `CLAUDE.md` (`r3-perframe-0.90`). The receipt session records
-the row in `docs/gate_e_ledger.csv` and fills in this section and Gate C's
-real-data counts.
+`gate_e_overlap.py run --module pandas_ta.statistics.ts_peaks_20` from
+`../Backtesting/Backtesting`, outputs `is92-ts_peaks_20-7852eb1c`:
+89 frozen ALTPORT-1 BIST frames, 398,849 pooled bars, 329 + 358 = 687
+comparators, bands `r3-perframe-0.90`, canary bit-equal on AKBNK.IS, BIENY.IS,
+AGHOL.IS, SASA.IS; pandas 2.3.3 / numpy 1.26.4; module sha1
+`b571ed64b6a0356e9dd29269f0019478ad4fdae7`, tree sha1
+`2a9dbc41ebb6c96425e59254bff9ced1fc819a97`; default parameters (`kwargs {}`),
+nothing excluded.
 
-What is known before that run, and is not a substitute for it:
+| column | max \|ρ\| | against | set | n | per-frame max median | frames ≥ 0.90 | verdict |
+|---|---|---|---|---|---|---|---|
+| `TS_PEAKS_20_2` | **0.24525200672691871** | `BB_Lower` | compute_all | 397,158 | **0.23452801812896362** (`BB_Lower`, 89 frames) | **0 of 89** (0.0%) | **SHIP** |
+
+Against each comparator set separately: `compute_all` 0.2453 vs `BB_Lower`
+(n = 397,158); the `ml_features` `1d` manifest 0.17920404059782385 vs
+`Pct_Up_Days_63` (n = 396,179). Both bands agree: pooled-only would also read
+SHIP, and 0.2453 is below the 0.76 ship line by a wide margin — the nearest
+band edge, DISCLOSE, is more than 3× this value.
+
+**The top of the table is a plateau, so "vs `BB_Lower`" is close to
+arbitrary.** The 25 strongest comparators span 0.24164 … 0.24525 — a range of
+0.0036 — and they are nearly all price levels or smoothers: `BB_Lower`
+0.24525, `LINREG_LOWER_2` 0.24319, `PSAR` 0.24302, `HWC_LOWER` 0.24287,
+`donchian_DCL_20_20` and `SWING_LOW` 0.24276 (equal to the digit), `HWC_MID`
+and `hwma` 0.24259, then `ROLLING_LOW_20`, `LINREG_LOWER_1`, `PREV_MONTH_LOW`,
+`HWC_UPPER`, `PREV_WEEK_LOW`/`WEEK_LOW`, `pwma`, `LINREG_VALUE`, `ATR_LOWER`,
+`trima`, `swma`, `sinwma`, `dema`, `SMA_14`, `hma`, `quantile`, `SMA_10`. A
+count of local peaks correlates at \|ρ\| ≈ 0.242–0.245 with *any* of those
+level columns and with none of them more; that is the shape of a weak shared
+dependence on where price sits, not a restatement of one comparator.
+
+Per-frame, over the top-5 pooled comparators (89 frames each): medians
+0.2345 (`BB_Lower`), 0.2276 (`donchian_DCL_20_20`), 0.2271 (`HWC_LOWER`),
+0.2250 (`PSAR`), 0.2221 (`LINREG_LOWER_2`); the single worst frame-comparator
+pair is \|ρ\| **0.41549** and the mildest **0.00584**, both `BB_Lower`. No frame
+reaches either the 0.90 strike line or the 0.80 disclosure line
+(`pct_frames_ge_080` is 0.0 for all five).
+
+Two figures from before the run, kept because they were written before it and
+can now be scored:
 
 * the issue's screen measured the **prototype** at max \|ρ\| 0.2453 vs
   `BB_Lower` (n = 397,158), next comparators `LINREG_LOWER_2` 0.2432 and
-  `PSAR` 0.2430, top-5 per-frame max median 0.2345 → SHIP. This port is
-  bit-equal to that prototype (§A2), so the figures are indicative;
+  `PSAR` 0.2430, top-5 per-frame max median 0.2345 → SHIP. The port's own run
+  reproduces all five of those figures to the digits the issue printed, with
+  the same three comparators in the same order (§A2);
 * a **pre-check on one synthetic walk**, not Gate E (`meaning`): Spearman
   against fork neighbours computed on the same 1,500-bar walk —
   `chop` 0.293930, `ts_perment_20` 0.251457, `rsi` −0.149472,
   `entropy` −0.129591, `psl` −0.112006, `lean_hurst_100` −0.095211,
-  `ts_c3_20` 0.048246, `ts_binent_20` −0.006100. Max \|ρ\| **0.2939**.
-  One synthetic frame and 8 comparators is not 89 frames and 687.
+  `ts_c3_20` 0.048246, `ts_binent_20` −0.006100. Max \|ρ\| **0.2939**. It
+  over-stated the real maximum by 0.049 and named a comparator (`chop`) that
+  is not in the run's top 25; one synthetic frame and 8 comparators was never
+  89 frames and 687.
+
+Recorded in `docs/gate_e_ledger.csv` with
+`python docs/gate_e_ledger.py record … --measured 2026-11-13`, which prints
+`ts_peaks_20:TS_PEAKS_20_2 SHIP 0.2453 vs BB_Lower`; `record` re-checks that
+the recorded tree is byte-identical to the one the harness imported, that the
+parameters are the defaults, the universe the 89 frames, the comparator set
+687 and the canary bit-equal.
 
 ## Gate F — suites
 
-This repository, measured in this session:
+This repository, in the porting session:
 
 * `python -m pytest tests/test_ts_peaks_20.py -q` → **192 passed**.
 * `python -m pytest -q` → **3 failed, 6,285 passed, 83 skipped** (132.57 s on
-  the last of four runs in this session; the three earlier ones, taken while
+  the last of four runs in that session; the three earlier ones, taken while
   this module had 184 and then 185 tests, reported the same three failures
   with 6,277/83 and 6,278/83).
-  The three failures are the two `CLAUDE.md` *Known breaks*
+  The three failures were the two `CLAUDE.md` *Known breaks*
   (`test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`, and
   `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`,
   which needs the sibling `../AlternativeRepos` checkout and is deselected in
-  CI) plus the owed Gate E row, which reports exactly
+  CI) plus the then-owed Gate E row, which reported exactly
   `['mtd_ret', 'ts_peaks_20']`.
+
+And in this receipt session, after recording the row and rewriting this file's
+Gate E and Gate C sections and the two ledger tests:
+
+* `python -m pytest -q` → **3 failed, 6,293 passed, 83 skipped** (134.98 s,
+  and 133.88 s on a second run after the last doc edits — same counts).
+  The same two *Known breaks*, and
+  `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` now
+  reports exactly `['mtd_ret']` — `ts_peaks_20` has left that list, and
+  `mtd_ret` is #206's, owed on `dev` and not this branch's to pay.
+  The 8 new passes (6,285 → 6,293) are accounted for: **+1** in
+  `tests/test_ts_peaks_20.py` (192 → 193 — the one "the ledger carries no
+  `TS_PEAKS` row" assertion replaced by two that pin the row that is now
+  there) and **+7** in `tests/test_gate_e_ledger.py`, which parametrises seven
+  checks per ledger row and now collects them for
+  `ts_peaks_20:TS_PEAKS_20_2`: `test_row_names_the_module_that_defines_the_indicator`,
+  `test_row_still_describes_its_module`, `test_row_output_has_not_moved`,
+  `test_verdict_follows_the_bands`,
+  `test_struck_rows_carry_the_waiver_for_this_exact_measurement`,
+  `test_ledger_columns_are_the_default_output` and
+  `test_every_column_fires_on_real_data` (measured with
+  `pytest tests/test_gate_e_ledger.py --co -k ts_peaks`, which collects those
+  seven plus `test_every_new_indicator_has_gate_b_and_d_tests[ts_peaks_20]` —
+  the eighth comes from `Category`, not the ledger, so it ran before the row
+  too). So the row did not merely get written: four of those seven re-derive
+  the module's sha1, its output fingerprint, its column set and the verdict
+  band from this tree and would fail if the recorded run described different
+  code.
 
 The parent repo's suite is the launcher's to run, in a clean worktree.
 

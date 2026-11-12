@@ -41,10 +41,13 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    so the two part company on any frame carrying a non-finite close: measured
    in `docs/measure_ts_peaks_20.py gate_a`, one NaN at bar 200 of a 400-bar
    walk leaves 19 bars where the port is NaN and the prototype emits a
-   number, with 361 of 361 agreeing elsewhere. Gate E is still owed on THIS
-   module: the screen's 0.2453 vs `BB_Lower` came from a different harness
-   run, and the launcher's run on this module is the number that decides
-   ship/revert.
+   number, with 361 of 361 agreeing elsewhere. On real data that divergence
+   did not occur: Gate E's 1,691 NaN bars are exactly the 19-bar warm-up on
+   each of the 89 frames. Gate E on THIS module (`is92-ts_peaks_20-7852eb1c`,
+   2026-11-13) reproduced the screen's figure -- 0.24525200672691871 vs
+   `BB_Lower`, n = 397,158, per-frame max median 0.23452801812896362, SHIP --
+   and that run, not the screen's, is the receipt
+   (`test_the_ledger_row_is_this_modules_gate_e_run`).
 
 3. **Gate B, by mutant, on six configurations -- and the designed probe that
    makes it decisive.** Five mutants, each `importlib`-read and `exec`'d in
@@ -124,8 +127,10 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    takes a ratio or a logarithm.
 
 Numbers come from `docs/measure_ts_peaks_20.py`; the receipt is
-`docs/TsPeaks20Measured.md`. Gate C on real data and Gate E are owed: the
-launcher runs Gate E after the porting session. Counts that depend on the
+`docs/TsPeaks20Measured.md`. Gate C on real data and Gate E come from
+issue-solver's run `is92-ts_peaks_20-7852eb1c` (2026-11-13): SHIP, and
+`TS_PEAKS_20_2` fires on 397,158 of 398,849 pooled bars, 372,473 of them
+non-zero. Counts that depend on the
 last bits of a generated frame (Spearman to six places, how many offsets a
 mutant is caught at) carry a tolerance -- CI's runner has measured different
 last bits for the same seeds (commit 22fe27b).
@@ -553,20 +558,67 @@ def test_the_retyped_prototype_matches_the_owners_registry(frame):
     assert equal and bits == n == 1481
 
 
-def test_the_screens_gate_e_numbers_are_not_this_modules():
-    """A note, pinned as a test so it is not quietly dropped: issue #92's
-    Gate E figures (max |rho| 0.2453 vs `BB_Lower`, n = 397,158) were
-    measured by the screen harness on the prototype. The port being
-    bit-equal to the prototype makes them INDICATIVE, not a receipt: a
-    different harness run, a different comparator snapshot. The ledger row
-    for this module is owed.
+def test_the_ledger_row_is_this_modules_gate_e_run():
+    """Gate E is this module's own, not the screen's. Issue #92 quoted the
+    screen harness's figures on the PROTOTYPE (max |rho| 0.2453 vs
+    `BB_Lower`, n = 397,158); issue-solver's run on
+    `pandas_ta.statistics.ts_peaks_20` (`is92-ts_peaks_20-7852eb1c`,
+    measured 2026-11-13) reproduced them and is what ships.
+
+    Pinned here: exactly one `TS_PEAKS*` row exists, it is SHIP under
+    `r3-perframe-0.90`, and it names this module and that run. The numbers
+    themselves are checked by `tests/test_gate_e_ledger.py`, which also
+    re-derives `module_sha1` and the output fingerprint from the tree -- so
+    this test deliberately asserts the row's IDENTITY, which that one does
+    not: a row recorded from some other run would satisfy the generic
+    checks.
     """
     import csv
     from pathlib import Path
     ledger = Path(__file__).resolve().parents[1] / "docs" / \
         "gate_e_ledger.csv"
-    rows = list(csv.DictReader(ledger.open(encoding="utf-8")))
-    assert not [r for r in rows if r.get("column", "").startswith("TS_PEAKS")]
+    rows = [r for r in csv.DictReader(ledger.open(encoding="utf-8"))
+            if r["column"].startswith("TS_PEAKS")]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["indicator"] == "ts_peaks_20"
+    assert row["module"] == "pandas_ta.statistics.ts_peaks_20"
+    assert row["column"] == "TS_PEAKS_20_2"
+    assert row["run"] == "is92-ts_peaks_20-7852eb1c"
+    assert row["verdict"] == "SHIP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+
+
+def test_the_ledger_row_carries_the_measured_gate_e_numbers():
+    """The four figures `docs/TsPeaks20Measured.md` reports in its Gate E
+    section, read back out of the ledger so an edit to either one has to
+    move both: 0.24525200672691871 vs `BB_Lower` (compute_all) over
+    n = 397,158, per-frame max median 0.23452801812896362, and the run's
+    real-data reachability counts 397,158 non-NaN / 372,473 non-zero of
+    398,849 pooled bars (Gate C).
+    """
+    import csv
+    from pathlib import Path
+    ledger = Path(__file__).resolve().parents[1] / "docs" / \
+        "gate_e_ledger.csv"
+    rows = [r for r in csv.DictReader(ledger.open(encoding="utf-8"))
+            if r["column"] == "TS_PEAKS_20_2"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert float(row["max_abs_rho"]) == 0.24525200672691871
+    assert row["against"] == "BB_Lower"
+    assert row["against_set"] == "compute_all"
+    assert int(row["n"]) == 397158
+    assert float(row["perframe_max_median_abs_rho"]) == 0.23452801812896362
+    assert row["perframe_max_against"] == "BB_Lower"
+    assert (int(row["non_nan"]), int(row["non_zero"])) == (397158, 372473)
+    assert int(row["pooled_bars"]) == 398849
+    # The NaN bars are exactly the warm-up: 19 per frame, 89 frames.
+    assert int(row["pooled_bars"]) - int(row["non_nan"]) == 19 * 89
 
 
 # --------------------------------------------------- Gate A3/A4: the oracles
