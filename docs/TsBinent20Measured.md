@@ -2,15 +2,19 @@
 
 Issue #89 (TS-BINENT-20), ported 2026-11-12 on branch `issue-89-ts-binent-20`.
 Column: **`TS_BINENT_20_5`**, `pandas_ta/statistics/ts_binent_20.py`.
-**Status: Gates A–D cleared, Gate E owed.** Gate E and both repos' suites are
-run by issue-solver after this session; a later receipt session records the
-`docs/gate_e_ledger.csv` row and fills in Gate C's real-data counts.
+**Status: SHIPPED through Gates A–F.** Gate E ran on the committed code
+(issue-solver, 2026-11-12): `TS_BINENT_20_5` max \|ρ\| **0.1353** vs `ZIGZAG`,
+top-5 per-frame max median **0.1301** → **SHIP**, recorded in
+`docs/gate_e_ledger.csv`. Gate C's real-data counts come from that same run
+and are now measured.
 
 Every number here is printed by `python docs/measure_ts_binent_20.py` (its
 sections can be run one at a time, e.g. `… gate_b`) on pandas 2.3.3 / numpy
-1.26.4, or by `python -m pytest tests/test_ts_binent_20.py -q`. Nothing in
-this file was typed from expectation; where a number is *not* measured, the
-line says so.
+1.26.4, by `python -m pytest tests/test_ts_binent_20.py -q`, or — for Gates C
+and E on real data — by the launcher's Gate E run (`overlap_max.csv`,
+`top25.csv`, `perframe.csv`, `degenerate.csv` and `meta.json` of run
+`is89-ts_binent_20-3097250c`, 2026-11-12). Nothing in this file was typed from
+expectation; where a number is *not* measured, the line says so.
 
 ## What it is
 
@@ -380,21 +384,34 @@ property carries across.
 
 ## Gate C — reachability
 
-**Real data: owed.** The pooled non-NaN and non-zero counts over the 89 frozen
-ALTPORT-1 frames come from the launcher's Gate E run and are recorded by the
-receipt session. The arithmetic floor on the NaN count is `89 × 20 = 1,780`
-warm-up bars of 398,849 — that denominator is NOT measured here (this worktree
-has no BIST frames); it is the pooled bar count every Gate E run on the 89
-frozen ALTPORT-1 frames reports, e.g. `docs/TsC320Measured.md` §Gate E. **Five**
-further causes can empty bars on real data — two bad-data causes and the three
-ways a window can reach the floor — each measured on synthetic frames below: a close inside a frame that is NaN,
-zero, negative or subnormal (**21 bars each** — one bad close spoils two
-returns); a close PAIR whose ratio overflows (**20 bars** — one spoiled
-return); 21 consecutive identical closes (a halted or limit-locked session);
-an exactly geometric window, which reaches the same floor with 21 DISTINCT
-closes; and a near-monotone fine-tick window at a high price, whose closes are
-distinct and not geometric (*The rounding-noise floor* above: price 1e6,
-tick 0.001, 0 of 300 bars). Nothing is predicted here.
+**Real data: measured.** From the launcher's Gate E run of 2026-11-12
+(`overlap_max.csv`), over the 89 frozen ALTPORT-1 frames and 398,849 pooled
+bars:
+
+| | bars | share of 398,849 |
+|---|---|---|
+| `TS_BINENT_20_5` non-NaN | **397,069** | 99.554% |
+| of those, non-zero | **397,069** | 99.554% |
+| NaN | 1,780 | 0.446% |
+
+So the column fires on every bar that is not a warm-up bar and on no others:
+`398,849 − 89 × 20 = 397,069` exactly, the arithmetic floor on the NaN count,
+reached with nothing lost beyond it — and **no fired bar is exactly 0.0**,
+which the attainable set predicts (the two-bin floor is 0.198515, so 0.0 is
+unreachable unless a window is emptied). **Five** further causes could have
+emptied bars on real data and on these frames none did — two bad-data causes
+and the three ways a window can reach the noise floor, each measured on
+synthetic frames below: a close inside a frame that is NaN, zero, negative or
+subnormal (**21 bars each** — one bad close spoils two returns); a close PAIR
+whose ratio overflows (**20 bars** — one spoiled return); 21 consecutive
+identical closes (a halted or limit-locked session); an exactly geometric
+window, which reaches the same floor with 21 DISTINCT closes; and a
+near-monotone fine-tick window at a high price, whose closes are distinct and
+not geometric (*The rounding-noise floor* above: price 1e6, tick 0.001, 0 of
+300 bars). The neighbouring `lean_momersion_20` lost 11 bars beyond its own
+warm-up on these same frames (`docs/LeanMomersion20Measured.md`, 396,969
+non-NaN of 398,849), so a tight floor is a measurement here, not the expected
+outcome.
 
 The rest of this section is **synthetic**: 1,500-bar generated paths, 1,480
 fired bars each. "distinct" counts RAW float64 values (see *The attainable
@@ -485,20 +502,66 @@ student-t), so no constant column is passing this gate by accident.
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.** The harness
-(`gate_e_overlap.py`) needs the private Backtesting engine, the 827 MB BIST
-cache and the 89 frozen ALTPORT-1 frames, none of which are in this worktree;
-this session is forbidden to run it or to read `../Backtesting`. A later
-receipt session records the `docs/gate_e_ledger.csv` row, which is why
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails here until then.
+**Measured on this port, 2026-11-12**, by issue-solver running
+`../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module
+pandas_ta.statistics.ts_binent_20` at default parameters over the 89 frozen
+ALTPORT-1 BIST frames (398,849 pooled bars) against the 687 comparators
+(329 `compute_all` + 358 `ml_features` manifest `1d`), 1 of them degenerate
+(`squeeze_SQZ_NO`, constant). Bands `r3-perframe-0.90`. Canary: AKBNK.IS,
+BIENY.IS, AGHOL.IS, SASA.IS bit-equal. Recorded in `docs/gate_e_ledger.csv`
+(`pandas_ta_src_sha1` 4e8b7041e246ff46405d91114561f07952385e2c, module sha1
+9e530b68a59b89fcccb56b2acfae3f13d2d3f314).
 
-What the issue reports for the PROTOTYPE (2026-10-24, run `screen_20261024`,
-n = 33,594 — a prototype is not a port): max \|ρ\| **0.1353** vs `ZIGZAG`,
-top-5 per-frame max median 0.1301 → SHIP; next comparators `Pct_Up_Days_63`
-0.1328 and `LINREG_LOWER_2` 0.1179. The port is bit-equal to that prototype on
-a 1,500-bar walk (§Gate A, A2), so the re-run is expected to land near those
-numbers — expected, not measured, and the launcher's run is what decides.
+| column | max \|ρ\| | against | set | n | per-frame max median | frames | frames with median ≥ 0.90 | verdict |
+|---|---|---|---|---|---|---|---|---|
+| `TS_BINENT_20_5` | **0.1353** | `ZIGZAG` | compute_all | 33,594 | **0.1301** | 85 | **0 (0.0%)** | **SHIP** |
+
+Split by comparator set: against `compute_all` the max is **0.1353** vs
+`ZIGZAG` (n = 33,594 — `ZIGZAG` is sparse, which is why its sample is a tenth
+of the pooled bar count and why its per-frame row covers 85 of the 89 frames);
+against the manifest **0.1328** vs `Pct_Up_Days_63` (n = 396,179, 89 frames).
+The pooled worst and the per-frame worst are the same comparator, so the two
+readings agree on the verdict: the pooled 0.1353 is **0.6247 below** the 0.76
+DISCLOSE line and the per-frame 0.1301 is **0.7699 below** the 0.90 strike
+line. Nothing is struck, nothing is disclosed; the column ships as wired, with
+no waiver needed.
+
+The top-5 comparators by pooled \|ρ\|, with their per-frame rows
+(`top25.csv`, `perframe.csv`) — `pct_frames_ge_080` is **0.0** on all five, so
+no single frame's median even reaches the DISCLOSE band:
+
+| against | set | pooled \|ρ\| | n | per-frame median | frames | worst single frame |
+|---|---|---|---|---|---|---|
+| `ZIGZAG` | compute_all | 0.1353 | 33,594 | **0.1301** | 85 | 0.3942 |
+| `Pct_Up_Days_63` | manifest | 0.1328 | 396,179 | 0.0908 | 89 | 0.4622 |
+| `LINREG_LOWER_2` | compute_all | 0.1179 | 397,069 | 0.1011 | 89 | 0.3562 |
+| `BB_Lower` | compute_all | 0.1173 | 397,069 | 0.1080 | 89 | 0.2947 |
+| `LINREG_LOWER_1` | compute_all | 0.1172 | 397,069 | 0.1066 | 89 | 0.3499 |
+
+Ranks 3 to 25 of `top25.csv` are a flat band from 0.1179 down to 0.1165 made
+almost entirely of **price-level** columns (`BB_Lower`, `S3`, `SWING_LOW`,
+`donchian_DCL_20_20`, `ROLLING_LOW_20`, `Close`, `Low`, `hma`, `hwma`, …), all
+within 0.0014 of each other. That shape is what a weak common factor against
+the price level looks like, not a restatement of any one of them. The two
+columns the port's own synthetic screen worried about, `entlz_20` and
+`entropy_20`, appear nowhere in the top 25; whether the 687-comparator set
+contains them at all was not checked in this session, so that is an absence
+from the top 25 and not a measurement of their overlap.
+
+This reproduces the issue's prototype numbers exactly: max \|ρ\| 0.1353 vs
+`ZIGZAG` at n = 33,594, top-5 per-frame max median 0.1301, and the next two
+comparators `Pct_Up_Days_63` 0.1328 and `LINREG_LOWER_2` 0.1179 — the same
+figures the screen reported on 2026-10-24 (run `screen_20261024`). The
+prototype is bit-equal to this port on a 1,500-bar walk (§Gate A, A2), which
+is why the agreement is expected rather than a coincidence; it is now measured
+on the port.
+
+**How to read a rank correlation against this column.** It ties heavily by
+construction — 1,480 bars over 136–193 distinct float64 values on synthetic
+frames (*The attainable set* above) — so these Spearman figures are computed
+over many tied ranks. That lowers the attainable \|ρ\| against a continuous
+comparator and is a property of the feature; it is stated here so the 0.1353
+is not read as stronger evidence of independence than it is.
 
 **Nearest shipped columns on ONE 1,500-bar synthetic walk — NOT Gate E** (14
 shipped columns, one frame; Gate E is 687 comparators over 89 frozen BIST
@@ -534,17 +597,26 @@ about the 89; the issue's own stage-2 fork overlap put the prototype's worst at
 Porting session, in this worktree:
 
 * `python -m pytest tests/test_ts_binent_20.py -q` → **126 passed** in 4.30 s.
-* `python -m pytest -q` → **3 failed, 5,802 passed, 83 skipped** in 121.34 s.
-  The three failures are the two `CLAUDE.md` *Known breaks* —
-  `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`,
-  which needs the sibling `../AlternativeRepos` checkout and is deselected in
-  CI, and `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`,
-  the `supertrend` citation into the untracked `docs/pine/` — plus
-  `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, which
-  reports `['mtd_ret', 'ts_binent_20']`: the row this port owes, and one owed
-  before this branch. CI into `dev` skips that test under
-  `GATE_E_PENDING_OK=1`. The same counts are summarised in
+* `python -m pytest -q` → **3 failed, 5,802 passed, 83 skipped** in 121.34 s,
+  the third failure being the Gate E row this port then owed. The same counts
+  are summarised in
   `docs/reviews/auto-2026-11-12-ts-binent-20/99-summary.md`.
+
+Receipt session (2026-11-12), after the ledger row landed:
+
+* `python -m pytest tests/test_gate_e_ledger.py tests/test_ts_binent_20.py -q`
+  → **1 failed, 936 passed** in 7.23 s.
+* `python -m pytest -q` → **3 failed, 5,809 passed, 83 skipped** in 122.60 s.
+
+The three failures are the two `CLAUDE.md` *Known breaks* —
+`test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`,
+which needs the sibling `../AlternativeRepos` checkout and is deselected in
+CI, and `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`,
+the `supertrend` citation into the untracked `docs/pine/` — plus
+`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, which
+now reports `['mtd_ret']`: **`ts_binent_20` is gone from that list**, and the
+one name left is a row owed before this branch and not by it. CI into `dev`
+skips that test under `GATE_E_PENDING_OK=1`.
 
 The launcher runs both repos' suites in clean worktrees.
 
