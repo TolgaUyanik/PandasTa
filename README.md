@@ -4,9 +4,9 @@ Technical analysis indicators as a pandas extension. Fork of
 [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, extended with
 price-action / SMC indicators and oriented toward **machine-learning feature generation**.
 
-**334 indicators** registered in `Category`, across 9 categories — that is the number
+**335 indicators** registered in `Category`, across 9 categories — that is the number
 that matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two other
-counts are true of the same package and are easy to confuse with it: **342** are callable
+counts are true of the same package and are easy to confuse with it: **343** are callable
 as `df.ta.<name>()` (`Category` plus `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`,
 `up_and_down_volume`, `volume_delta` and `vp`), and `drawdown` and `ma` are
 importable as `ta.<name>()` without being either. All of them are in the dictionary; the
@@ -150,7 +150,7 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 
 **performance (6)** — `log_return` `max_return` `mtd_ret` `percent_return` `seas` `trend_return` (`cumulative=True` for cumulative)
 
-**statistics (43)** — `covariance` `cusum` `diff2_acf1` `entlz` `entropy` `ffd` `g191_026` `g191_044` `g191_165` `g191_189` `g191_190` `halflife` `ie_asym` `kpss` `kurtosis` `lean_hurst_100` `lean_tdd_20` `lot_zeroret_60` `lumpiness` `mad` `median` `median_ad_hl2` `normalize` `osap_retskew_21` `quantile` `rank` `rolling_sum` `skew` `stdev` `tf_centroid_20` `trend_scan` `ts_above_mean_20` `ts_ac1_60` `ts_aggac_60` `ts_binent_20` `ts_c3_20` `ts_cid_ce_20` `ts_kurt_60` `ts_medskew_20` `ts_peaks_20` `ts_perment_20` `variance` `zscore`
+**statistics (44)** — `arch_lm` `covariance` `cusum` `diff2_acf1` `entlz` `entropy` `ffd` `g191_026` `g191_044` `g191_165` `g191_189` `g191_190` `halflife` `ie_asym` `kpss` `kurtosis` `lean_hurst_100` `lean_tdd_20` `lot_zeroret_60` `lumpiness` `mad` `median` `median_ad_hl2` `normalize` `osap_retskew_21` `quantile` `rank` `rolling_sum` `skew` `stdev` `tf_centroid_20` `trend_scan` `ts_above_mean_20` `ts_ac1_60` `ts_aggac_60` `ts_binent_20` `ts_c3_20` `ts_cid_ce_20` `ts_kurt_60` `ts_medskew_20` `ts_peaks_20` `ts_perment_20` `variance` `zscore`
 
 **trend (62)** — `adx` `adxr` `amat` `aroon` `atr_push` `band_cross_retest` `bdi4kewl` `bos` `choch` `chop` `cksp` `decay` `decreasing` `dpo` `dtdb` `dx` `equal_highs_lows` `flag_breakout` `fvg` `fvg_sweep_magnet` `g191_069` `g191_098` `halftrend` `head_shoulders` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `pmax` `priorday_fib` `priormonth_range` `psar` `qstick` `rejection_blocks` `renko_trend` `ribbon_concordance` `rounding_cup` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `triple_top_bottom` `tsignals` `ttm_trend` `tvstop` `vhf` `volume_sr_zones` `vortex` `vstop` `vstop2` `xsignals` `zigzag` `zigzag_fib`
 

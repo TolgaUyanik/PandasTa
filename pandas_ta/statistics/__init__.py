@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from .arch_lm import arch_lm
 from .diff2_acf1 import diff2_acf1
 from .entlz import entlz
 from .entropy import entropy
