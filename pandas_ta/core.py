@@ -2016,6 +2016,12 @@ class AnalysisIndicators(BasePandasObject):
                            **kwargs)
         return self._post_process(result, **kwargs)
 
+    def ts_aggac_60(self, length=None, maxlag=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ts_aggac_60(close=close, length=length, maxlag=maxlag,
+                             offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def ts_binent_20(self, length=None, bins=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = ts_binent_20(close=close, length=length, bins=bins,
