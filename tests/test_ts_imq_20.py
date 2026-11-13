@@ -103,8 +103,13 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    spelling returns NaN on all 1,780 of those bars at 1e+100.
 
 10. **The wiring.** Five touch points, the accessor forwarding `length` and
-    `offset` under the right names, and the Gate E row still OWED -- which
-    `test_the_gate_e_row_is_owed` asserts, so the receipt session has a cue.
+    `offset` under the right names, and the IDENTITY of the Gate E ledger
+    row -- `is99-ts_imq_20-d5aaa69c`, measured 2026-11-14, SHIP at 0.5254
+    vs `ATR_Ratio_5_20_Pctl` over n = 391,818 --  which
+    `test_the_ledger_row_is_this_modules_gate_e_run` pins, because
+    `tests/test_gate_e_ledger.py` checks a row's arithmetic but cannot see
+    WHOSE run it came from (the 2026-10-24 screen measured the prototype to
+    the same printed digits).
 
 11. **What the source's `+ 1` buys**, against a variant built from scratch
     and not against `module - 1/length`, which would agree with anything:
@@ -114,8 +119,10 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
     so the test is a tolerance and not an equality.
 
 NOT pinned here: Gate E itself, which needs the parent engine's comparators
-and the 89 frozen BIST frames. The launcher runs it after this session;
-`docs/TsImq20Measured.md` §E carries the result.
+and the 89 frozen BIST frames. The launcher ran it on 2026-11-14 and the
+row is in `docs/gate_e_ledger.csv`; what this file pins is the row's
+identity, not the measurement. `docs/TsImq20Measured.md` §E carries the
+result in full.
 
 Numbers come from `docs/measure_ts_imq_20.py`; the receipt is
 `docs/TsImq20Measured.md`. ⚠ Float results move in the last bits between
@@ -1226,17 +1233,33 @@ def test_the_category_name_matches_the_module_and_the_column():
     assert ts_imq_20(_walk(100)).category == "statistics"
 
 
-def test_the_gate_e_row_is_owed():
-    """Gate E is run by the launcher after this session, so there is no
-    ledger row yet and `tests/test_gate_e_ledger.py` reports this
-    indicator as owed. When the receipt session records the row, THIS test
-    is the one that must be replaced by one pinning the recorded numbers --
-    it is deliberately phrased so it fails at that moment rather than
-    silently passing forever."""
+def test_the_ledger_row_is_this_modules_gate_e_run():
+    """Gate E on this column is the launcher's run on THIS module,
+    `is99-ts_imq_20-d5aaa69c` (measured 2026-11-14), and NOT the screen of
+    2026-10-24, which measured the prototype. The two agree to the printed
+    digits -- pooled 0.5254 against `ATR_Ratio_5_20_Pctl` at n = 391,818 --
+    which is exactly why the identity of the row needs pinning:
+    `tests/test_gate_e_ledger.py` re-derives a row's `module_sha1` and
+    output fingerprint from the tree and checks its verdict arithmetic, but
+    it cannot see WHOSE measurement a row came from.
+
+    This test replaced `test_the_gate_e_row_is_owed`, which asserted the row
+    was ABSENT and so failed the moment the receipt session recorded it."""
     import csv
-    import os
-    path = os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "docs", "gate_e_ledger.csv")
-    with open(path, newline="", encoding="utf-8") as fh:
-        rows = list(csv.DictReader(fh))
-    assert not [r for r in rows if r.get("indicator") == "ts_imq_20"]
+    from pathlib import Path
+    ledger = Path(__file__).resolve().parents[1] / "docs" / "gate_e_ledger.csv"
+    rows = list(csv.DictReader(ledger.open(encoding="utf-8")))
+    assert rows, "the ledger should not be empty"
+    rows = [r for r in rows if r["indicator"] == "ts_imq_20"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["module"] == "pandas_ta.statistics.ts_imq_20"
+    assert row["column"] == f"TS_IMQ_{LENGTH}"
+    assert row["run"] == "is99-ts_imq_20-d5aaa69c"
+    assert row["verdict"] == "SHIP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+    assert 0 < int(row["non_nan"]) < int(row["pooled_bars"])

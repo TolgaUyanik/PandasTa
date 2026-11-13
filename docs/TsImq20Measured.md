@@ -23,10 +23,14 @@ wiring** come from the live package and are asserted by
 `tests/test_readme_counts.py`, `tests/test_ml_companions.py` and
 `tests/test_altport2_ports.py`.
 
-**Verdict: SHIP WITH DISCLOSURE, pending Gate E.** The disclosure is §O: the
-column overlaps the shipped `TFCENTROID_20` at pooled +0.8466 on synthetic
-frames, which is DISCLOSE_GAP and not STRUCK under `r3-perframe-0.90`, and
-there is no real-frame figure for that pair. §E names what would reverse it.
+**Verdict: SHIP WITH DISCLOSURE. Gate E is measured** — run
+`is99-ts_imq_20-d5aaa69c`, 2026-11-14: max |ρ| **0.5254** vs
+`ATR_Ratio_5_20_Pctl` (n = 391,818), per-frame max median **0.5258**, 0 of
+89 frames at or above 0.90 → **SHIP** under `r3-perframe-0.90` (§E). The
+disclosure is §O and Gate E does not speak to it: the column overlaps the
+shipped `TFCENTROID_20` at pooled +0.8466 on synthetic frames, which is
+DISCLOSE_GAP and not STRUCK, and there is no real-frame figure for that pair
+because the 687 comparators hold no pandas_ta port.
 
 ---
 
@@ -310,10 +314,16 @@ module has no dispersion floor to shift (see Guards G3).
 
 ## Gate C — reachability
 
-⚠ **The real-data counts are OWED.** `../Backtesting`'s 89 frozen ALTPORT-1
-frames are outside this worktree, so the counts below are SYNTHETIC. The
-launcher's Gate E run produces the real-data reachability figures and the
-receipt session writes them here.
+**The real-data counts are in, from the Gate E run
+`is99-ts_imq_20-d5aaa69c` (2026-11-14).** Over the 89 frozen ALTPORT-1
+frames, **398,849** pooled bars: `TS_IMQ_20` is non-NaN on **397,069** and
+non-zero on **397,069** — the whole fired set, since the column cannot be 0
+(§A4). So `0 < fires < n` on real data: 397,069 of 398,849, the 1,780
+missing bars being the 20-bar warm-up on each of the 89 frames
+(89 × 20 = 1,780, exactly the gap).
+
+The per-frame table below is SYNTHETIC; `../Backtesting`'s frames are
+outside this worktree and the harness reports pooled counts only.
 
 | frame (1,500 bars) | non-NaN | non-zero | distinct | first fired bar |
 |---|---|---|---|---|
@@ -407,22 +417,49 @@ close itself.
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
+**MEASURED on this module. Run `is99-ts_imq_20-d5aaa69c`, measured
+2026-11-14 by the issue-solver launcher. Verdict: SHIP.**
 
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-reports `ts_imq_20` as owed until the receipt session records the row with
-`python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`.
-`tests/test_ts_imq_20.py::test_the_gate_e_row_is_owed` asserts the row is
-absent, so it fails at the moment the row lands — deliberately, as the
-receipt session's cue to replace it with one pinning the recorded numbers.
+| column | max \|ρ\| | against | set | n | per-frame max median | its comparator | verdict |
+|---|---|---|---|---|---|---|---|
+| `TS_IMQ_20` | **0.5254010620343497** | `ATR_Ratio_5_20_Pctl` | manifest | **391,818** | **0.5257806035859878** | `ATR_Ratio_5_20` | **SHIP** |
 
-What the 2026-10-24 screen measured on the PROTOTYPE (a prototype is not a
-port): max |rho| **0.5254** vs `ATR_Ratio_5_20_Pctl` over n = 391,818,
-per-frame max median 0.5258 → SHIP; next comparators `ATR_Ratio_5_20` 0.5237
-and `ATR_Ratio_5_20_State` 0.5004. Since this module is bit-equal to the
-prototype on every frame measured in §A1c, those figures are expected to
-carry over — but the launcher's run on THIS module is the number that
-decides.
+Against the two comparator sets separately: `compute_all` max |ρ| **0.4563**
+vs `CHOP` over n = 396,311; manifest max |ρ| **0.5254** vs
+`ATR_Ratio_5_20_Pctl` over n = 391,818. Per-frame: **0 of 89** frames at or
+above 0.90 (`perframe_pct_frames_ge_090` 0.0). Pooled-only verdict SHIP as
+well, so neither limb of `r3-perframe-0.90` is near its line — the whole
+reading is at **0.53 against a 0.76 ship line**.
+
+Run facts, from `meta.json` in the outputs folder: default parameters
+(`kwargs {}`), no excluded columns, **89** frames, **398,849** pooled bars,
+**687** comparators (329 `compute_all` + 358 manifest), canary
+`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`, pandas 2.3.3 /
+numpy 1.26.4, data stamp `1be6495e`, module sha1 `e8388c8d`,
+`pandas_ta_src_sha1` `9019b64e`. The harness reports `n_degenerate` **1**
+and `n_comparators` 687.
+
+Recorded in `docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-14`, which
+re-derives the module sha1 and the output fingerprint from this tree and
+refuses a non-default run — so the row is tied to this code.
+`tests/test_ts_imq_20.py::test_the_ledger_row_is_this_modules_gate_e_run`
+pins the row's identity (the run id, the verdict, 89 frames, 687
+comparators), which `tests/test_gate_e_ledger.py` cannot see.
+
+**Against the screen.** The 2026-10-24 screen measured the PROTOTYPE at max
+|ρ| 0.5254 vs `ATR_Ratio_5_20_Pctl` over the same n = 391,818, per-frame max
+median 0.5258. This run, on the PORT, gives 0.5254010620343497 and
+0.5257806035859878 against the same two comparators — agreement to the
+printed digits, as §A1c's bit-equality on nine frames predicted. The number
+that counts is this one.
+
+**The disclosure stands and Gate E did not test it.** §O's `TFCENTROID_20`
+overlap (pooled +0.8466 synthetic, DISCLOSE_GAP) is untouched by this run:
+the 687 comparators are the engine's `compute_all` ∪ the `ml_features`
+manifest and hold no pandas_ta port, so no real-frame figure for that pair
+exists. The ship decision here is the BANDS' decision; the question-redundancy
+call on `TFCENTROID_20` remains the owner's.
 
 A local stand-in for that comparator family, `mean|r| over 5 / mean|r| over
 20`, reads **+0.6121** on a walk, +0.5285 heavy-tailed and +0.5582 trending
@@ -443,8 +480,18 @@ overlap in §O, which the bands do not make on their own.
   actually took (still enabled on this machine: `SSSE3`, `SSE41`, `POPCNT`,
   `SSE42`, `AVX`, `F16C`, `AVX512CD`, `AVX512_CLX`, `AVX512_CNL`,
   `AVX512_ICL`).
-* Full-suite result and the Backtesting suite: the launcher runs both in
-  clean worktrees.
+* Full suite in this worktree on 2026-11-14, after the ledger row landed:
+  **3 failed, 7,698 passed, 85 skipped**. All three failures are
+  pre-existing and none names `ts_imq_20`:
+  `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` (the
+  known break in CLAUDE.md),
+  `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
+  (needs the sibling `../AlternativeRepos`; CI deselects it), and
+  `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
+  which now owes rows for `arch_lm`, `diff2_acf1`, `edge`, `firstzero_ac`,
+  `halflife`, `lumpiness` and `mtd_ret` — `ts_imq_20` dropped off that list
+  when this row was recorded.
+* The Backtesting suite: the launcher runs it in a clean worktree.
 
 ---
 
@@ -676,11 +723,12 @@ hides it, and `tests/test_altport2_ports.py` alone passes.
 
 ## What this port did NOT do
 
-* It did not run Gate E (the launcher does), and it did not write a ledger
-  row.
-* It did not measure anything on real data: `../Backtesting` is outside this
-  worktree. Every count above is synthetic, and the ones that are owed are
-  named as owed (§C, §E).
+* The PORT session did not run Gate E and did not write a ledger row; the
+  launcher ran it and the receipt session of 2026-11-14 recorded the row and
+  wrote §E and §C's pooled counts.
+* Nothing here but §E and §C's pooled real-data counts is measured on real
+  data: `../Backtesting` is outside this worktree, so every per-frame figure
+  above is synthetic.
 * It did not read tsfresh's source (§A0).
 * It did not touch `pandas_ta/statistics/tf_centroid_20.py` or its receipt,
   although §O1 is new information about that column too. A reader of
