@@ -246,8 +246,9 @@ They part company **only** where a guard fires:
   the other 20, because a NaN mean makes every comparison False).
 
 Because Gate E's statistic is a Spearman over the bars where both fire, the
-screen's figures are expected to carry over. The launcher's Gate E run on
-**this module** is still the number that decides ship or revert.
+screen's figures were expected to carry over, and §E says they did: the run
+on this module reads 0.5500 / 0.5495 against the prototype screen's
+0.5500 / 0.5495.
 
 ---
 
@@ -312,7 +313,7 @@ lands on a window the floor empties.
 
 ## 3. Gates C and D
 
-### C — reachability (synthetic; the real-data counts are owed, see §E)
+### C — reachability (synthetic; the real-data counts are §E1)
 
 | frame | fired | of | non-zero | distinct | min | max | modal (n) |
 |---|---|---|---|---|---|---|---|
@@ -567,18 +568,61 @@ a property worth keeping, not because it distinguishes anything.
 
 ## E. Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
+**Gate E: SHIP.** Run `is100-ts_cross_mean_20-39bc2e49`, measured
+2026-11-14 by issue-solver on **this** module, not on the prototype.
 
-There is no row in `docs/gate_e_ledger.csv` for `ts_cross_mean_20`, and
-`tests/test_ts_cross_mean_20.py::test_the_gate_e_row_is_still_owed` asserts
-that there is none — that test is the receipt session's cue to delete it
-and let `tests/test_gate_e_ledger.py` take over.
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails here, reporting `['halflife', 'mtd_ret', 'ts_cross_mean_20']`; the
-first two are pre-existing.
+| | |
+|---|---|
+| column | `TS_CROSS_MEAN_20` |
+| pooled max \|ρ\| | **0.5500** (signed −0.5500) |
+| against | `BB_BWidth_Pctl`, from the `ml_features` manifest |
+| n | **391,907** |
+| per-frame max median \|ρ\| | **0.5495**, also against `BB_BWidth_Pctl` |
+| frames at \|ρ\| ≥ 0.90 | **0 of 89** |
+| verdict | **SHIP** (`r3-perframe-0.90`; SHIP is < 0.76 pooled and < 0.90 per-frame median) |
+| best `compute_all` comparator | `BB_BWidth`, 0.5095, n = 397,158 |
+| comparators | 687 = 329 `compute_all` + 358 manifest, 0 degenerate |
+| universe | 89 frozen ALTPORT-1 BIST frames, 398,849 pooled bars |
+| defaults | `kwargs: {}` — no non-default parameter |
+| canary | AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal |
+| versions | pandas 2.3.3 / numpy 1.26.4 |
+| module sha1 | `6674bce4652cd5159e7b2db423a994179619e009` |
+| tree sha1 | `af8be48618f43a6a4e5101678d23324dc2072b46` |
 
-**Gate C's real-data counts are owed from that same run** and are not
-guessed here. §3's counts are synthetic.
+Recorded with
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-14`;
+`record` accepted it, which is what checks that the harness imported a
+`pandas_ta` tree byte-identical to this one, that the parameters were the
+defaults, that the universe was the 89 frames, that the comparator set was
+687 and that the canary was bit-equal. The row is
+`docs/gate_e_ledger.csv` line 96, with no waiver.
+`tests/test_ts_cross_mean_20.py::test_the_gate_e_row_is_this_ports_own_measurement`
+pins the row's identity (run id, module, column, verdict); the old
+`test_the_gate_e_row_is_still_owed` is gone.
+
+### E1 — Gate C on real data, from that run
+
+The run's own counts over the 89 frames, 398,849 pooled bars:
+
+| | bars |
+|---|---|
+| pooled | 398,849 |
+| non-NaN (`TS_CROSS_MEAN_20` fires) | **397,158** |
+| non-zero | **397,158** |
+| NaN | 1,691 |
+
+So `0 < 397,158 < 398,849` on real data, and **not one fired bar reads 0** —
+which is §A4's derivation holding on 397,158 real windows rather than on a
+derivation alone. The 1,691 empty bars are 19 warm-up bars per frame
+(19 × 89 = 1,691), so the floor and the bad-close mask emptied **no**
+further real bar.
+
+⚠ Those are the Gate E universe's counts. Separately, the ledger row stores
+an output fingerprint taken on `gate_e_ledger.py`'s own fixed 600-bar
+tick-rounded frame — `581;2315.0;11887.0;735979.0`, i.e. finite count, sum,
+sum of squares and index-weighted sum (`gate_e_ledger.py:148`) — which is
+what `tests/test_gate_e_ledger.py` re-derives to catch a later edit moving
+the output. 581 = 600 − 19, the same warm-up.
 
 ### E0 — what the 2026-10-24 screen measured, on its PROTOTYPE
 
@@ -601,8 +645,12 @@ measured at \|ρ\| ≥ 0.8019 — 55 pairs, on lines 2–56 of the file.
 file is on the owner's machine only; `docs/issues/` is gitignored.)
 
 Since this port is bit-equal to that prototype on 1,481 of 1,481 bars of
-each of nine frames with identical masks (A7), the screen's figures are
-expected to carry over. They are not a substitute for the run.
+each of nine frames with identical masks (A7), the screen's figures were
+expected to carry over, and the run in §E shows they did: same comparator,
+same n, 0.5500341832 pooled and 0.5494921049 per-frame max median against
+the screen's printed 0.5500 and 0.5495, and the same `BB_BWidth` 0.5095 one
+place down. The prototype was never a substitute for the run; it turned out
+to be an accurate prior.
 
 ---
 
@@ -613,7 +661,7 @@ manifest. It holds **no pandas_ta port**, so it cannot see this column
 against the fork's own choppiness family. Everything in this section is
 SYNTHETIC — six 1,500-bar frames, with `chop` fed deterministic synthetic
 high/low (`close × 1.004` and `close × 0.996`), since the frames carry
-closes only. Read the screen's real-frame figures in §E0 beside them.
+closes only. Read the run's real-frame figures in §E beside them.
 
 ### O1 — it is a CHOPPINESS reading
 
@@ -651,8 +699,10 @@ its mean once — so the column is strongly *inverse* to the window's own
 dispersion while being nearly blind to realised volatility and to the price
 level. It is the SHAPE of the window that moves it, not the size.
 
-That also explains the screen's top real-frame comparator: `BB_BWidth_Pctl`
-at 0.5500 is a band-width percentile, i.e. a dispersion reading.
+That also explains Gate E's top real-frame comparator, the screen's and the
+run's alike: `BB_BWidth_Pctl` at 0.5500 is a band-width percentile, i.e. a
+dispersion reading — and the sign is negative (§E), the same direction as
+the −0.6827 here.
 
 ### O3 — the level to expect, on INDEPENDENT windows
 
@@ -736,13 +786,25 @@ anything should be checked against. It is why the oracle lives in
   script asserting that the dispatch took and printing the features that
   survive (on this machine `SSSE3`, `SSE41`, `POPCNT`, `SSE42`, `AVX`,
   `F16C`, `AVX512CD`, `AVX512_CLX`, `AVX512_CNL`, `AVX512_ICL`).
-* `python -m pytest -q` → **3 failed, 7,521 passed, 85 skipped** in 187 s.
-  The three are: the `CLAUDE.md` Known break
+* `python -m pytest -q` → **3 failed, 7,521 passed, 85 skipped** in 187 s
+  in the porting session, when the third failure was this port's own owed
+  Gate E row.
+* After the Gate E run was recorded (receipt session, 2026-11-14):
+  `python -m pytest -q` → **3 failed, 7,911 passed, 85 skipped** in 200 s,
+  and `ts_cross_mean_20` is in none of the three. They are: the `CLAUDE.md`
+  Known break
   (`test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`), the
   `../AlternativeRepos`-only test CI deselects by name
   (`test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`),
-  and the owed Gate E row, which reports
-  `['halflife', 'mtd_ret', 'ts_cross_mean_20']`.
+  and `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
+  which now reports **seven other** indicators —
+  `['arch_lm', 'diff2_acf1', 'edge', 'firstzero_ac', 'halflife',
+  'lumpiness', 'mtd_ret']`, all of them owed by someone else.
+  `python -m pytest tests/test_ts_cross_mean_20.py -q` → **205 passed** in
+  3.08 s, including the new
+  `test_the_gate_e_row_is_this_ports_own_measurement`; and
+  `python docs/measure_ts_cross_mean_20_cpu.py` → the same **205 passed** in
+  2.91 s with `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`.
 * The Backtesting suite is the launcher's to run.
 
 ⚠ One pre-existing trap, recorded and not fixed (it is outside this issue):
@@ -775,16 +837,25 @@ callable / statistics 41 → 42, `docs/IndicatorDictionary.md` regenerated
 
 ## Verdict
 
-**Ship, pending Gate E.** Every gate this session can run is clear: Gate A
+**Ship.** Gate E ran on this module on 2026-11-14 and came back **SHIP** at
+pooled \|ρ\| 0.5500 against `BB_BWidth_Pctl` (n = 391,907), per-frame max
+median 0.5495, 0 of 89 frames at or above 0.90 — a long way under the 0.76
+ship line, so nothing is removed and nothing is waived. Every other gate was
+clear before it: Gate A
 bit-equal against three independent oracles including one at 60 significant
 digits, Gate B 0 of 37 on the real module with six mutants of which the
-hardest needed a derived probe, Gate C `0 < 1,481 < 1,500` with no zeros,
+hardest needed a derived probe, Gate C `0 < 1,481 < 1,500` with no zeros on
+synthetic frames and `0 < 397,158 < 398,849` with no zeros on the real
+universe (§E1),
 Gate D bit-identical at ×8/×64 (measured, with a six-order margin) and
 under any monotone power of the price, and the in-fork overlap topping out
 at +0.6296 against `chop` on synthetic frames.
 
-What would reverse it: a Gate E run on this module at pooled \|ρ\| ≥ 0.90,
-or a top-5 comparator's per-frame median ≥ 0.90. The screen's prototype
-measured 0.5500 / 0.5495 and this port is bit-equal to that prototype, so
-that is not expected — but the run is the evidence and it has not happened
-yet.
+What would have reversed it: a Gate E run on this module at pooled
+\|ρ\| ≥ 0.90, or a top-5 comparator's per-frame median ≥ 0.90. The run
+measured 0.5500 and 0.5495, the same two figures the prototype screen
+printed, so neither happened.
+
+What is still open and is **not** this issue's to close: `docs/gate_e_ledger.csv`
+owes rows for seven other indicators (§F), and the two pre-existing suite
+failures recorded in `CLAUDE.md`.

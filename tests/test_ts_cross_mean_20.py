@@ -99,10 +99,17 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    each of nine frames with IDENTICAL NaN masks, parting company only where
    a guard fires.
 
+8. **Which Gate E run the ledger row came from.** Gate E ran on this module
+   as `is100-ts_cross_mean_20-39bc2e49` (measured 2026-11-14): pooled
+   max |rho| **0.5500** against `BB_BWidth_Pctl` (manifest, n = 391,907),
+   per-frame max median **0.5495** over 89 frames, 0 of 89 frames at or
+   above 0.90 -- **SHIP**. The arithmetic of that row is
+   `tests/test_gate_e_ledger.py`'s job; what this file pins is the row's
+   identity, not the measurement. `docs/TsCrossMean20Measured.md` §E carries
+   the result in full.
+
 Numbers come from `docs/measure_ts_cross_mean_20.py`; the receipt is
-`docs/TsCrossMean20Measured.md`. Gate E is owed -- issue-solver runs it on
-this module after the session that wrote this file, and
-`test_the_gate_e_row_is_still_owed` is the receipt session's cue.
+`docs/TsCrossMean20Measured.md`.
 Counts that depend on the last bits of a generated frame carry a band or a
 tolerance; the structural facts are pinned exactly.
 """
@@ -1082,15 +1089,38 @@ def test_the_two_part_company_exactly_where_a_guard_fires():
     assert sorted(set(pro.iloc[200:220].tolist())) == [0.0]
 
 
-def test_the_gate_e_row_is_still_owed():
-    """Gate E is run by issue-solver after this session, so there is no
-    ledger row yet. When the receipt session records one, this test is its
-    cue: delete it and let `tests/test_gate_e_ledger.py` take over."""
+def test_the_gate_e_row_is_this_ports_own_measurement():
+    """The ledger row for `ts_cross_mean_20` must come from the run on THIS
+    module, `is100-ts_cross_mean_20-39bc2e49` (measured 2026-11-14), and NOT
+    from the screen of 2026-10-24, which measured the prototype. The two
+    agree to the printed digits -- pooled 0.5500 against `BB_BWidth_Pctl` at
+    n = 391,907, per-frame max median 0.5495 -- which is exactly why the
+    identity of the row needs pinning: `tests/test_gate_e_ledger.py`
+    re-derives a row's `module_sha1` and output fingerprint from the tree and
+    checks its verdict arithmetic, but it cannot see WHOSE measurement a row
+    came from.
+
+    This test replaced `test_the_gate_e_row_is_still_owed`, which asserted
+    the row was ABSENT and so failed the moment the receipt session recorded
+    it."""
     import csv
     from pathlib import Path
     ledger = Path(__file__).resolve().parents[1] / "docs" / "gate_e_ledger.csv"
     rows = list(csv.DictReader(ledger.open(encoding="utf-8")))
-    assert not [r for r in rows if r["indicator"] == "ts_cross_mean_20"]
+    assert rows, "the ledger should not be empty"
+    rows = [r for r in rows if r["indicator"] == "ts_cross_mean_20"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["module"] == "pandas_ta.statistics.ts_cross_mean_20"
+    assert row["column"] == f"TS_CROSS_MEAN_{LENGTH}"
+    assert row["run"] == "is100-ts_cross_mean_20-39bc2e49"
+    assert row["verdict"] == "SHIP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+    assert 0 < int(row["non_nan"]) < int(row["pooled_bars"])
 
 
 # ------------------------------------------- what the column actually is
