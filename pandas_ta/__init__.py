@@ -51,7 +51,7 @@ Category = {
     # Momentum
     "momentum": [
         "a101_007", "a101_021", "a101_023", "a101_043", "a101_046", "a101_048", "a101_053", "ao", "apo", "bias", "bop", "brar", "cci", "cdvo", "cfo", "cg", "cmo",
-        "coppock", "crsi", "cti", "dm", "er", "eri", "ewmac", "fisher", "g191_002", "g191_003", "g191_022", "g191_093", "g191_129", "g191_146", "g191_152", "g191_167", "g191_169", "g191_187", "gapm", "imi", "inertia", "kalman_rsi", "kdj", "kst", "lrsi", "macd", "macd_area_divergence",
+        "coppock", "crsi", "cti", "dm", "er", "eri", "ewmac", "fisher", "g191_002", "g191_003", "g191_022", "g191_093", "g191_110", "g191_129", "g191_146", "g191_152", "g191_167", "g191_169", "g191_187", "gapm", "imi", "inertia", "kalman_rsi", "kdj", "kst", "lrsi", "macd", "macd_area_divergence",
         "mom", "osap_intmom", "osap_lrrev", "osap_mrrev", "ovn_split", "pfe", "pgo", "po", "ppo", "pressure_pulse", "psl", "pvo", "qqe", "roc", "rsi", "rsi_divergence", "rsx", "rvgi",
         "slope", "smi", "squeeze", "squeeze_pro", "stc", "stoch", "stochrsi", "td_seq", "trix",
         "trixh", "tsi", "uo", "vwmacd", "wavetrend", "willr",
@@ -71,7 +71,7 @@ Category = {
     "performance": ["log_return", "percent_return", "trend_return", "max_return", "mtd_ret", "seas"],
     # Statistics
     "statistics": [
-        "entlz", "entropy", "ffd", "firstzero_ac", "g191_026", "g191_044", "g191_165", "g191_189", "g191_190", "ie_asym", "kpss", "kurtosis", "lot_zeroret_60", "mad", "median", "median_ad_hl2", "osap_retskew_21", "quantile", "rank", "skew", "stdev",
+        "entlz", "entropy", "ffd", "firstzero_ac", "g191_026", "g191_044", "g191_165", "g191_189", "g191_190", "ie_asym", "kpss", "kurtosis", "lean_hurst_100", "lot_zeroret_60", "mad", "median", "median_ad_hl2", "osap_retskew_21", "quantile", "rank", "skew", "stdev",
         "tf_centroid_20", "variance", "zscore",
         "rolling_sum", "normalize", "covariance", "cusum", "trend_scan"
     ],

@@ -4,9 +4,9 @@ Technical analysis indicators as a pandas extension. Fork of
 [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, extended with
 price-action / SMC indicators and oriented toward **machine-learning feature generation**.
 
-**318 indicators** registered in `Category`, across 9 categories — that is the number
+**320 indicators** registered in `Category`, across 9 categories — that is the number
 that matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two other
-counts are true of the same package and are easy to confuse with it: **326** are callable
+counts are true of the same package and are easy to confuse with it: **328** are callable
 as `df.ta.<name>()` (`Category` plus `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`,
 `up_and_down_volume`, `volume_delta` and `vp`), and `drawdown` and `ma` are
 importable as `ta.<name>()` without being either. All of them are in the dictionary; the
@@ -144,13 +144,13 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 
 **cycles (9)** — `correlation_cycle` `dsp` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode`
 
-**momentum (81)** — `a101_007` `a101_021` `a101_023` `a101_043` `a101_046` `a101_048` `a101_053` `ao` `apo` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `dm` `er` `eri` `ewmac` `fisher` `g191_002` `g191_003` `g191_022` `g191_093` `g191_129` `g191_146` `g191_152` `g191_167` `g191_169` `g191_187` `gapm` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `macd` `macd_area_divergence` `mom` `osap_intmom` `osap_lrrev` `osap_mrrev` `ovn_split` `pfe` `pgo` `po` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsi_divergence` `rsx` `rvgi` `slope` `smi` `squeeze` `squeeze_pro` `stc` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `vwmacd` `wavetrend` `willr` `wpo`
+**momentum (82)** — `a101_007` `a101_021` `a101_023` `a101_043` `a101_046` `a101_048` `a101_053` `ao` `apo` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `dm` `er` `eri` `ewmac` `fisher` `g191_002` `g191_003` `g191_022` `g191_093` `g191_110` `g191_129` `g191_146` `g191_152` `g191_167` `g191_169` `g191_187` `gapm` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `macd` `macd_area_divergence` `mom` `osap_intmom` `osap_lrrev` `osap_mrrev` `ovn_split` `pfe` `pgo` `po` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsi_divergence` `rsx` `rvgi` `slope` `smi` `squeeze` `squeeze_pro` `stc` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `vwmacd` `wavetrend` `willr` `wpo`
 
 **overlap (50)** — `alma` `bpress` `dema` `dema2` `ema` `ema2` `ema_align` `frama` `fwma` `hilo` `hl2` `hlc3` `hma` `iama` `ichimoku` `ichimoku_ml` `jma` `kalman_trend` `kama` `linreg` `linreg_channel` `ma_disparity` `mcgd` `midpoint` `midprice` `mmar` `nadaraya_watson_envelope` `ohlc4` `pwma` `rainbow` `rma` `rma2` `sinwma` `sma` `ssf` `supertrend` `supertrend2` `swma` `t3` `t3_tv` `tema` `tema2` `trima` `vidya` `vwap` `vwma` `wcp` `wilder_rma` `wma` `zlma`
 
 **performance (6)** — `log_return` `max_return` `mtd_ret` `percent_return` `seas` `trend_return` (`cumulative=True` for cumulative)
 
-**statistics (29)** — `covariance` `cusum` `entlz` `entropy` `ffd` `firstzero_ac` `g191_026` `g191_044` `g191_165` `g191_189` `g191_190` `ie_asym` `kpss` `kurtosis` `lot_zeroret_60` `mad` `median` `median_ad_hl2` `normalize` `osap_retskew_21` `quantile` `rank` `rolling_sum` `skew` `stdev` `tf_centroid_20` `trend_scan` `variance` `zscore`
+**statistics (30)** — `covariance` `cusum` `entlz` `entropy` `ffd` `firstzero_ac` `g191_026` `g191_044` `g191_165` `g191_189` `g191_190` `ie_asym` `kpss` `kurtosis` `lean_hurst_100` `lot_zeroret_60` `mad` `median` `median_ad_hl2` `normalize` `osap_retskew_21` `quantile` `rank` `rolling_sum` `skew` `stdev` `tf_centroid_20` `trend_scan` `variance` `zscore`
 
 **trend (62)** — `adx` `adxr` `amat` `aroon` `atr_push` `band_cross_retest` `bdi4kewl` `bos` `choch` `chop` `cksp` `decay` `decreasing` `dpo` `dtdb` `dx` `equal_highs_lows` `flag_breakout` `fvg` `fvg_sweep_magnet` `g191_069` `g191_098` `halftrend` `head_shoulders` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `pmax` `priorday_fib` `priormonth_range` `psar` `qstick` `rejection_blocks` `renko_trend` `ribbon_concordance` `rounding_cup` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `triple_top_bottom` `tsignals` `ttm_trend` `tvstop` `vhf` `volume_sr_zones` `vortex` `vstop` `vstop2` `xsignals` `zigzag` `zigzag_fib`
 

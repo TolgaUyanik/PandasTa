@@ -26,7 +26,7 @@ window per ticker before concatenating tickers.
 `*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is
 invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
-**320 indicators** probed; 1 raise on this environment (pandas 2.x) -- see [Known breaks](#known-breaks).
+**321 indicators** probed; 1 raise on this environment (pandas 2.x) -- see [Known breaks](#known-breaks).
 
 ### How many indicators is that, exactly
 
@@ -34,8 +34,8 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | surface | n | what it means |
 |---|---|---|
-| registered in `Category` | **318** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **326** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| registered in `Category` | **319** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **327** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
@@ -64,7 +64,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `ht_sine` | C | — | `HT_SINE` SF<br>`HT_LEADSINE` SF | 63 | `sin(DCPhase)` and `sin(DCPhase + 45 degrees)`. Ehlers' reading is that the two lines cross ahead of a cyclic turn and wander without crossing while… |
 | `ht_trendmode` | C | — | `HT_TRENDMODE` BIN | 63 | 1 when the market is judged to be trending, 0 when it is judged to be cycling. Four tests, in TA-Lib's order: a SineWave crossing resets the trend… |
 
-## momentum (81)
+## momentum (82)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -97,6 +97,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `g191_003` | H/L/C | `length=None` | `G191_003_6` SF | 6 | Guotai Junan's (2017, "GTJA191") alpha `#3`, per issue #79. Each bar contributes the distance from its close to a DIRECTIONAL reference price: on an… |
 | `g191_022` | C | `bias_length=None`, `delay_length=None`, `smooth_length=None`, `smooth_weight=None` | `G191_022_6_3_12_1` SF | 19 | Guotai Junan's (2017, "GTJA191") alpha `#22`, per issue #82. The 6-day bias `(close - MEAN(close,6)) / MEAN(close,6)` -- where today's close sits… |
 | `g191_093` | O/L/C | `length=None` | `G191_093_20` SF | 20 | Guotai Junan's (2017, "GTJA191") alpha `#93`, per issue #62. On days the open did not fall from the prior day's open, contributes zero; on days it… |
+| `g191_110` | H/L/C | `length=None` | `G191_110_20` SF | 20 | Guotai Junan's (2017, "GTJA191") alpha `#110`, per issue #84. Over a trailing window, the total distance highs reached ABOVE the prior close divided… |
 | `g191_129` | C | `length=None` | `G191_129_12` SF | 12 | Guotai Junan's (2017, "GTJA191") alpha `#129`, per issue #75. On a down day (close below the prior close), the bar contributes the MAGNITUDE of its… |
 | `g191_146` | C | `smooth1_length=None`, `smooth1_weight=None`, `mean_length=None`, `smooth2_length=None`, `smooth2_weight=None` | `G191_146_61_2_20_60_2` SF | 120 | Guotai Junan's (2017, "GTJA191") alpha `#146`, per issue #52. The daily return's deviation from its own slow GTJA-recursive average (the "return… |
 | `g191_152` | C | `delay_length=None`, `smooth1_length=None`, `smooth1_weight=None`, `fast_length=None`, `slow_length=None`, `smooth2_length=None`, `smooth2_weight=None` | `G191_152_9_9_1_12_26_9_1` SF | 52 | Guotai Junan's (2017, "GTJA191") alpha `#152`, per issue #66. The 9-day close ratio `C/C9` is lagged by a bar and smoothed with GTJA's own recursive… |
@@ -226,7 +227,6 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `entlz` | C | `length=None`, `base=None` | `ENTLZ_20` SF | 20 | AFML ch. 18 "Entropy Features" encodes returns as a symbol sequence (sign, or k quantile bins) and estimates its entropy over a rolling window; low… |
 | `entropy` | C | `length=None`, `base=None` | `ENTP_10` SF | 18 | Introduced by Claude Shannon in 1948, entropy measures the unpredictability of the data, or equivalently, of its average information. A die has… |
 | `ffd` | C | `d=None`, `threshold=None` | `FFD_0.4_0.0001` SF | 281 | A rolling linear filter of log price that keeps more memory than a one-bar return: `FFD_t = sum_{k=0}^{W-1} w_k * y_{t-k}`, where `y = log(close /… |
-| `firstzero_ac` | C | `length=None` | `FIRSTZEROAC_100` ORD | 100 | Over a rolling window of one-bar returns, take the sample autocorrelation at every lag 1 .. length - 1 and report the first lag whose autocorrelation… |
 | `g191_026` | H/L/C | `mean_length=None`, `corr_length=None`, `lag=None` | `G191_026_7_230_5` SF | 234 | Guotai Junan's (2017, "GTJA191") alpha `#26`, per issue #56. A mean-reversion gap (how far the close sits below its own trailing 7-bar average, as a… |
 | `g191_044` | H/L/C/V | `mean_v_length=None`, `corr_length=None`, `decay1_length=None`, `tsrank1_length=None`, `delta_length=None`, `decay2_length=None`, `tsrank2_length=None` | `G191_044_10_7_6_4_3_10_15` SF | 26 | Guotai Junan's (2017, "GTJA191") alpha `#44`, per issue #60. Sums two time-series percentile ranks: how unusually high the (6-bar decay-smoothed)… |
 | `g191_165` | C | `length=None` | `G191_165_48` SF | 47 | Guotai Junan's (2017, "GTJA191") alpha `#165`, per issue #55. The classical rescaled-range (R/S) statistic (Hurst 1951) over a trailing window: the… |
@@ -235,6 +235,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `ie_asym` | C | `length=None`, `mult=None` | `IEASYM_260_2.0` SF | 260 | The empirical form of Jiang, Wu, Zhu and Chen's distribution-based return asymmetry measure (as described in Quantpedia strategy #0664, "Return… |
 | `kpss` | C | `length=None` | `KPSS_100` SF | 99 | The Kwiatkowski-Phillips-Schmidt-Shin statistic of log price over a rolling window, under the trend-stationary null: regress log price on a constant… |
 | `kurtosis` | C | `length=None` | `KURT_30` SF | 29 | Sources: |
+| `lean_hurst_100` | C | `length=None`, `max_lag=None` | `LEAN_HURST_100_20` SF | 99 | How fast the spread of a log-price move grows with the horizon it is measured over. Inside a rolling window of `length` closes, take the lagged… |
 | `lot_zeroret_60` | C | `length=None` | `LOT_ZERORET_60` CONST | 60 | Share of zero-return days, as asked for by issue #39: Lesmond, Ogden & Trzcinka (1999, RFS) use the proportion of zero daily returns over a trailing… |
 | `mad` | C | `length=None` | `MAD_30` PX | 29 | Sources: |
 | `median` | C | `length=None` | `MEDIAN_30` PX | 29 | Rolling Median of over 'n' periods. Sibling of a Simple Moving Average. |
@@ -409,7 +410,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation needed.
 
-`cdl_doji` `cdl_inside` `cdl_z` `correlation_cycle` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `a101_007` `a101_021` `a101_023` `a101_043` `a101_046` `a101_048` `a101_053` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `er` `ewmac` `fisher` `g191_002` `g191_003` `g191_022` `g191_093` `g191_129` `g191_146` `g191_152` `g191_167` `g191_169` `g191_187` `gapm` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `osap_intmom` `osap_mrrev` `ovn_split` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `kalman_trend` `ma_disparity` `log_return` `max_return` `mtd_ret` `percent_return` `seas` `trend_return` `covariance` `cusum` `entlz` `entropy` `ffd` `firstzero_ac` `g191_026` `g191_044` `g191_165` `g191_189` `g191_190` `ie_asym` `kpss` `kurtosis` `median_ad_hl2` `normalize` `osap_retskew_21` `rank` `skew` `tf_centroid_20` `trend_scan` `zscore` `adx` `adxr` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `dx` `fvg` `g191_069` `g191_098` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `corwin_schultz` `cvi` `g191_023` `g191_109` `g191_158` `g191_160` `g191_174` `g191_188` `garman_klass` `har_park` `massi` `natr` `range_compress_run` `range_profile` `rogers_satchell` `roll_spread` `rvi` `tf_median_absdiff_20` `ui` `volvol` `wvma` `yang_zhang` `a101_026` `a101_035` `a101_058` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `demand` `g191_040` `g191_043` `g191_076` `g191_080` `g191_111` `g191_144` `g191_145` `g191_191` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `osap_voltrend_60` `pocket_pivot` `pvcorr` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `vol_sign_rev` `volcv` `vsumd` `vzo`
+`cdl_doji` `cdl_inside` `cdl_z` `correlation_cycle` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `a101_007` `a101_021` `a101_023` `a101_043` `a101_046` `a101_048` `a101_053` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `er` `ewmac` `fisher` `g191_002` `g191_003` `g191_022` `g191_093` `g191_110` `g191_129` `g191_146` `g191_152` `g191_167` `g191_169` `g191_187` `gapm` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `osap_intmom` `osap_mrrev` `ovn_split` `pfe` `pgo` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsx` `rvgi` `smi` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `wavetrend` `willr` `wpo` `bpress` `ema_align` `frama` `iama` `ichimoku_ml` `kalman_trend` `ma_disparity` `log_return` `max_return` `mtd_ret` `percent_return` `seas` `trend_return` `covariance` `cusum` `entlz` `entropy` `ffd` `g191_026` `g191_044` `g191_165` `g191_189` `g191_190` `ie_asym` `kpss` `kurtosis` `lean_hurst_100` `median_ad_hl2` `normalize` `osap_retskew_21` `rank` `skew` `tf_centroid_20` `trend_scan` `zscore` `adx` `adxr` `amat` `aroon` `atr_push` `bdi4kewl` `bos` `choch` `chop` `decreasing` `dx` `fvg` `g191_069` `g191_098` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `priorday_fib` `priormonth_range` `rejection_blocks` `renko_trend` `ribbon_concordance` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `tsignals` `ttm_trend` `tvstop` `vhf` `vortex` `vstop` `vstop2` `zigzag_fib` `atr_ma_multiple` `corwin_schultz` `cvi` `g191_023` `g191_109` `g191_158` `g191_160` `g191_174` `g191_188` `garman_klass` `har_park` `massi` `natr` `range_compress_run` `range_profile` `rogers_satchell` `roll_spread` `rvi` `tf_median_absdiff_20` `ui` `volvol` `wvma` `yang_zhang` `a101_026` `a101_035` `a101_058` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `demand` `g191_040` `g191_043` `g191_076` `g191_080` `g191_111` `g191_144` `g191_145` `g191_191` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `osap_voltrend_60` `pocket_pivot` `pvcorr` `pvi` `pvr` `pvt` `tri_dir_pressure` `vol_delta` `vol_sign_rev` `volcv` `vsumd` `vzo`
 
 ## Never fires on the probe
 

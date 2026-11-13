@@ -10,6 +10,7 @@ from .g191_190 import g191_190
 from .ie_asym import ie_asym
 from .kpss import kpss
 from .kurtosis import kurtosis
+from .lean_hurst_100 import lean_hurst_100
 from .lot_zeroret_60 import lot_zeroret_60
 from .mad import mad
 from .median import median

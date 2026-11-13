@@ -1130,6 +1130,14 @@ class AnalysisIndicators(BasePandasObject):
                            offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def g191_110(self, length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = g191_110(high=high, low=low, close=close, length=length,
+                           offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def g191_129(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = g191_129(close=close, length=length, offset=offset, **kwargs)
@@ -1930,6 +1938,12 @@ class AnalysisIndicators(BasePandasObject):
     def kurtosis(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = kurtosis(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def lean_hurst_100(self, length=None, max_lag=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = lean_hurst_100(close=close, length=length, max_lag=max_lag,
+                                offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def lot_zeroret_60(self, length=None, offset=None, **kwargs):
