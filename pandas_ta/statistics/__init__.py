@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+from .arch_lm import arch_lm
+from .diff2_acf1 import diff2_acf1
 from .entlz import entlz
 from .entropy import entropy
 from .firstzero_ac import firstzero_ac
@@ -13,6 +15,7 @@ from .kurtosis import kurtosis
 from .lean_hurst_100 import lean_hurst_100
 from .lean_tdd_20 import lean_tdd_20
 from .lot_zeroret_60 import lot_zeroret_60
+from .lumpiness import lumpiness
 from .mad import mad
 from .median import median
 from .median_ad_hl2 import median_ad_hl2
@@ -41,3 +44,4 @@ from .beta import beta
 from .cusum import cusum
 from .ffd import ffd
 from .trend_scan import trend_scan
+from .halflife import halflife

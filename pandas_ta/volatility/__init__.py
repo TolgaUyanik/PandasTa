@@ -8,6 +8,7 @@ from .bbands import bbands
 from .corwin_schultz import corwin_schultz
 from .cvi import cvi
 from .donchian import donchian
+from .edge import edge
 from .g191_023 import g191_023
 from .g191_109 import g191_109
 from .g191_158 import g191_158

@@ -1868,9 +1868,19 @@ class AnalysisIndicators(BasePandasObject):
         return self._post_process(result, **kwargs)
 
     # Statistics
+    def arch_lm(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = arch_lm(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def cusum(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = cusum(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def diff2_acf1(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = diff2_acf1(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def entlz(self, length=None, base=None, offset=None, **kwargs):
@@ -1931,6 +1941,11 @@ class AnalysisIndicators(BasePandasObject):
         result = g191_190(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def halflife(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = halflife(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def kpss(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = kpss(close=close, length=length, offset=offset, **kwargs)
@@ -1961,6 +1976,11 @@ class AnalysisIndicators(BasePandasObject):
     def lot_zeroret_60(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = lot_zeroret_60(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def lumpiness(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = lumpiness(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def mad(self, length=None, offset=None, **kwargs):
@@ -2708,6 +2728,14 @@ class AnalysisIndicators(BasePandasObject):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
         result = donchian(high=high, low=low, lower_length=lower_length, upper_length=upper_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def edge(self, length=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = edge(open_=open_, high=high, low=low, close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def g191_023(self, std_length=None, smooth_length=None, smooth_weight=None, offset=None, **kwargs):

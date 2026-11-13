@@ -71,10 +71,10 @@ Category = {
     "performance": ["log_return", "percent_return", "trend_return", "max_return", "mtd_ret", "seas"],
     # Statistics
     "statistics": [
-        "entlz", "entropy", "ffd", "firstzero_ac", "g191_026", "g191_044", "g191_165", "g191_189", "g191_190", "ie_asym", "kpss", "kurtosis", "lean_hurst_100", "lean_tdd_20", "lot_zeroret_60", "mad", "median", "median_ad_hl2", "osap_retskew_21", "quantile", "rank", "skew", "stdev",
+        "arch_lm", "diff2_acf1", "entlz", "entropy", "ffd", "firstzero_ac", "g191_026", "g191_044", "g191_165", "g191_189", "g191_190", "ie_asym", "kpss", "kurtosis", "lean_hurst_100", "lean_tdd_20", "lot_zeroret_60", "lumpiness", "mad", "median", "median_ad_hl2", "osap_retskew_21", "quantile", "rank", "skew", "stdev",
         "tf_centroid_20", "ts_above_mean_20", "ts_ac1_60", "ts_aggac_60", "ts_binent_20", "ts_c3_20", "ts_cid_ce_20", "ts_kurt_60", "ts_medskew_20", "ts_peaks_20",
         "ts_perment_20", "variance", "zscore",
-        "rolling_sum", "normalize", "covariance", "cusum", "trend_scan"
+        "rolling_sum", "normalize", "covariance", "cusum", "trend_scan", "halflife"
     ],
     # Trend
     "trend": [
@@ -93,7 +93,7 @@ Category = {
     ],
     # Volatility
     "volatility": [
-        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "corwin_schultz", "cvi", "donchian", "g191_023", "g191_109", "g191_158", "g191_160", "g191_174", "g191_188", "garman_klass", "har_park", "hwc", "kc", "massi", "natr", "pdist", "range_compress_run", "range_profile", "rogers_satchell", "roll_spread", "rvi", "tf_median_absdiff_20", "thermo", "true_range", "ui", "volvol", "wvma", "yang_zhang",
+        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "corwin_schultz", "cvi", "donchian", "edge", "g191_023", "g191_109", "g191_158", "g191_160", "g191_174", "g191_188", "garman_klass", "har_park", "hwc", "kc", "massi", "natr", "pdist", "range_compress_run", "range_profile", "rogers_satchell", "roll_spread", "rvi", "tf_median_absdiff_20", "thermo", "true_range", "ui", "volvol", "wvma", "yang_zhang",
     ],
 
     # Volume, "vp" or "Volume Profile" is unique
