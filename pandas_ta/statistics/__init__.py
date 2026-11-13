@@ -24,6 +24,7 @@ from .tf_centroid_20 import tf_centroid_20
 from .ts_ac1_60 import ts_ac1_60
 from .ts_binent_20 import ts_binent_20
 from .ts_c3_20 import ts_c3_20
+from .ts_cid_ce_20 import ts_cid_ce_20
 from .ts_kurt_60 import ts_kurt_60
 from .ts_peaks_20 import ts_peaks_20
 from .ts_perment_20 import ts_perment_20
