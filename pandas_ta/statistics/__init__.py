@@ -21,6 +21,7 @@ from .rank import rank
 from .skew import skew
 from .stdev import stdev
 from .tf_centroid_20 import tf_centroid_20
+from .ts_above_mean_20 import ts_above_mean_20
 from .ts_ac1_60 import ts_ac1_60
 from .ts_aggac_60 import ts_aggac_60
 from .ts_binent_20 import ts_binent_20
