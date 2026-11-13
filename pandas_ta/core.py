@@ -2022,6 +2022,12 @@ class AnalysisIndicators(BasePandasObject):
                           **kwargs)
         return self._post_process(result, **kwargs)
 
+    def ts_kurt_60(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ts_kurt_60(close=close, length=length, offset=offset,
+                            **kwargs)
+        return self._post_process(result, **kwargs)
+
     def ts_peaks_20(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = ts_peaks_20(close=close, length=length, offset=offset,
