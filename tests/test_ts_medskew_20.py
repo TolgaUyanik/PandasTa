@@ -118,9 +118,11 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    280 windows of.
 
 Numbers come from `docs/measure_ts_medskew_20.py`; the receipt is
-`docs/TsMedskew20Measured.md`. Gate C on real data and Gate E are OWED: the
-launcher runs `gate_e_overlap.py` after this session, and
-`test_the_gate_e_row_is_still_owed` is the receipt session's cue.
+`docs/TsMedskew20Measured.md`. Gate E was run on THIS module on 2026-11-13
+(run `is98-ts_medskew_20-3303ebf4`, verdict SHIP, max |rho| 0.3727 vs
+`PVT_Slope_norm` at n = 396,970) and the two tests at the end of this file pin
+that row's identity and its numbers, because `tests/test_gate_e_ledger.py`
+checks a row generically and cannot see WHOSE run it came from.
 Counts that depend on the last bits of a generated frame carry a band or a
 tolerance; the structural facts are pinned exactly.
 """
@@ -810,8 +812,9 @@ def test_the_first_fired_bar_is_length_not_length_minus_one():
 def test_gate_c_the_column_fires_and_varies(frame):
     """0 < fires < n, more than one distinct value, and not everything zero.
 
-    SYNTHETIC. The real-data counts come from Gate E's run and are OWED --
-    see `test_the_gate_e_row_is_still_owed`."""
+    SYNTHETIC. The real-data counts come from Gate E's run of 2026-11-13 --
+    397,069 of 398,849 pooled bars, all non-zero -- and are pinned in
+    `test_the_ledger_row_carries_the_measured_gate_e_numbers`."""
     col = ts_medskew_20(FRAMES[frame]())
     v = col.dropna()
     assert int(col.notna().sum()) == FIRED
@@ -1097,15 +1100,57 @@ def _ledger_rows():
     return rows
 
 
-def test_the_gate_e_row_is_still_owed():
-    """Gate E is the launcher's to run, after this session: this module has
-    no ledger row yet, and `tests/test_gate_e_ledger.py` fails locally until
-    one is recorded (`GATE_E_PENDING_OK=1` turns that into a skip on the way
-    to `dev`). This test is the receipt session's cue -- when the row is
-    recorded, replace it with one that pins the row's identity and its
-    numbers, as `tests/test_ts_aggac_60.py` does."""
-    assert not [r for r in _ledger_rows()
-                if r["indicator"] == "ts_medskew_20"]
+def test_the_ledger_row_is_this_modules_gate_e_run():
+    """Gate E on this column is the launcher's run on THIS module,
+    `is98-ts_medskew_20-3303ebf4` (measured 2026-11-13), and NOT the screen of
+    2026-10-24, which measured the prototype -- a column item 8 above
+    separates from the port by its guards. The two agree to 4.5e-15 on the
+    pooled figure against the same comparator at the same n = 396,970, which
+    is exactly why the identity of the row needs pinning:
+    `tests/test_gate_e_ledger.py` re-derives a row's `module_sha1` and output
+    fingerprint from the tree and checks its verdict arithmetic, but it cannot
+    see WHOSE measurement a row came from."""
+    rows = [r for r in _ledger_rows() if r["indicator"] == "ts_medskew_20"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["module"] == "pandas_ta.statistics.ts_medskew_20"
+    assert row["column"] == "TS_MEDSKEW_20"
+    assert row["run"] == "is98-ts_medskew_20-3303ebf4"
+    assert row["verdict"] == "SHIP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+
+
+def test_the_ledger_row_carries_the_measured_gate_e_numbers():
+    """The figures `docs/TsMedskew20Measured.md` reports in its Gate E and
+    Gate C sections, read back out of the ledger so that an edit to either one
+    has to move both: 0.3726833336000122 vs `PVT_Slope_norm` over the manifest
+    set at n = 396,970, per-frame max median 0.36931807089110935 against the
+    same comparator over 89 frames, and the run's real-data reachability
+    counts -- 397,069 non-NaN and 397,069 non-zero of 398,849 pooled bars.
+
+    Two load-bearing ones. The NaN bars are exactly 20 x 89, the warm-up, so
+    none of this module's guards emptied a window on the 89 BIST frames --
+    any window they emptied would be a NaN bar past bar 19 of its frame (the
+    ladder of section G2 is what a guarded frame looks like, and no BIST frame
+    held one). And non-zero == non-NaN says the column never read exactly 0.0
+    on real data, which needs mean and median to agree bit-for-bit; on
+    synthetic frames only the two-point one managed it, 2 bars of 1,480."""
+    rows = [r for r in _ledger_rows() if r["column"] == "TS_MEDSKEW_20"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert float(row["max_abs_rho"]) == 0.3726833336000122
+    assert row["against"] == "PVT_Slope_norm"
+    assert row["against_set"] == "manifest"
+    assert int(row["n"]) == 396970
+    assert float(row["perframe_max_median_abs_rho"]) == 0.36931807089110935
+    assert row["perframe_max_against"] == "PVT_Slope_norm"
+    assert (int(row["non_nan"]), int(row["non_zero"])) == (397069, 397069)
+    assert int(row["pooled_bars"]) == 398849
+    assert int(row["non_nan"]) == 398849 - 20 * 89
 
 
 # ------------------------------------------- what the column actually is

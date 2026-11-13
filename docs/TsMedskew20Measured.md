@@ -15,13 +15,15 @@ returns`.
 Every number below comes from `docs/measure_ts_medskew_20.py` unless the line
 says otherwise; the section letters (`A`, `B`, `C`, `D`, `G`, `O`, `Z`) are
 that script's arguments. The tests that hold the same facts are in
-`tests/test_ts_medskew_20.py` (207 of them).
+`tests/test_ts_medskew_20.py` (208 of them). The Gate E section (§E) is the
+exception: its numbers come from the launcher's run, not from that script.
 
-**Gate E: pending, run by issue-solver after this session.** There is no row
-in `docs/gate_e_ledger.csv` for this module yet, and
-`tests/test_ts_medskew_20.py::test_the_gate_e_row_is_still_owed` asserts
-there is none — that is the receipt session's cue. Gate C on REAL data is
-owed from the same run; everything under §3 below is synthetic.
+**Gate E: measured 2026-11-13, verdict SHIP** — max |ρ| **0.3726833336000122**
+vs `PVT_Slope_norm` (manifest, n = 396,970), per-frame max median
+**0.36931807089110935** against the same comparator over 89 frames. The run is
+`is98-ts_medskew_20-3303ebf4`, recorded in `docs/gate_e_ledger.csv`; §E below
+is the whole reading, and §3's Gate C row now carries the run's real-data
+counts as well.
 
 ---
 
@@ -244,8 +246,9 @@ Where they part company is the guards and locality:
 
 Because Gate E's statistic is a Spearman over the bars where both fire, the
 screen's prototype figures (max |ρ| 0.3727 vs `PVT_Slope_norm`, n = 396,970)
-are **expected** to carry over. The launcher's run on THIS module is still the
-number that decides ship or revert.
+were **expected** to carry over. The launcher's run on THIS module, of
+2026-11-13, is the number that decided ship or revert, and it did carry over:
+the same comparator, the same n, the two pooled figures 4.5e-15 apart (§E4).
 
 ## 2. Gate B — causality, by mutant
 
@@ -298,9 +301,23 @@ in `test_the_designed_probe_catches_the_floor_index_mutant` and
 
 ## 3. Gates C and D
 
-### C — reachability (SYNTHETIC; the real-data counts are owed from Gate E)
+### C — reachability
 
-Nine 1,500-bar frames, `length` 20, so 1,480 fired bars each:
+**On REAL data**, from the Gate E run of 2026-11-13 (§E): **397,069 non-NaN**
+and **397,069 non-zero** of **398,849** pooled bars over the 89 ALTPORT-1 BIST
+frames. Two things follow, and both are load-bearing:
+
+* 398,849 − 397,069 = **1,780 = 20 × 89**, exactly the warm-up, so **no guard
+  emptied a window on any of the 89 frames** — a guarded window past bar 19
+  would be an extra NaN;
+* non-zero equals non-NaN, so the column never read exactly 0.0 on real data.
+  That agrees with §C's synthetic reading, where only the two-point frame
+  produced exact zeros (2 of 1,480) and the walk produced none: an exact 0.0
+  needs mean and median to agree bit-for-bit, which tick-rounded real closes
+  did not do once in 397,069 bars.
+
+The synthetic frames, nine of 1,500 bars, `length` 20, so 1,480 fired bars
+each:
 
 | frame | fires | non-zero | distinct | range |
 |---|---|---|---|---|
@@ -494,6 +511,109 @@ it is why this module reduces each window from its own values with
 compares and averages values — it accumulates nothing — and it is bit-equal to
 `np.median(windows, axis=1)` on all 19,980 windows measured (§Z).
 
+## E. Gate E — attribution, measured on THIS module
+
+Run `is98-ts_medskew_20-3303ebf4`, measured 2026-11-13 by issue-solver on the
+code at commit `397d250`; recorded in `docs/gate_e_ledger.csv` by
+`docs/gate_e_ledger.py record`. Everything in this section is read out of that
+run's `overlap_max.csv`, `top25.csv`, `perframe.csv`, `degenerate.csv` and
+`meta.json` — this session did not run the harness and cannot reach
+`../Backtesting`.
+
+| | |
+|---|---|
+| module | `pandas_ta.statistics.ts_medskew_20`, defaults, no `kwargs` |
+| module sha1 | `ea94c107579125af5924d5f660a599e8e72977cd` |
+| tree sha1 | `58f3ae5a3fdf10a3d2ae30dac9e2bb0361226ef4` |
+| universe | 89 ALTPORT-1 BIST frames, 398,849 pooled bars |
+| comparators | **687** = 329 `compute_all` + 358 manifest `1d`; **1** dropped as degenerate (`squeeze_SQZ_NO`, constant) |
+| canary | `AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS` bit-equal |
+| versions | pandas 2.3.3, numpy 1.26.4 |
+| schema | `r3-perframe-0.90` |
+
+### E1 — the verdict
+
+| column | max \|ρ\| | against | set | n | per-frame max median | verdict |
+|---|---|---|---|---|---|---|
+| `TS_MEDSKEW_20` | **0.3726833336000122** | `PVT_Slope_norm` | manifest | 396,970 | **0.36931807089110935** (`PVT_Slope_norm`) | **SHIP** |
+
+Both bands clear with room: the pooled figure is **0.3727** against the 0.76
+ship line, and the per-frame max median is **0.3693** against the 0.90 strike
+line. The pooled-only verdict is SHIP too, so the per-frame rule changes
+nothing here. Against `compute_all` alone the best comparator is `QQE_RSIMA`
+at **0.2931120939487982** over 397,069 bars; the decisive number comes from
+the manifest side.
+
+### E2 — the top ten comparators
+
+From `top25.csv`:
+
+| against | set | ρ | n |
+|---|---|---|---|
+| `PVT_Slope_norm` | manifest | **+0.3726833336000122** | 396,970 |
+| `PVT_Slope_norm_Pctl` | manifest | +0.3481413577470997 | 391,719 |
+| `PVT_Slope_norm_State` | manifest | +0.3305153424740087 | 391,719 |
+| `OBV_Price_Divergence` | manifest | **−0.3295351039991982** | 397,058 |
+| `OBV_Price_Divergence_Pctl` | manifest | −0.31597813672186753 | 392,786 |
+| `OBV_Price_Divergence_State` | manifest | −0.30570849105780645 | 392,786 |
+| `Ret_21d_vol_adj` | manifest | +0.30565327573621676 | 396,980 |
+| `Ret_21d_pct` | manifest | +0.304665816151081 | 396,980 |
+| `efi_norm` | manifest | +0.2995011566774094 | 397,059 |
+| `smi_SMI_5_20_5` | manifest | +0.29814147735546864 | 397,069 |
+
+Nine of the ten are volume-flow or 21-day-return columns, and the tenth is
+`smi:SMI_5_20_5` — the same comparator the screen's stage-2 fork overlap named
+at 0.2590 on 12 frames (§O3), here 0.2981 on 89. None of these ten is a
+skewness reading — this session read the ten names in `top25.csv`, not all 687
+— and that is §O's point: the two columns this one overlaps most inside the
+fork (`TS_ABOVE_MEAN_20`, `OSAP_RETSKEW_21`) are pandas_ta ports, which the
+comparator set does not carry, so no Gate E run can see either pair.
+
+### E3 — per frame, the top five
+
+From `perframe.csv`, 89 frames each:
+
+| against | median \|ρ\| | mean | max | min | frames ≥ 0.80 | frames ≥ 0.90 |
+|---|---|---|---|---|---|---|
+| `PVT_Slope_norm` | **0.36931807089110935** | 0.35603716532212537 | 0.5240311875928417 | 0.07278556802150035 | **0** | **0** |
+| `PVT_Slope_norm_Pctl` | 0.34362866520630186 | 0.3340998918576545 | 0.546289622389304 | 0.08521741088738433 | 0 | 0 |
+| `PVT_Slope_norm_State` | 0.3260595002161756 | 0.31730515663446784 | 0.5521505358963132 | 0.07866931815551287 | 0 | 0 |
+| `OBV_Price_Divergence` | 0.3414282137194037 | 0.3424118657973091 | **0.5771409515812019** | 0.2139568141765799 | 0 | 0 |
+| `OBV_Price_Divergence_Pctl` | 0.3208351363655931 | 0.3211003267564093 | 0.43095299837153067 | 0.14125071616868162 | 0 | 0 |
+
+**0 of 89 frames reach 0.80 on any of the top five**, and the single worst
+frame-comparator pair in the file is **0.5771** (`OBV_Price_Divergence`). So
+the SHIP verdict is not a pooled average hiding a handful of bad frames.
+
+### E4 — the port and the screen's prototype agree
+
+§A7 predicted the screen's prototype figures would carry over, because Gate E's
+statistic is a rank correlation over the bars where both fire and the two
+columns agree to 1e-15 with identical masks there. They did:
+
+| | max \|ρ\| vs `PVT_Slope_norm` | n | per-frame max median |
+|---|---|---|---|
+| the screen's prototype, 2026-10-24 (`candidates.csv` line 82) | 0.3726833336000077 | 396,970 | 0.3693180708911093 |
+| **this module**, 2026-11-13 | **0.3726833336000122** | 396,970 | 0.36931807089110935 |
+
+The pooled pair differ by **4.5e-15**, the same n to the bar, and the per-frame
+pair by **5e-17**. That is a prediction made before the run and checked after
+it, not a restatement: the prototype's number was in this file at commit
+`397d250`, before the launcher ran anything.
+
+### E5 — one sentence this run made stale, and why it stands
+
+`pandas_ta/statistics/ts_medskew_20.py`'s docstring ends "the launcher's Gate E
+run on THIS module is still the number that decides ship or revert". It is no
+longer owed: the run is above, and it says SHIP. The module is **not** edited
+to say so, because `docs/gate_e_ledger.csv` records the file's sha1
+(`ea94c107579125af5924d5f660a599e8e72977cd`) and
+`tests/test_gate_e_ledger.py` fails a row whose module moved after its run —
+so a docstring fix would invalidate the very measurement it reports. The
+correction lives here, in `docs/MLCompanionContract.md`'s entry for this column
+and in `tests/test_ts_medskew_20.py`'s module docstring. The same constraint
+applies to every receipt in this repo and is why they read as append-only.
+
 ## O. In-fork overlap — what Gate E's 687 comparators cannot see
 
 ⚠ **This is the section to read before using the column.** Gate E's comparator
@@ -608,13 +728,18 @@ docstring (item 1), `docs/MLCompanionContract.md` and this section.
 
 **The decision this port takes, and what would reverse it.** It ships, because
 every band that has a real-frame measurement behind it says SHIP or
-DISCLOSE_GAP: the screen's Gate E on the prototype (0.3727 vs
-`PVT_Slope_norm`), the screen's fork overlap (0.2590), and the 0.8428 pair.
-What would reverse it: the launcher's Gate E run on this module coming back
-STRUCK, or the owner reading 0.8428 — two columns that answer "is this window
-skewed?" twice — as a question-redundancy skip, which is a judgement the bands
-do not make. `docs/EquivalentStrategies.md` is where that kind of ruling is
-recorded; this receipt is the evidence for it.
+DISCLOSE_GAP: Gate E on THIS module (0.3727 vs `PVT_Slope_norm`, §E), the
+screen's fork overlap (0.2590), and the 0.8428 pair. ⚠ The first of those is
+now settled — the launcher's run of 2026-11-13 came back **SHIP**, so the one
+thing that could have reverted this port mechanically did not happen.
+
+What is left is a judgement the bands do not make: the owner reading 0.8428 —
+two columns that answer "is this window skewed?" twice — as a
+question-redundancy skip. Gate E cannot raise it, because its 687 comparators
+hold no pandas_ta port; §O2's synthetic −0.89 and the screen's real-frame
+0.8428 are the whole of the evidence, and both are above the DISCLOSE_GAP
+floor and below the 0.90 strike line. `docs/EquivalentStrategies.md` is where
+that kind of ruling is recorded; this receipt is the evidence for it.
 
 ### O4 — what it is not
 
@@ -671,14 +796,17 @@ The window-by-window oracle this was all checked against takes about 0.8 s on
 
 ## F. Gate F — suites
 
-* `tests/test_ts_medskew_20.py`: **207 passed**.
-* The same 207 under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2
+* `tests/test_ts_medskew_20.py`: **208 passed** (207 at commit `397d250`; the
+  receipt session replaced `test_the_gate_e_row_is_still_owed` with the two
+  that pin the recorded row).
+* The same 208 under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2
   FMA3"`, run by `docs/measure_ts_medskew_20_cpu.py`, which asserts the
   dispatch actually took and prints the features that survive (here `SSSE3`,
   `SSE41`, `POPCNT`, `SSE42`, `AVX`, `F16C`, `AVX512CD`, `AVX512_CLX`,
   `AVX512_CNL`, `AVX512_ICL`).
-* Full suite in this worktree, default collection order:
-  **3 failed, 7,274 passed, 85 skipped** in 183.5 s. The three failures are:
+* Full suite in this worktree, default collection order, re-run after the
+  ledger row was recorded: **3 failed, 7,282 passed, 85 skipped** in 184.4 s.
+  The three failures are:
   1. `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
      — the one failure `CLAUDE.md`'s *Known breaks* section documents ("🔴 One
      test fails on a clean checkout");
@@ -687,9 +815,10 @@ The window-by-window oracle this was all checked against takes about 0.8 s on
      deselected by name because it needs the sibling `../AlternativeRepos`
      checkout;
   3. `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-     — this port's OWED Gate E row. Its message is exactly
-     `no Gate E ledger row for ['mtd_ret', 'ts_medskew_20']`, `mtd_ret` being
-     #206's, already owed on `dev`.
+     — ⚠ **no longer this port's**. At commit `397d250` its message named two
+     indicators; with this port's row recorded it is exactly
+     `no Gate E ledger row for ['mtd_ret']`, `mtd_ret` being #206's, already
+     owed on `dev` and nothing to do with issue #98.
 * ⚠ Pre-existing, unrelated, recorded rather than fixed: running
   `tests/test_wiring_accessors.py` BEFORE `tests/test_altport2_ports.py` in
   one process fails the pinned `CATEGORY_TOTAL` (328 against 331), because
@@ -706,7 +835,7 @@ The window-by-window oracle this was all checked against takes about 0.8 s on
 | 2 | `pandas_ta/statistics/__init__.py` | package export |
 | 3 | `pandas_ta/__init__.py` → `Category["statistics"]` | discovery (330 → 331) |
 | 4 | `pandas_ta/core.py` | `df.ta.ts_medskew_20()` |
-| 5 | `tests/test_ts_medskew_20.py` | 207 tests |
+| 5 | `tests/test_ts_medskew_20.py` | 208 tests |
 
 Also: `README.md` (331 / 339 / statistics 40), `docs/IndicatorDictionary.md`
 (regenerated), `docs/MLCompanionContract.md` (676 tagged columns, 318 `SF`),
