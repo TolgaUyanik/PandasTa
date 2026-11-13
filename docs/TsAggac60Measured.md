@@ -13,18 +13,19 @@ applied to 60 returns, which is what issue #96 asks for.
 Everything below is reproduced by `python docs/measure_ts_aggac_60.py`
 (sections `a b cd meaning guards cost`). Every number in this file, in the
 module docstring and in `tests/test_ts_aggac_60.py` comes from that script's
-run on this machine, on 2026-11-13. Figures that depend on the CPU's
+run on this machine, on 2026-11-13 — EXCEPT the Gate E section and the
+real-data counts in Gate C, which come from the launcher's harness run
+`is96-ts_aggac_60-d6ed198b` and are quoted from its `overlap_max.csv`,
+`top25.csv`, `perframe.csv`, `degenerate.csv` and `meta.json`. Figures that depend on the CPU's
 floating-point kernels are quoted as measured here and pinned in the tests as
 bounds, never as exact counts.
 
-**Gate E: pending, run by issue-solver after this session.** The harness
-(`../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py`) needs the
-private Backtesting engine and the 89 frozen ALTPORT-1 BIST frames, neither
-of which is in this worktree. `docs/gate_e_ledger.csv` therefore has no row
-for `ts_aggac_60` yet, and `tests/test_ts_aggac_60.py::
-test_gate_e_is_owed_and_has_no_ledger_row_yet` asserts that it has none — it
-fails the moment the row lands, which is the receipt session's cue to come
-back and write the verdict here.
+**Gate E: SHIP.** Run `is96-ts_aggac_60-d6ed198b`, measured 2026-11-13 by the
+launcher on this module at default parameters: `TS_AGGAC_60_10` reads a pooled
+max |ρ| of **0.2676** against `mad_pct` over n = 393,509, and a top-5 per-frame
+max median of **0.2634** against `MACD_Cross_Age` over the 89 frames. The
+section *Gate E* below has the numbers; `docs/gate_e_ledger.csv` carries the
+row and `tests/test_ts_aggac_60.py` pins both its identity and its figures.
 
 ---
 
@@ -380,7 +381,7 @@ at every one of them: True`, so there is nothing to move. The real module is
 
 ---
 
-## Gate C — reachability (synthetic; real data is owed with Gate E)
+## Gate C — reachability
 
 1,500-bar frames, so 1,440 windows:
 
@@ -392,9 +393,22 @@ at every one of them: True`, so there is nothing to move. The real module is
 | ar1(−0.5) | 1440/1500 | 1440 | 1440 | −0.073438 | +0.023363 |
 | seasonal(10) | 1440/1500 | 1429 | 1440 | −0.000276 | +0.000197 |
 
-`0 < fires < n` on every frame, and the column is never constant. The
-real-data counts (non-NaN and non-zero over the 89 BIST frames) are owed with
-Gate E and belong in this file when the receipt session writes them.
+`0 < fires < n` on every frame, and the column is never constant.
+
+**On real data**, from Gate E's run `is96-ts_aggac_60-d6ed198b` over the 89
+frozen ALTPORT-1 BIST frames: `TS_AGGAC_60_10` is **non-NaN on 393,509 of
+398,849 pooled bars**, and **393,509 of those are non-zero** — not one fired
+bar is exactly 0.0, although A1 shows a bit-exact 0.0 is reachable on an
+alternating window at an even `maxlag`.
+
+The 5,340 NaN bars are **exactly 60 × 89**, the warm-up (the first fired bar
+is 60, section A7), so **none** of this port's three guards — the 8.27e-25
+variance floor, the per-return square bound and the accumulator trust test —
+emptied a window on those 89 frames. The synthetic tables above could only
+show those guards cost 0 bars on nine clean synthetic frames; this shows 0
+bars on 398,849 real ones. It does not retire the accumulator failure mode
+disclosed under *Guards*: its 1e+6 row, where the column reports and is
+9.1e-03 wrong, leaves no trace in a NaN count at all.
 
 ---
 
@@ -430,6 +444,99 @@ map of the RETURNS. On the walk, with identical NaN masks and Spearman
 spelling of the return is bit-equal on 1,499 of 1,499 bars; the
 `log(c) - log(c.shift(1))` spelling is bit-equal on 821 of 1,499, which would
 cost the bit-identical Gate D reading above.
+
+---
+
+## Gate E — overlap against the engine's 687 comparators
+
+Run **`is96-ts_aggac_60-d6ed198b`**, made by the launcher (not by this
+worktree) with
+`gate_e_overlap.py run --module pandas_ta.statistics.ts_aggac_60`, measured
+**2026-11-13**: default parameters (`kwargs {}`), the 89 frozen ALTPORT-1 BIST
+frames, 398,849 pooled bars, **687 comparators** (329 `compute_all` + 358
+`ml_features` manifest `1d`), canary `AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS
+bit-equal`, pandas 2.3.3 / numpy 1.26.4. Verdict schema `r3-perframe-0.90`.
+
+### **`TS_AGGAC_60_10` — SHIP**
+
+| reading | value |
+|---|---|
+| pooled max \|ρ\| | **0.26763631965371043** |
+| against | `mad_pct` (manifest set) |
+| n | **393,509** |
+| best `compute_all` comparator | `BB_BWidth`, 0.23668050378589767, n = 393,509 |
+| per-frame max median \|ρ\| | **0.26342055037139966** against `MACD_Cross_Age` |
+| frames | 89 |
+| frames ≥ 0.90 on any top-5 comparator | **0 of 89** (`pct_frames_ge_090` 0.0 on all five) |
+| frames ≥ 0.80 on any top-5 comparator | **0 of 89** (`pct_frames_ge_080` 0.0 on all five) |
+| degenerate comparators | 1 — `squeeze_SQZ_NO`, constant over the pooled sample |
+
+0.2676 is below the 0.76 SHIP line and nowhere near the 0.90 strike line, on
+both the pooled and the per-frame reading, so nothing is struck and nothing is
+removed.
+
+**The top five, pooled and per frame** (`top25.csv`, `perframe.csv`):
+
+| comparator | set | pooled ρ | per-frame median | per-frame max | per-frame min |
+|---|---|---|---|---|---|
+| `mad_pct` | manifest | +0.267636 | 0.259585 | **0.574814** | 0.045534 |
+| `MACD_Cross_Age` | manifest | +0.262157 | **0.263421** | 0.406136 | 0.128184 |
+| `BB_BWidth` | compute_all | +0.236681 | 0.234671 | 0.489972 | 0.063604 |
+| `ADX` | compute_all | +0.225521 | 0.222987 | 0.472581 | 0.041667 |
+| `mad_pct_Pctl` | manifest | +0.224917 | 0.226733 | 0.430370 | 0.007715 |
+
+The single worst frame anywhere in that table is 0.5748 (`mad_pct`), which is
+still under the 0.76 ship line, and the 25th row of `top25.csv` is
+`Supertrend_Flip_Age` at 0.1622 — so the whole visible tail is under 0.17.
+
+**What the comparators are.** The five are a mean-absolute-deviation width, a
+MACD cross age, a Bollinger bandwidth, an ADX and the percentile of the first;
+the rest of `top25.csv` is that same volatility-width / range-efficiency family
+through percentiles, states and regime flags (`EFFICIENCY_RATIO`, `er`, `chop`,
+`CHOP`, `ATR_Bars_Above`, `PSAR_AF`, `CKSP_Width_pct`, …). That reading is an
+INTERPRETATION of their names, not a measurement. It is worth setting against
+the synthetic Spearman of **−0.0069** between this column and its own window's
+standard deviation (*What the column means*): a pooled +0.27 against four
+volatility-width readings is larger than "it is not a volatility column" would
+suggest. Both numbers are recorded; neither is reconciled here, and the
+synthetic one is one 1,500-bar random walk while this one is 393,509 real
+bars.
+
+### What this run does NOT say
+
+* **It does not measure the overlap against this fork's own `TS_AC1_60`.** The
+  687 comparators are the engine's columns and the `ml_features` manifest; no
+  `TS_AC1` column appears anywhere in the run's four output files. The A9
+  table's +0.3739 / +0.0008 / +0.3787 / −0.2027 against `ts_ac1_60` therefore
+  remain **synthetic-only**, and a receipt session cannot reach
+  `../Backtesting` to join the two runs. What the ledger does show is that the
+  two columns read 0.2676 and 0.25357121838081886 against the SAME comparator
+  `mad_pct` at the SAME n = 393,509 — which is a statement about each one's
+  overlap with `mad_pct`, not about their overlap with each other.
+* **It says nothing about non-default parameters.** `gate_e_ledger.py record`
+  refuses a run with non-default kwargs, and this one has none.
+* **It does not re-measure the issue's stage-2 fork overlap** (max \|ρ\| 0.3787
+  vs `ht_dcperiod:HT_DCPERIOD` over 12 frames): no `HT_DCPERIOD` column appears
+  in the run's outputs, so the run neither confirms nor refutes it.
+
+### Against the screen's prototype figure
+
+Issue #96's screen measured the PROTOTYPE — a different column, Spearman
+0.902932 against this module on a 1,500-bar walk (section A7) — at max \|ρ\|
+**0.2815** vs `mad_pct`, n = **392,619**, per-frame max median 0.2814. This
+module reads **0.2676** vs the SAME comparator at n = **393,509**.
+
+Both sample sizes are the arithmetic of the two warm-ups over the same 398,849
+pooled bars: the prototype's lag-10 term reads 71 closes and first fires at bar
+70, so `398,849 − 70 × 89 = 392,619`; this module first fires at bar 60, so
+`398,849 − 60 × 89 = 393,509`. The 890-bar difference is the 10 extra warm-up
+bars per frame and nothing else — i.e. this port's guards emptied no window
+that the prototype reports on (Gate C above).
+
+So the screen's figure was a reasonable prior and the port lands 0.0139 below
+it on the same comparator. That agreement was not available before the run:
+nothing bounds the gap between two maxima taken over 687 comparators by two
+columns that disagree by up to 4.7e-02 (A7).
 
 ---
 
@@ -695,23 +802,27 @@ sliding-window oracle the module is checked against is **~1.24 s and peaks at
 
 ## Gate F
 
-* `python -m pytest tests/test_ts_aggac_60.py -q` → **167 passed, 2 skipped**
-  in 25.5 s. The two skips are the two A9 pairs that have nothing to measure:
-  `lean_momersion_20` on the seasonal frame (constant, so no rank) and
-  `roll_spread` on the AR(1) frame (26 overlapping bars, below the test's
+Re-run by the receipt session on 2026-11-13, after the ledger row landed and
+the owed-Gate-E test was replaced by the two that pin it:
+
+* `python -m pytest tests/test_ts_aggac_60.py -q` → **168 passed, 2 skipped**
+  in 25.3 s (the porting session's 167 plus one: the single owed-Gate-E test
+  became two). The two skips are the two A9 pairs that have nothing to
+  measure: `lean_momersion_20` on the seasonal frame (constant, so no rank)
+  and `roll_spread` on the AR(1) frame (26 overlapping bars, below the test's
   `MIN_OVERLAP` of 200).
-* `python -m pytest -q` (full suite) → **3 failed, 6,884 passed, 85 skipped**
+* `python -m pytest -q` (full suite) → **3 failed, 6,892 passed, 85 skipped**
   in 176 s. The three failures are the two `CLAUDE.md` *Known breaks* —
   `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` and
   `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
   (the latter needs the sibling `../AlternativeRepos` checkout, and CI
-  deselects it) — plus the owed Gate E row, which reports
-  `no Gate E ledger row for ['mtd_ret', 'ts_aggac_60']`. `mtd_ret`'s is
-  pre-existing; `ts_aggac_60`'s is this port's, and it is expected until the
-  launcher runs Gate E.
+  deselects it) — plus `test_gate_e_ledger.py::
+  test_every_indicator_that_needs_a_row_has_one`, which now reports exactly
+  `no Gate E ledger row for ['mtd_ret']`. `ts_aggac_60` is off that list; the
+  `mtd_ret` row is pre-existing and owed on `dev`.
 * `python docs/measure_ts_aggac_60.py cpu` re-runs the module's tests with
   `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`, which is what a
-  GitHub runner without AVX-512 gives: **167 passed, 2 skipped, exit code 0**.
+  GitHub runner without AVX-512 gives: **168 passed, 2 skipped, exit code 0**.
   The variable has to be set before numpy is imported, so it cannot be done
   from inside a test — hence the section in the measure script.
 
@@ -720,17 +831,23 @@ disabled-AVX run itself.
 
 ---
 
-## What a later session owes this file
+## What the receipt session closed (2026-11-13)
 
-1. The Gate E verdict for `TS_AGGAC_60_10`: band, pooled max \|ρ\| with its
-   comparator and `n`, the per-frame max median, and how many of the 89
-   frames reach the 0.80 and 0.90 lines on any of the top five comparators.
-2. The row in `docs/gate_e_ledger.csv`, via
-   `python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`.
-3. The real-data reachability counts (non-NaN and non-zero of the pooled
-   bars), which close Gate C.
-4. Replacing `test_gate_e_is_owed_and_has_no_ledger_row_yet` in
-   `tests/test_ts_aggac_60.py` with the measured verdict.
-5. If the run comes back STRUCK: remove the module, its four wiring touch
-   points and its tests, and keep this file as the receipt. A measured revert
-   closes issue #96 exactly as well as a ship.
+The porting session left five things owed. All five are answered above:
+
+1. The Gate E verdict for `TS_AGGAC_60_10` — **SHIP**, 0.26763631965371043 vs
+   `mad_pct` at n = 393,509, per-frame max median 0.26342055037139966 vs
+   `MACD_Cross_Age`, 0 of 89 frames at or above either the 0.80 or the 0.90
+   line on any of the top five comparators (section *Gate E*).
+2. The row in `docs/gate_e_ledger.csv`, recorded with
+   `python docs/gate_e_ledger.py record <run dir> --measured 2026-11-13`.
+3. The real-data reachability counts — 393,509 non-NaN and 393,509 non-zero of
+   398,849 pooled bars, the 5,340 NaN bars being exactly the 60 × 89 warm-up
+   (section *Gate C*).
+4. `test_gate_e_is_owed_and_has_no_ledger_row_yet` in
+   `tests/test_ts_aggac_60.py` is replaced by two tests that pin the row's
+   identity and its numbers.
+5. The run is not STRUCK, so nothing is removed and the module ships.
+
+Nothing in Gates A–D was re-measured here; those numbers are the porting
+session's and still come from `python docs/measure_ts_aggac_60.py`.
