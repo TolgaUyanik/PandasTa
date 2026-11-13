@@ -40,3 +40,4 @@ from .beta import beta
 from .cusum import cusum
 from .ffd import ffd
 from .trend_scan import trend_scan
+from .halflife import halflife
