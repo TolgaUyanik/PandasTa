@@ -13,6 +13,7 @@ from .kurtosis import kurtosis
 from .lean_hurst_100 import lean_hurst_100
 from .lean_tdd_20 import lean_tdd_20
 from .lot_zeroret_60 import lot_zeroret_60
+from .lumpiness import lumpiness
 from .mad import mad
 from .median import median
 from .median_ad_hl2 import median_ad_hl2
