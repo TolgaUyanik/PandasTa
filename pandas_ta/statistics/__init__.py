@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from .diff2_acf1 import diff2_acf1
 from .entlz import entlz
 from .entropy import entropy
 from .g191_026 import g191_026
@@ -41,3 +42,4 @@ from .beta import beta
 from .cusum import cusum
 from .ffd import ffd
 from .trend_scan import trend_scan
+from .halflife import halflife
