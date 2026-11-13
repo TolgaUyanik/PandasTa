@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from .diff2_acf1 import diff2_acf1
 from .entlz import entlz
 from .entropy import entropy
 from .g191_026 import g191_026
