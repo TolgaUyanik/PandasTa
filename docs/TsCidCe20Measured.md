@@ -2,10 +2,11 @@
 
 Issue #95 (TS-CID-CE-20), ported 2026-11-13 on branch `issue-95-ts-cid-ce-20`.
 Column: **`TS_CID_CE_20`**, `pandas_ta/statistics/ts_cid_ce_20.py`.
-**Status: WIRED, Gates A–D measured, Gate E owed.** The launcher runs Gate E
-on this module after the porting session; this file is the receipt either
-way — if the run strikes the column, the module, its wiring and its tests go
-and this file stays with the numbers.
+**Status: SHIPPED, Gates A–F.** Gate E was measured on 2026-11-13 by the
+launcher's run `is95-ts_cid_ce_20-524cb24a` — **SHIP**, max |ρ| 0.2641 vs
+`chop` over n = 396,927, per-frame max median 0.2647 over 89 frames — and
+recorded in `docs/gate_e_ledger.csv`. Nothing was struck, so nothing was
+removed.
 
 Every Gate A–D number in this file is printed by
 
@@ -14,7 +15,7 @@ Every Gate A–D number in this file is printed by
 
 (pandas 2.3.3 / numpy 1.26.4) or asserted by
 
-    python -m pytest tests/test_ts_cid_ce_20.py -q     # 132 tests
+    python -m pytest tests/test_ts_cid_ce_20.py -q     # 133 tests
 
 Nothing here was typed from expectation; where a number is *not* measured — a
 piece of arithmetic, a derivation — the line says so.
@@ -110,6 +111,12 @@ the accumulator trust test) empty windows the prototype reports on, and the
 prototype's own `sdiv` only drops infinities. Any difference in the fired
 set is a difference in the ranked sample. The launcher's run on
 `pandas_ta.statistics.ts_cid_ce_20` is what decides.
+
+**It has since decided, and the transfer held.** Run
+`is95-ts_cid_ce_20-524cb24a` (Gate E below) reads max |ρ| 0.2640577551656063
+vs `chop` at n = **396,927** — the screen's own sample size — because the
+guards emptied **0** windows beyond the 20-bar warm-up on the 89 BIST frames.
+That is why the figures match; it was not knowable before the run.
 
 ## Gate A — correctness
 
@@ -301,9 +308,15 @@ the formula: `offset=2` and `offset=-2` are exactly `base.shift(±2)`.
 
 ## Gate C — reachability
 
-⚠ **Synthetic only in this session.** The real-data counts belong to Gate E's
-run, which the launcher makes after this session; a later receipt session
-writes them here.
+**Real data, from Gate E's run `is95-ts_cid_ce_20-524cb24a` (2026-11-13):**
+`TS_CID_CE_20` is non-NaN on **397,069** of **398,849** pooled bars over the
+89 ALTPORT-1 BIST frames, and **397,069** of those are non-zero. The 1,780 NaN
+bars are exactly `20 × 89`, the warm-up, so **none** of this port's guards
+emptied a window on real data — see Gate E, open item 1.
+
+The synthetic frames below are what the porting session measured; they remain
+the only evidence about where the guards bite, because on this universe they
+did not.
 
 | frame | fires | distinct | non-zero | min | median | max |
 |---|---|---|---|---|---|---|
@@ -615,8 +628,14 @@ implied:
   port disagree with its neighbours on a shape none of them has met in real
   data.
 
-What would settle how much it matters is the Gate E run, which is why it is
-listed as an open item there.
+What would settle how much it matters is the Gate E run, which is why it was
+listed as an open item there. **It has now run, and it did not happen**: all
+1,780 NaN bars of the 89 BIST frames are the warm-up (Gate C above), so no
+window on 398,849 real bars was emptied by the floor or the trust test. That
+bounds how often this shape occurs on this universe, at this timeframe, on
+these 89 symbols. It does not make the failure mode go away — the 1e+6 row,
+where the column reports and is 0.786 wrong, leaves no trace in a NaN count
+at all.
 
 ### The per-return square bound
 
@@ -664,79 +683,145 @@ the 20 warm-up bars.
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
+**Measured: SHIP.** The launcher ran
+`gate_e_overlap.py run --module pandas_ta.statistics.ts_cid_ce_20` on the code
+at this branch's porting commit; the run is `is95-ts_cid_ce_20-524cb24a`,
+measured **2026-11-13**, and it is recorded in `docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record`, which refuses a run whose
+`pandas_ta_src_sha1` is not this tree's.
 
-The launcher runs
+Run facts, from the outputs' `meta.json`: default parameters (`kwargs` empty,
+no `end`, nothing excluded, no rename), **89** frozen ALTPORT-1 BIST frames,
+**398,849** pooled bars, **687** comparators (**329** `compute_all` ∪ **358**
+`ml_features` manifest `1d`), canary `AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS
+bit-equal`, pandas 2.3.3 / numpy 1.26.4, module sha1
+`413370d24efe0b1a0c26bf166096c741bd7fa161`, tree sha1
+`4b82af1ac4766458facff575a9f82246f2ed5c7d`, data stamp
+`1be6495ef7095ff67ad8f59a2fc0311d74f02652`.
 
-    python scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.ts_cid_ce_20
+**The verdict, under `r3-perframe-0.90`:**
 
-from `../Backtesting/Backtesting` — 687 comparators (the engine's
-`compute_all` ∪ the `ml_features` manifest `1d`) over the 89 frozen ALTPORT-1
-BIST frames — and a later receipt session records the row in
-`docs/gate_e_ledger.csv` and writes the numbers here. Until then
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-reports this indicator as **owed**, which `ci.yml` turns into a skip on the
-way to `dev` and a failure on the way to `main`.
-`tests/test_ts_cid_ce_20.py::test_the_ledger_has_no_row_for_this_column_yet`
-fails the moment the row appears, which is the receipt session's cue.
+| | value |
+|---|---|
+| column | `TS_CID_CE_20` |
+| max \|ρ\| | **0.2640577551656063** |
+| against | **`chop`** (`compute_all`) |
+| n | **396,927** |
+| per-frame max median \|ρ\| | **0.2646621871502909** (against `chop`, over 89 frames) |
+| verdict | **SHIP** |
 
-What this session can say about the expected outcome, and on what evidence:
+Both legs are far below the 0.76 ship line and the 0.90 per-frame line, and
+the pooled and per-frame readings agree on the same comparator. The verdict is
+`SHIP` on the pooled statistic alone as well (`verdict_pooled_only`).
 
-* The screen measured **0.2641** vs `chop` (n = 396,927, top-5 per-frame max
-  median 0.2647, SHIP) on the prototype, which is this column times
-  `sqrt(20/19)` — a positive constant a Spearman cannot see. So the figure is
-  expected to transfer wherever both fire. It is **not** a receipt: the
-  guards here change the fired set (above), and 0.2641 was measured against
-  an engine state the issue records as run `screen_20261024`.
-* The nearest shipped pandas_ta column is `TS_AC1_60` at −0.4218 on a walk
-  (the section above), which Gate E cannot see at all.
-* Nothing here predicts the verdict. If the run strikes the column, the
-  module, its five wiring points and `tests/test_ts_cid_ce_20.py` are removed
-  and this file stays as the receipt.
+The maximum over each comparator set separately: **0.2640577551656063** vs
+`chop` over `compute_all` at n = 396,927, and **0.2107305498561499** vs
+`squeeze_SQZ_OFF` over the manifest at n = 397,069. **One** of the 687
+comparators was degenerate — `squeeze_SQZ_NO`, constant over the pooled
+sample.
 
-### Open items for the receipt session, beyond the ledger row
+**The top five, pooled and per frame** (`top25.csv`, `perframe.csv`; the sign
+is the signed ρ, the ranking is on \|ρ\|):
 
-Three things this session could not measure and the Gate E run can, each
-cheap once its outputs exist. They are requests, not requirements — a
-receipt session that cannot reach them should say so here rather than leave
-the lines unanswered:
+| against | set | ρ | n | per-frame median | per-frame max | % frames ≥ 0.90 | ≥ 0.80 |
+|---|---|---|---|---|---|---|---|
+| `chop` | compute_all | **+0.264058** | 396,927 | 0.264662 | 0.425008 | **0.0** | **0.0** |
+| `BB_BWidth` | compute_all | −0.224964 | 397,069 | 0.223973 | 0.480469 | 0.0 | 0.0 |
+| `CHOP` | compute_all | +0.223876 | 396,311 | 0.218391 | 0.418931 | 0.0 | 0.0 |
+| `squeeze_SQZ_OFF` | manifest | −0.210731 | 397,069 | 0.204187 | 0.330375 | 0.0 | 0.0 |
+| `squeeze_SQZ_ON` | manifest | +0.210731 | 397,069 | 0.204187 | 0.330375 | 0.0 | 0.0 |
 
-1. **Gate C on real data**: the run's non-NaN and non-zero counts out of the
-   pooled bars. If `pooled_bars − non_nan` is exactly `20 × 89 = 1,780`, then
-   none of this port's guards — the variance floor, the per-return square
-   bound, the accumulator trust test — emptied a window on the 89 BIST
-   frames, and the synthetic tables above are all that is known about their
-   cost. If it is MORE than 1,780, say how much more: that difference is the
-   first real-data evidence about the guards and about the accumulator
-   failure above.
-2. **The overlap against the shipped `TS_AC1_60`**, which Gate E's own
-   comparator set cannot see (the redundancy section). Both ports' runs exist
-   by then, so a Spearman of the two columns over the same frames settles on
-   real data what is here measured on three synthetic shapes (−0.4218 /
-   −0.5342 / −0.4339). If that join is out of a receipt session's scope, the
-   figure stays synthetic-only and this file should say so.
-3. **Whether the screen's 0.2641 vs `chop` carried over**, and by how much.
-   The prototype is this column times a positive constant, so the Spearman
-   should be unchanged except where the fired sets differ; a difference here
-   is a measurement of the guards, not of the statistic.
+So **no** frame reaches 0.80, let alone 0.90, against any of the top five: 0.0
+on all ten of those cells. The highest single frame anywhere in the top five
+is 0.480469 against `BB_BWidth`. The 25th row of `top25.csv` is
+`mad_pct_State` at 0.1328633866577621, so the whole visible tail is under
+0.14.
+
+**What the neighbours are** — the five are range-efficiency and
+volatility-width readings (`chop`, `CHOP`, `BB_BWidth`, the two `squeeze`
+flags), and the rest of `top25.csv` is the same family through percentiles,
+states and regime flags (`Swing_Range_pct`, `BB_BWidth_Pctl`, `THERMO_pct`,
+`mad_pct`, `ui`, `EFFICIENCY_RATIO`/`er`, `Range_ATR`) plus two ages
+(`kama_Cross_Age`, `Supertrend_Flip_Age`). That reading is from their **names**
+and is an interpretation; the numbers are the measurement. It is worth setting
+against this file's synthetic figure of Spearman **0.007243** between this
+column and the same 20 returns' standard deviation on a walk: the pooled
++0.2641 against `chop` is a bigger number than "not volatility" would suggest,
+and the synthetic frames are not BIST prices — both are recorded, neither is
+reconciled here.
+
+### The three open items the porting session left, answered
+
+1. **Gate C on real data — the guards cost 0 bars.** The run reports
+   **397,069** non-NaN and **397,069** non-zero of **398,849** pooled bars, so
+   `pooled_bars − non_nan` is **1,780**, which is exactly `20 × 89` — the
+   warm-up, one window per frame. None of this port's three guards (the
+   8.27e-25 variance floor, the per-return square bound, the accumulator trust
+   test) emptied a single window on the 89 BIST frames. The synthetic tables
+   above could only show they cost 0 bars on seven synthetic frames; this
+   shows 0 bars on 398,849 real ones, and it means the accumulator failure
+   disclosed above did not occur on this universe. No fired bar is exactly
+   0.0 either, which A2's reachable minimum of 0.701759 says it cannot be.
+2. **The overlap against the shipped `TS_AC1_60` stays SYNTHETIC-ONLY.** It is
+   not in this run: **no** `TS_AC1` column appears in any of the run's four
+   output files (`overlap_max.csv`, `top25.csv`, `perframe.csv`,
+   `degenerate.csv`), the comparator set is the engine's and not this fork's,
+   and a receipt session cannot reach `../Backtesting` to join the two runs.
+   So the redundancy section's −0.4218 / −0.5342 / −0.4339 remain measured on
+   three synthetic shapes, and **nothing here measures that pairing on real
+   data**. It stays the disclosure it was.
+3. **The screen's figures carried over, to four decimal places.** Issue #95's
+   prototype is this column times `sqrt(20/19)`, a positive constant a
+   Spearman cannot see, and the run lands on the same comparators in the same
+   order:
+
+   | | screen (prototype, run `screen_20261024`) | this run (the module) |
+   |---|---|---|
+   | max \|ρ\| | 0.2641 vs `chop` | **0.2640577551656063** vs `chop` |
+   | n | 396,927 | **396,927** |
+   | top-5 per-frame max median | 0.2647 | **0.2646621871502909** |
+   | next comparators | `BB_BWidth` 0.2250, `CHOP` 0.2239 | **0.2249644**, **0.2238765** |
+   | verdict | SHIP | **SHIP** |
+
+   The identical n is the thing to read: the porting session's open worry was
+   that this port's guards would empty windows the prototype reports on, which
+   would move the ranked sample. Item 1 measures that they emptied **0**, so
+   the two columns are ranked over the same bars and a positive rescaling
+   cannot move a Spearman. The agreement is a result of that, not a licence to
+   have copied the screen's numbers in: nothing before the run bounded the gap
+   between two maxima taken over 687 comparators.
+
+### What is NOT claimed about this run
+
+* It does not re-measure the issue's **stage-2 fork overlap** (0.2676 vs
+  `chop:CHOP_14_1_100` over 12 frames). No `CHOP_14_1_100` column appears in
+  this run's outputs; the engine's `chop` and `CHOP` are its own columns. The
+  run neither confirms nor refutes that figure.
+* It says nothing about **non-default lengths**. `record` refuses a run with
+  non-default parameters, so `length` other than 20 is unmeasured at Gate E.
+* The 687 comparators contain no pandas_ta port column that this run surfaced,
+  so Gate E cannot see the redundancy disclosed above — item 2.
 
 ## Gate F — suites
 
 This session ran, in this worktree, on the code as it now stands:
 
-* `python -m pytest tests/test_ts_cid_ce_20.py -q` → **132 passed** (128
+* `python -m pytest tests/test_ts_cid_ce_20.py -q` → **133 passed** (128
   before the review rounds in `docs/reviews/auto-2026-11-13-ts-cid-ce-20/`
-  added the four that pin the accumulator failure above);
-* `python -m pytest -q -p no:randomly` → **3 failed, 6,708 passed, 83
-  skipped** in 148 s. The three failures are the two `CLAUDE.md` *Known
+  added the four that pin the accumulator failure above; 132 before this
+  receipt session replaced the "no ledger row yet" assertion with the two
+  that pin the row);
+* `python -m pytest -q -p no:randomly` → **3 failed, 6,716 passed, 83
+  skipped** in 147 s. The three failures are the two `CLAUDE.md` *Known
   breaks* — `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
   (the untracked `docs/pine/` corpus) and
   `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
   (needs the sibling `../AlternativeRepos` checkout, which CI deselects) —
   plus `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-  which now reports `['mtd_ret', 'ts_cid_ce_20']`: #206's owed row on `dev`
-  and this port's. That third one is the **expected** state of an owed Gate E
-  measurement, and `ci.yml` skips it on the way to `dev`.
+  which reports exactly `['mtd_ret']`: #206's owed row on `dev`. **This port
+  is no longer on that list** — the porting session's run reported
+  `['mtd_ret', 'ts_cid_ce_20']` and the recorded row removed the second.
+  `ci.yml` skips that test on the way to `dev` under `GATE_E_PENDING_OK=1`.
 
 ⚠ One ORDER-DEPENDENT failure exists in this suite and it is **not** this
 port's: `tests/test_altport2_ports.py::test_the_category_count_moved_by_exactly_three`
@@ -789,7 +874,7 @@ is a different code path — which is why it lives in
 | 2 | `pandas_ta/statistics/__init__.py` | `from .ts_cid_ce_20 import ts_cid_ce_20` |
 | 3 | `pandas_ta/__init__.py` → `Category["statistics"]` | discovery / `df.ta.strategy()` |
 | 4 | `pandas_ta/core.py` | `df.ta.ts_cid_ce_20()` |
-| 5 | `tests/test_ts_cid_ce_20.py` | 132 tests |
+| 5 | `tests/test_ts_cid_ce_20.py` | 133 tests |
 
 Plus the counts those move: `README.md` (328 in `Category`, 336 accessors,
 statistics 37), `docs/IndicatorDictionary.md` (regenerated by its own

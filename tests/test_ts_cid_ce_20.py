@@ -59,7 +59,10 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    same first fired bar 20. A Spearman is unmoved by a positive rescaling, so
    issue #95's screen figures (0.2641 vs `chop`) are expected to carry over
    wherever both columns fire; what can still move them is this port's
-   guards, which empty windows the prototype reports on.
+   guards, which empty windows the prototype reports on. **They carried
+   over**: Gate E on THIS module read 0.2640577551656063 vs `chop` at
+   n = 396,927, the screen's own sample size, because the guards emptied 0
+   windows on the 89 BIST frames (see the bottom of this docstring).
 
 4. **Gate B, by mutant, on three frames.** Six mutants, each `importlib`-read
    and `exec`'d in memory. Five are caught at **35/35** offsets of a
@@ -142,15 +145,27 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    all `length + 1` = 21 closes to empty one bar.
 
 9. **Five-point wiring** (`Category`, the accessor, the export, the name) and
-   that Gate E is OWED: `test_the_ledger_has_no_row_for_this_column_yet`
-   fails the moment a row appears, which is the receipt session's cue to
-   replace it with the row's identity and numbers.
+   **the Gate E row this column ships on**:
+   `test_the_ledger_row_is_this_modules_gate_e_run` pins whose run it is and
+   `test_the_ledger_row_carries_the_measured_gate_e_numbers` pins its figures,
+   because `tests/test_gate_e_ledger.py` checks a row generically and cannot
+   see which measurement a row came from.
 
 Every number above comes from `docs/measure_ts_cid_ce_20.py`, whose run is
 transcribed in `docs/TsCidCe20Measured.md`.
 
-⚠ Gate C in THIS FILE is SYNTHETIC. The real-data counts belong to Gate E's
-run, which the launcher makes after this session.
+⚠ Gate C in THIS FILE is SYNTHETIC. The real-data counts come from Gate E's
+run `is95-ts_cid_ce_20-524cb24a` (2026-11-13) and are pinned out of the ledger
+by `test_the_ledger_row_carries_the_measured_gate_e_numbers`: `TS_CID_CE_20`
+is non-NaN on 397,069 of 398,849 pooled bars and all 397,069 are non-zero, and
+the 1,780 NaN bars are exactly 20 x 89 -- the warm-up, so NEITHER the variance
+floor, NOR the per-return square bound, NOR the accumulator trust test (point
+5 above) emptied a window on the 89 BIST frames.
+
+That run is also the Gate E receipt -- **SHIP**, max |rho| **0.2640577551656063**
+vs `chop` over n = 396,927, per-frame max median **0.2646621871502909** over 89
+frames, and 0.0% of frames at or above either the 0.90 or the 0.80 line on any
+of the top five comparators.
 """
 import importlib
 import inspect
@@ -1375,14 +1390,7 @@ def test_name_registration_and_accessor():
     assert direct.category == "statistics"
 
 
-def test_the_ledger_has_no_row_for_this_column_yet():
-    """Gate E is OWED on this port: the launcher runs
-    `gate_e_overlap.py run --module pandas_ta.statistics.ts_cid_ce_20` after
-    this session, and `tests/test_gate_e_ledger.py` reports it as owed until
-    the row is recorded. This assertion is the receipt session's cue -- it
-    fails the moment a row appears, and is to be replaced by the row's
-    identity and its numbers, as `tests/test_ts_ac1_60.py` was on issue
-    #94."""
+def _ledger_rows():
     import csv
     import os
 
@@ -1392,4 +1400,63 @@ def test_the_ledger_has_no_row_for_this_column_yet():
     assert rows, "the ledger should not be empty"
     assert [r for r in rows if r["column"].startswith("TS_AC1")], \
         "sanity: the ledger should carry the neighbouring ts_ac1_60 row"
-    assert [r for r in rows if r["indicator"] == "ts_cid_ce_20"] == []
+    return rows
+
+
+def test_the_ledger_row_is_this_modules_gate_e_run():
+    """Gate E on this column is the launcher's run on THIS module,
+    `is95-ts_cid_ce_20-524cb24a` (measured 2026-11-13), and not issue #95's
+    screen, which measured the prototype (point 3 of this file's docstring).
+
+    Pinned here: exactly one `TS_CID_CE` row exists, it names this module and
+    that run, and it is SHIP under `r3-perframe-0.90` with no waiver.
+    `tests/test_gate_e_ledger.py` re-derives a row's `module_sha1` and output
+    fingerprint from the tree and checks its verdict arithmetic, but it cannot
+    see WHOSE measurement a row came from -- a row recorded from the screen,
+    or from a run at a non-default `length`, would satisfy it. Hence the
+    identity assertions.
+    """
+    rows = [r for r in _ledger_rows() if r["column"].startswith("TS_CID_CE")]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["indicator"] == "ts_cid_ce_20"
+    assert row["module"] == "pandas_ta.statistics.ts_cid_ce_20"
+    assert row["column"] == "TS_CID_CE_20"
+    assert row["run"] == "is95-ts_cid_ce_20-524cb24a"
+    assert row["verdict"] == "SHIP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+
+
+def test_the_ledger_row_carries_the_measured_gate_e_numbers():
+    """The figures `docs/TsCidCe20Measured.md` reports in its Gate E and
+    Gate C sections, read back out of the ledger so that an edit to either one
+    has to move both: 0.2640577551656063 vs `chop` over the `compute_all` set
+    at n = 396,927, per-frame max median 0.2646621871502909 against the same
+    comparator over 89 frames, and the run's real-data reachability counts --
+    397,069 non-NaN and 397,069 non-zero of 398,849 pooled bars.
+
+    The last assertion is the load-bearing one for the receipt's Gate C: the
+    1,780 NaN bars are exactly 20 x 89, the warm-up, so NONE of this port's
+    three guards -- the variance floor, the per-return square bound and the
+    accumulator trust test -- emptied a window on the 89 BIST frames. Any
+    window they emptied would be a NaN bar beyond the warm-up. It is also why
+    the screen's sample size transferred exactly (point 3 above): n = 396,927
+    in both.
+    """
+    rows = [r for r in _ledger_rows() if r["column"] == "TS_CID_CE_20"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert float(row["max_abs_rho"]) == 0.2640577551656063
+    assert row["against"] == "chop"
+    assert row["against_set"] == "compute_all"
+    assert int(row["n"]) == 396927
+    assert float(row["perframe_max_median_abs_rho"]) == 0.2646621871502909
+    assert row["perframe_max_against"] == "chop"
+    assert (int(row["non_nan"]), int(row["non_zero"])) == (397069, 397069)
+    assert int(row["pooled_bars"]) == 398849
+    # The NaN bars are exactly the warm-up: 20 per frame, 89 frames.
+    assert int(row["pooled_bars"]) - int(row["non_nan"]) == 20 * 89
