@@ -2,13 +2,14 @@
 
 Issue #93 (TS-KURT-60), ported 2026-11-13 on branch `issue-93-ts-kurt-60`.
 Column: **`TS_KURT_60`**, `pandas_ta/statistics/ts_kurt_60.py`.
-**Status: Gates A–D measured here, Gate E owed.**
-Gate E: pending, run by issue-solver after this session. Until that run is
-recorded in `docs/gate_e_ledger.csv`,
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails locally for this column, and that failure is expected rather than a
-defect. Gate C's real-data counts come from the same run and are **owed**;
-what is here is synthetic.
+**Status: shipped. Gates A–F measured, Gate E SHIP.**
+Gate E ran on this module as `is93-ts_kurt_60-049a1889` (measured
+2026-11-13) and its row is in `docs/gate_e_ledger.csv`: max \|ρ\|
+**0.2501241324996995** vs `ZIGZAG` (compute_all, n = 33,246), per-frame max
+median **0.2334651987740327**, verdict **SHIP** — below the 0.76 pooled and
+0.90 per-frame lines, so nothing is struck and no column was removed. The
+same run supplies Gate C's real-data counts (§Gate C), which the porting
+session had to leave owed.
 
 Every number here is printed by `python docs/measure_ts_kurt_60.py` on
 pandas 2.3.3 / numpy 1.26.4, or asserted by
@@ -326,7 +327,23 @@ column out of this module.
 
 ## Gate C — reachability
 
-**Synthetic only; the real-data counts are owed with Gate E.**
+**On real data**, from Gate E's run `is93-ts_kurt_60-049a1889` over the 89
+frozen ALTPORT-1 BIST frames, 398,849 pooled bars:
+
+| | count | of 398,849 |
+|---|---|---|
+| non-NaN (`TS_KURT_60` fires) | **393,509** | 98.66% |
+| non-zero among them | **393,509** | 98.66% |
+| NaN | 5,340 | 1.34% |
+
+The 5,340 NaN bars are exactly **60 × 89** — the warm-up, one 60-bar window
+per frame and nothing else. So on the 89 BIST frames the degeneracy floor and
+the fourth-power guard that make this port differ from the prototype
+(§A2, §Guards) emptied **no** window: every bar past the warm-up fired.
+`0 < fires < n` holds, and not one fired bar is exactly 0.0, which is what a
+collapsed column would read.
+
+The synthetic frames below, which were all the porting session had:
 
 | frame (1,500 bars) | fires | distinct values | non-zero among fired | range |
 |---|---|---|---|---|
@@ -616,30 +633,75 @@ agree to 6.2e-15 over 1,940 bars. One machine, three runs, the best taken.
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
+**Run `is93-ts_kurt_60-049a1889`, measured 2026-11-13. Verdict: SHIP.**
+Recorded in `docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record … --measured 2026-11-13`; pinned by
+`tests/test_ts_kurt_60.py` and re-derived from the tree by
+`tests/test_gate_e_ledger.py`.
 
-What the issue reports, measured on the PROTOTYPE on 2026-10-24 and
-**indicative only** — a prototype is not a port, and those figures come from
-a different harness run:
+| | measured |
+|---|---|
+| column | `TS_KURT_60` (the only one) |
+| max \|ρ\| | **0.2501241324996995** (ρ = −0.2501241324996995) |
+| against | **`ZIGZAG`**, `compute_all` |
+| n | **33,246** |
+| per-frame max median \|ρ\| | **0.2334651987740327**, also vs `ZIGZAG`, over 84 frames |
+| frames with per-frame median ≥ 0.90 | **0.0%** — and ≥ 0.80 is 0.0% too, on all five top comparators |
+| **verdict** | **SHIP** (`r3-perframe-0.90`; pooled-only would also be SHIP) |
+| strongest in the manifest set alone | 0.19352009839772344 vs `Pct_Up_Days_63`, n = 393,509 |
 
-* max \|ρ\| **0.2501** vs `ZIGZAG` (compute_all, n = 33,246), top-5 per-frame
-  max median 0.2335 → **SHIP**;
-* next comparators `LINREG_LOWER_2` 0.2059, `LINREG_LOWER_1` 0.2057;
-* fork overlap (stage 2, 12 frames): max \|ρ\| 0.1389 vs
-  `covariance:COV_30_1`, per-frame max median 0.1576.
+The run's facts, from `meta.json`: 89 frames, 398,849 pooled bars, 687
+comparators (329 `compute_all` + 358 manifest), defaults (`kwargs {}`), data
+stamp `1be6495e…`, pandas 2.3.3 / numpy 1.26.4, canary `AKBNK.IS, BIENY.IS,
+AGHOL.IS, SASA.IS bit-equal`. One comparator was dropped as degenerate
+(`degenerate.csv`: `squeeze_SQZ_NO`, manifest, constant) — that is a property
+of the comparator, not of this column.
 
-This port is bit-equal to that prototype on every clean frame measured
-(§A2), which makes those numbers more transferable here than they were for
-issue #91's `ts_perment_20` — but it does **not** make them a receipt. The
-launcher's run on this module decides ship or revert, and
-`docs/gate_e_ledger.csv` carries no `TS_KURT` row until then (asserted by
-`tests/test_ts_kurt_60.py`).
+**The 0.2501 is on a sixth of the data.** `ZIGZAG` is non-NaN on only 33,246
+of the 393,509 bars where `TS_KURT_60` fires, and on 84 of the 89 frames. The
+next 24 comparators are all at n = 393,509 and span
+**0.20543..0.20586** — a range of 0.0004 — so once `ZIGZAG` is set aside the
+real plateau is ≈ 0.2055 and the choice of which column names it is
+arbitrary:
 
-A synthetic pre-check against 14 shipped columns on ONE 1,500-bar walk — not
-Gate E, no BIST frames, no `compute_all`. The most recent port's pre-check of
-this kind over-stated its real maximum by 0.049 and named a comparator
-outside the run's top 25 (`docs/TsPeaks20Measured.md`), so read the ordering
-below as a hint and nothing more:
+| \|ρ\| | against | n |
+|---|---|---|
+| 0.2501241324996995 | `ZIGZAG` | 33,246 |
+| 0.205855394859335 | `LINREG_LOWER_2` | 393,509 |
+| 0.20572531062217445 | `LINREG_LOWER_1` | 393,509 |
+| 0.20568107387323142 | `Chikou`, `Close` (identical to 17 digits) | 393,509 |
+| 0.20566631857064668 | `decay` | 393,509 |
+| … 20 more, down to 0.2054304914622597 `HALFTREND` | | 393,509 |
+
+Every one of those is a price level or a smoother of one, and the sign is
+negative throughout. Read that as a weak monotone drift against price, not as
+a restatement: the single worst **per-frame** \|ρ\| anywhere in the top five
+is 0.7019672958376184 (`Chikou`/`Close`), still under the 0.76 ship line, and
+the per-frame medians are 0.1807..0.2335.
+
+**The issue's prototype figures reproduced exactly.** The screen measured the
+prototype on 2026-10-24 and this file called those numbers indicative; the
+run on the module returns the same ones to every digit the issue printed —
+0.2501 vs `ZIGZAG`, n = 33,246, per-frame max median 0.2335, `LINREG_LOWER_2`
+0.2059 and `LINREG_LOWER_1` 0.2057 next. That is the expected outcome of the
+port being bit-equal to the prototype on every clean frame (§A2), and it is
+now a receipt rather than an expectation. The issue's stage-2 fork overlap
+(max \|ρ\| 0.1389 vs `covariance:COV_30_1`, 12 frames) was not re-run here
+and stays a prototype figure.
+
+**The synthetic pre-check, scored against the run.** It was a check against
+14 shipped columns on ONE 1,500-bar walk — no BIST frames, no `compute_all`
+— and it was written before the run, so it is kept and scored:
+
+| the pre-check said | the run says |
+|---|---|
+| top neighbour `ts_binent_20`, 0.3706 | a fork column, in neither comparator set, so the run cannot confirm or refute it; it over-states the run's maximum by 0.120 either way |
+| `kurtosis_30`/`kurtosis_60` of CLOSE at 0.1090/0.0847 | not in the run's top 25, so the run bounds them at < 0.2054 — consistent |
+| nothing resembling `ZIGZAG` | `ZIGZAG` is the actual maximum, and it was not among the 14 |
+
+So this pre-check again named a comparator outside the run's top 25 and
+over-stated the magnitude, exactly as `docs/TsPeaks20Measured.md` recorded
+for the previous port. Its ordering was a hint and nothing more:
 
 | \|ρ\| | column |
 |---|---|
@@ -660,14 +722,20 @@ below as a hint and nothing more:
 
 `ts_binent_20` at 0.3706 is the one to watch: it is the fork's other
 outlier-dominance reading of a 20-return window, and this column's strongest
-synthetic neighbour.
+synthetic neighbour. ⚠ Gate E does **not** settle it — neither
+`ts_binent_20` nor any other fork-only column is in the 687 comparators
+(`compute_all` ∪ the `ml_features` manifest), so the 0.3706 stands
+unrefereed, on one synthetic walk, and the two columns' real overlap is
+unmeasured.
 
 ## Gate F — suites
 
-`python -m pytest tests/test_ts_kurt_60.py -q` here; both repositories' full
-suites are run by the launcher in clean worktrees. The local full-suite
-result at the time of the port is in the commit message, including the owed
-Gate E ledger row, which fails locally by design until the launcher's run.
+`python -m pytest tests/test_ts_kurt_60.py -q` and the full local suite here;
+both repositories' full suites are run by the launcher in clean worktrees.
+The owed-Gate-E failure the porting session recorded is gone: the row is in
+`docs/gate_e_ledger.csv`, so what remains locally is the two `CLAUDE.md`
+*Known breaks* plus any Gate E row other issues still owe. The counts are in
+this session's commit message.
 
 ## Wiring — the five touch points
 

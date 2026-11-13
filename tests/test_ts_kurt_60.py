@@ -12,10 +12,13 @@ docs/measure_ts_kurt_60.py` prints all of them, and
    tick-rounded walk and a student-t path — six comparisons, all six run:
    against the prototype retyped here, and against the owner's own registry
    entry imported from `docs/issues/screen/ind_screen.py` when that
-   (gitignored) tree is present. That is why issue #93's screen figures are indicative for this
-   column; it is NOT a Gate E receipt, and
-   `test_the_gate_e_ledger_has_no_ts_kurt_row_yet` asserts the ledger is
-   still empty of it.
+   (gitignored) tree is present. That is why issue #93's screen figures were
+   indicative for this column rather than a receipt — and Gate E on THIS
+   module (`is93-ts_kurt_60-049a1889`, 2026-11-13) then returned them to
+   every digit the issue printed: 0.2501241324996995 vs `ZIGZAG`,
+   n = 33,246, per-frame max median 0.2334651987740327, SHIP. That run, not
+   the screen's, is the receipt
+   (`test_the_ledger_row_is_this_modules_gate_e_run`).
 
    Where the two part company is the NaN discipline, and it is measured
    rather than glossed: a window of IDENTICAL returns slips through pandas'
@@ -90,11 +93,12 @@ docs/measure_ts_kurt_60.py` prints all of them, and
    mask is live even after it, because a return whose own r⁴ is finite can
    overflow the window SUM: measured, 1 bar at `close[201] = 1e-200 * 1e77`.
 
-⚠ Gate C here is SYNTHETIC. The real-data counts and Gate E are owed: the
-launcher runs `gate_e_overlap.py` on the committed code after this session,
-and until its row is in `docs/gate_e_ledger.csv`
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails for this column by design.
+⚠ Gate C in THIS FILE is synthetic. The real-data counts come from Gate E's
+run `is93-ts_kurt_60-049a1889` (2026-11-13) and are pinned from the ledger by
+`test_the_ledger_row_carries_the_measured_gate_e_numbers`: `TS_KURT_60` fires
+on 393,509 of 398,849 pooled bars, all 393,509 non-zero, and the 5,340 NaN
+bars are exactly 60 × 89 — the warm-up, so the degeneracy floor and the
+fourth-power guard emptied no window on the 89 BIST frames.
 """
 import importlib
 import math
@@ -1252,13 +1256,7 @@ def test_the_accessor_forwards_its_parameters_under_the_right_name():
         ts_kurt_60(close, offset=2).rename("TS_KURT_60"))
 
 
-def test_the_gate_e_ledger_has_no_ts_kurt_row_yet():
-    """Gate E is owed: the launcher runs `gate_e_overlap.py` on the committed
-    code after this session, and a later receipt session records the row.
-    Until then this asserts that issue #93's PROTOTYPE figures (0.2501 vs
-    `ZIGZAG`, n = 33,246) have NOT been written in as if they were a
-    measurement of this module -- bit-equality to the prototype on clean
-    frames makes them indicative, not a receipt."""
+def _ledger_rows():
     import csv
     import os
 
@@ -1267,5 +1265,63 @@ def test_the_gate_e_ledger_has_no_ts_kurt_row_yet():
     with open(path, encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert rows, "the ledger is empty"
-    assert [r for r in rows if r["indicator"] == "ts_kurt_60"] == []
-    assert [r for r in rows if r["column"].startswith("TS_KURT")] == []
+    return rows
+
+
+def test_the_ledger_row_is_this_modules_gate_e_run():
+    """Gate E is this module's own run, not the screen's. Issue #93 quoted
+    the screen harness's figures on the PROTOTYPE (max |rho| 0.2501 vs
+    `ZIGZAG`, n = 33,246, per-frame max median 0.2335); issue-solver's run on
+    `pandas_ta.statistics.ts_kurt_60` (`is93-ts_kurt_60-049a1889`, measured
+    2026-11-13) reproduced them to every digit the issue printed, and that
+    run is what ships.
+
+    Pinned here: exactly one `TS_KURT*` row exists, it is SHIP under
+    `r3-perframe-0.90` with no waiver, and it names THIS module and THAT
+    run. `tests/test_gate_e_ledger.py` checks the numbers generically and
+    re-derives `module_sha1` and the output fingerprint from the tree, but it
+    cannot see whose run a row came from -- a row recorded from some other
+    measurement would satisfy it. Hence the identity assertions.
+    """
+    rows = [r for r in _ledger_rows() if r["column"].startswith("TS_KURT")]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["indicator"] == "ts_kurt_60"
+    assert row["module"] == "pandas_ta.statistics.ts_kurt_60"
+    assert row["column"] == "TS_KURT_60"
+    assert row["run"] == "is93-ts_kurt_60-049a1889"
+    assert row["verdict"] == "SHIP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+
+
+def test_the_ledger_row_carries_the_measured_gate_e_numbers():
+    """The figures `docs/TsKurt60Measured.md` reports in its Gate E and
+    Gate C sections, read back out of the ledger so an edit to either one has
+    to move both: 0.2501241324996995 vs `ZIGZAG` (compute_all) over
+    n = 33,246, per-frame max median 0.2334651987740327, and the run's
+    real-data reachability counts -- 393,509 non-NaN and 393,509 non-zero of
+    398,849 pooled bars, the NaN bars being exactly the 60-bar warm-up on
+    each of the 89 frames.
+
+    The last one is the load-bearing claim of the receipt's Gate C: it is
+    what says the degeneracy floor and the fourth-power guard emptied no
+    window on real BIST data, since any window they emptied would be a NaN
+    bar beyond the warm-up.
+    """
+    rows = [r for r in _ledger_rows() if r["column"] == "TS_KURT_60"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert float(row["max_abs_rho"]) == 0.2501241324996995
+    assert row["against"] == "ZIGZAG"
+    assert row["against_set"] == "compute_all"
+    assert int(row["n"]) == 33246
+    assert float(row["perframe_max_median_abs_rho"]) == 0.2334651987740327
+    assert row["perframe_max_against"] == "ZIGZAG"
+    assert (int(row["non_nan"]), int(row["non_zero"])) == (393509, 393509)
+    assert int(row["pooled_bars"]) == 398849
+    # The NaN bars are exactly the warm-up: 60 per frame, 89 frames.
+    assert int(row["pooled_bars"]) - int(row["non_nan"]) == 60 * 89
