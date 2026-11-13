@@ -1225,6 +1225,12 @@ class AnalysisIndicators(BasePandasObject):
         result = kst(close=close, roc1=roc1, roc2=roc2, roc3=roc3, roc4=roc4, sma1=sma1, sma2=sma2, sma3=sma3, sma4=sma4, signal=signal, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def lean_momersion_20(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = lean_momersion_20(close=close, length=length, offset=offset,
+                                   **kwargs)
+        return self._post_process(result, **kwargs)
+
     def lrsi(self, length=None, gamma=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = lrsi(close=close, length=length, gamma=gamma, offset=offset, **kwargs)
@@ -1946,6 +1952,12 @@ class AnalysisIndicators(BasePandasObject):
                                 offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def lean_tdd_20(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = lean_tdd_20(close=close, length=length, offset=offset,
+                             **kwargs)
+        return self._post_process(result, **kwargs)
+
     def lot_zeroret_60(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = lot_zeroret_60(close=close, length=length, offset=offset, **kwargs)
@@ -2001,6 +2013,66 @@ class AnalysisIndicators(BasePandasObject):
     def trend_scan(self, horizons=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = trend_scan(close=close, horizons=horizons, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def ts_above_mean_20(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ts_above_mean_20(close=close, length=length, offset=offset,
+                                  **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def ts_ac1_60(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ts_ac1_60(close=close, length=length, offset=offset,
+                           **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def ts_aggac_60(self, length=None, maxlag=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ts_aggac_60(close=close, length=length, maxlag=maxlag,
+                             offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def ts_binent_20(self, length=None, bins=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ts_binent_20(close=close, length=length, bins=bins,
+                              offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def ts_c3_20(self, length=None, lag=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ts_c3_20(close=close, length=length, lag=lag, offset=offset,
+                          **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def ts_cid_ce_20(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ts_cid_ce_20(close=close, length=length, offset=offset,
+                              **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def ts_kurt_60(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ts_kurt_60(close=close, length=length, offset=offset,
+                            **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def ts_medskew_20(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ts_medskew_20(close=close, length=length, offset=offset,
+                               **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def ts_peaks_20(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ts_peaks_20(close=close, length=length, offset=offset,
+                             **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def ts_perment_20(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ts_perment_20(close=close, length=length, offset=offset,
+                               **kwargs)
         return self._post_process(result, **kwargs)
 
     def variance(self, length=None, offset=None, **kwargs):
