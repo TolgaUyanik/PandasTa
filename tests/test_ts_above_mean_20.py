@@ -80,8 +80,10 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    over 20,000 independent windows, and -0.61 / -0.86 / -0.96 against the
    SHIPPED `OSAP_RETSKEW_21` on a walk / a heavy-tailed frame / a two-point
    frame. Those three are SYNTHETIC and are the only measurement of that pair
-   that exists: Gate E's 687 comparators hold no pandas_ta port, and the
-   screen's real-frame fork overlap predates `osap_retskew_21` by nine days
+   that exists: Gate E's 687 comparators hold no pandas_ta port -- the run
+   below bears that out from its side, with no `OSAP`, `RETSKEW` or `SKEW`
+   column anywhere in its four output files -- and the screen's real-frame
+   fork overlap predates `osap_retskew_21` by nine days
    (docs/TsAboveMean20Measured.md §5). It is NOT volatility (-0.07 against
    the window's return sd) and NOT direction (0.07 against its mean return)
    -- except on a two-point frame, where those three are one statistic.
@@ -105,11 +107,27 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    first bar, and it counts through a NaN close).
 
 Numbers come from `docs/measure_ts_above_mean_20.py`; the receipt is
-`docs/TsAboveMean20Measured.md`. Gate C on real data and Gate E are OWED:
-the launcher runs `gate_e_overlap.py` after this session, and
-`test_the_gate_e_row_is_still_owed` is the receipt session's cue.
+`docs/TsAboveMean20Measured.md`.
 Counts that depend on the last bits of a generated frame carry a band or a
 tolerance; the structural facts are pinned exactly.
+
+Gate E is MEASURED: run `is97-ts_above_mean_20-5d78f565` (2026-11-13, default
+parameters, 89 frames, 687 comparators, canary bit-equal) is **SHIP** --
+pooled max |rho| **0.35937568662749647** vs `PVT_Slope_norm` at n = 396,970,
+per-frame max median **0.3580864882804631** vs the same comparator over 89
+frames, with 0.0% of frames at or above either the 0.90 or the 0.80 line on
+any of the top five. `test_the_ledger_row_is_this_modules_gate_e_run` and
+`test_the_ledger_row_carries_the_measured_gate_e_numbers` pin that row,
+because `tests/test_gate_e_ledger.py` checks a row generically and cannot see
+WHICH measurement it came from -- a row copied from the screen's PROTOTYPE
+run would satisfy it.
+
+⚠ Gate C in THIS FILE is SYNTHETIC. The real-data counts come from that same
+run and are pinned out of the ledger: `TS_ABOVE_MEAN_20` is non-NaN on
+**397,069** of 398,849 pooled bars and all 397,069 are non-zero, and the
+1,780 NaN bars are exactly 20 x 89 -- the warm-up, so NEITHER the relative
+floor, NOR the per-return magnitude bound, NOR the bad-close rule (item 6)
+emptied a window on the 89 BIST frames.
 """
 import importlib
 import math
@@ -696,7 +714,10 @@ def test_the_first_fired_bar_is_length_not_length_minus_one():
 
 @pytest.mark.parametrize("frame", sorted(FRAMES))
 def test_gate_c_the_column_fires_and_varies(frame):
-    """0 < fires < n and more than one distinct value, on every frame."""
+    """0 < fires < n and more than one distinct value, on every frame.
+
+    SYNTHETIC. The real-data counts come from Gate E's run and are pinned by
+    `test_the_ledger_row_carries_the_measured_gate_e_numbers`."""
     close = FRAMES[frame]()
     col = ts_above_mean_20(close)
     fired = int(col.notna().sum())
@@ -943,15 +964,71 @@ def test_the_prototype_counts_through_a_bad_close_and_this_port_does_not():
     assert bool((base[m] == proto[m]).all())
 
 
-def test_the_gate_e_row_is_still_owed():
-    """Gate E is run by issue-solver after this session, so there is no
-    ledger row yet. When the receipt session records one, this test is its
-    cue: delete it and let `tests/test_gate_e_ledger.py` take over."""
+def _ledger_rows():
     import csv
     from pathlib import Path
     ledger = Path(__file__).resolve().parents[1] / "docs" / "gate_e_ledger.csv"
     rows = list(csv.DictReader(ledger.open(encoding="utf-8")))
-    assert not [r for r in rows if r["indicator"] == "ts_above_mean_20"]
+    assert rows, "the ledger should not be empty"
+    assert [r for r in rows if r["column"].startswith("TS_AC1")], \
+        "sanity: the ledger should carry the neighbouring ts_ac1_60 row"
+    return rows
+
+
+def test_the_ledger_row_is_this_modules_gate_e_run():
+    """Gate E on this column is the launcher's run on THIS module,
+    `is97-ts_above_mean_20-5d78f565` (measured 2026-11-13), and NOT issue
+    #97's screen, which measured the prototype -- a column this file's item 7
+    separates from the port by two NaN rules. The two agree to the four
+    decimals the screen published (0.3594 vs `PVT_Slope_norm` at the same
+    n = 396,970), which is exactly why the identity of the row needs pinning:
+    `tests/test_gate_e_ledger.py` re-derives a row's `module_sha1` and output
+    fingerprint from the tree and checks its verdict arithmetic, but it cannot
+    see WHOSE measurement a row came from.
+    """
+    rows = [r for r in _ledger_rows() if r["indicator"] == "ts_above_mean_20"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["module"] == "pandas_ta.statistics.ts_above_mean_20"
+    assert row["column"] == "TS_ABOVE_MEAN_20"
+    assert row["run"] == "is97-ts_above_mean_20-5d78f565"
+    assert row["verdict"] == "SHIP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+
+
+def test_the_ledger_row_carries_the_measured_gate_e_numbers():
+    """The figures `docs/TsAboveMean20Measured.md` reports in its Gate E and
+    Gate C sections, read back out of the ledger so that an edit to either one
+    has to move both: 0.35937568662749647 vs `PVT_Slope_norm` over the
+    manifest set at n = 396,970, per-frame max median 0.3580864882804631
+    against the same comparator over 89 frames, and the run's real-data
+    reachability counts -- 397,069 non-NaN and 397,069 non-zero of 398,849
+    pooled bars.
+
+    Two load-bearing ones. The NaN bars are exactly 20 x 89, the warm-up, so
+    none of this module's guards emptied a window on the 89 BIST frames -- any
+    window they emptied would be a NaN bar past bar 19 of its frame. And
+    non-zero == non-NaN is item 2's range bound seen on real data: a reading
+    of exactly 0.0 needs all twenty returns equal, which the floor refuses
+    rather than reports.
+    """
+    rows = [r for r in _ledger_rows() if r["column"] == "TS_ABOVE_MEAN_20"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert float(row["max_abs_rho"]) == 0.35937568662749647
+    assert row["against"] == "PVT_Slope_norm"
+    assert row["against_set"] == "manifest"
+    assert int(row["n"]) == 396970
+    assert float(row["perframe_max_median_abs_rho"]) == 0.3580864882804631
+    assert row["perframe_max_against"] == "PVT_Slope_norm"
+    assert (int(row["non_nan"]), int(row["non_zero"])) == (397069, 397069)
+    assert int(row["pooled_bars"]) == 398849
+    # The NaN bars are exactly the warm-up: 20 per frame, 89 frames.
+    assert int(row["pooled_bars"]) - int(row["non_nan"]) == LENGTH * 89
 
 
 # ------------------------------------------- what the column actually is

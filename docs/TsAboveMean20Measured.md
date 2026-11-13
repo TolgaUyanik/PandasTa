@@ -14,12 +14,16 @@ states it — `count_above_mean / n on 20 returns`.
 Every number below comes from `docs/measure_ts_above_mean_20.py` unless the
 line says otherwise; the section names (`gate_a`, `gate_b`, …) are that
 script's arguments. The tests that hold the same facts are in
-`tests/test_ts_above_mean_20.py` (165 of them).
+`tests/test_ts_above_mean_20.py` (166 of them), except the Gate E and
+real-data Gate C numbers, which come from the launcher's run (§9) and are
+pinned out of `docs/gate_e_ledger.csv`.
 
-**⚠ Gate E: pending, run by issue-solver after this session.** There is no
-row in `docs/gate_e_ledger.csv`, and
-`tests/test_ts_above_mean_20.py::test_the_gate_e_row_is_still_owed` asserts
-there is none — that is the receipt session's cue.
+**Gate E: MEASURED, 2026-11-13, run `is97-ts_above_mean_20-5d78f565` —
+`TS_ABOVE_MEAN_20` is SHIP**, pooled max |ρ| **0.35937568662749647** vs
+`PVT_Slope_norm` at n = 396,970, per-frame max median
+**0.3580864882804631** against the same comparator over 89 frames. §9 has
+the run and all of its numbers; the row is in `docs/gate_e_ledger.csv`.
+Nothing is struck, so nothing is removed.
 
 ---
 
@@ -181,9 +185,10 @@ port's favour:
 
 Because Gate E's statistic is a Spearman over the bars where both fire, the
 screen's figures (max |ρ| 0.3594 vs `PVT_Slope_norm`, n = 396,970, per-frame
-max median 0.3581 → SHIP) are expected to carry over. **They are not a
-receipt**: the launcher's Gate E run on this module is the number that decides
-ship or revert.
+max median 0.3581 → SHIP) were expected to carry over. **They were not a
+receipt** — and §9 now reports the run that is: the port measures
+0.35937568662749647 against the same comparator at the same n, agreeing with
+the screen to the four decimals the screen published.
 
 ## 2. Gate B — causality, by mutant
 
@@ -270,9 +275,30 @@ Every one of the nine synthetic frames: fires **1480 of 1500**, every fired
 bar non-zero, at least 8 distinct values. A flat 300-bar frame and a
 constant-return ladder fire on **0** bars, which is §4.
 
-**Gate C's real-data counts are OWED** — they come out of the launcher's Gate
-E run, which reports pooled non-NaN and non-zero over the 89 frames. What
-exists today is the screen's pre-flight on real BIST frames,
+**Gate C on real data is MEASURED**, out of the launcher's Gate E run
+(`is97-ts_above_mean_20-5d78f565`, §9): over the 89 BIST frames
+`TS_ABOVE_MEAN_20` is non-NaN on **397,069 of 398,849** pooled bars, and
+**397,069** of those are non-zero — every bar it reports on.
+
+Two things follow, and both are the arithmetic of those three numbers rather
+than a reading of them:
+
+* **398,849 − 397,069 = 1,780 = 20 × 89, exactly the warm-up.** So on the 89
+  frames NONE of this port's guards emptied a window: not the relative floor
+  of §4, not the per-return magnitude bound, not the bad-close rule — any
+  window they emptied would be a NaN bar beyond bar 19 of its frame. The
+  synthetic tables could only show those guards cost 1 bar (bar 19) and 0 body
+  bars on nine clean frames; this shows 0 body bars on 398,849 real ones. It
+  does NOT say the guards are idle in general: §4 measures each one firing on
+  a frame built to make it fire.
+* **No fired bar is exactly 0.0**, which is §A4's bound seen on real data:
+  0.0 needs all twenty returns equal, and such a window is refused by the
+  floor rather than reported as 0.0. The prototype of §A7 DOES emit 0.00, at
+  bar 19 of every frame.
+
+The pooled finite share is 397,069 / 398,849 = **0.99554**. The screen's
+pre-flight below reports a WORST-FRAME share, a different statistic, so the
+two are not comparable; it is kept as the corroboration it now is —
 `docs/issues/screen/sanity.csv` line 72 (gitignored owner tracker, same
 caveats as §5 — measured on the PROTOTYPE, and §A7 is the bridge):
 
@@ -641,21 +667,27 @@ where the module is 3.2 ms, which is why it lives in the measure script.
 
 ## 8. Gate F — suites
 
-`tests/test_ts_above_mean_20.py`: **165 passed** (2.3 s), and 165 passed again
-with `AVX512F`, `AVX512_SKX`, `AVX2` and `FMA3` dispatch disabled, via
-`docs/measure_ts_above_mean_20_cpu.py`.
+Re-run by the receipt session of 2026-11-13, after the ledger row landed.
 
-Full suite, `python -m pytest -q`: **3 failed, 7,058 passed, 85 skipped** in
-175 s. The three are the two `CLAUDE.md` Known breaks —
+`tests/test_ts_above_mean_20.py`: **166 passed** (2.4 s), and 166 passed again
+with `AVX512F`, `AVX512_SKX`, `AVX2` and `FMA3` dispatch disabled, via
+`docs/measure_ts_above_mean_20_cpu.py`. (165 at the porting commit: the test
+asserting the ledger carried NO row is gone, replaced by two that pin the row
+that is now there.)
+
+Full suite, `python -m pytest -q`: **3 failed, 7,066 passed, 85 skipped** in
+179 s. The three are the two `CLAUDE.md` Known breaks —
 `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` and
 `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`,
-both deselected by name in CI — plus the owed Gate E row below. The launcher
-re-runs both repos' suites in clean worktrees.
+both deselected by name in CI — plus one Gate E row that is still owed, and it
+is no longer this port's. The launcher re-runs both repos' suites in clean
+worktrees.
 
 ⚠ `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-FAILS locally until the Gate E row is recorded, and reports
-`['mtd_ret', 'ts_above_mean_20']`. That is expected and is the point of the
-owed-row mechanism (`GATE_E_PENDING_OK=1` on the way to `dev`).
+now reports exactly `['mtd_ret']` — issue #206's, owed on `dev` — where at the
+porting commit it reported `['mtd_ret', 'ts_above_mean_20']`. That remaining
+failure is the owed-row mechanism working (`GATE_E_PENDING_OK=1` on the way to
+`dev`) and is not about this column.
 
 ⚠ **A pre-existing ordering hazard this port's `CATEGORY_TOTAL` bump brushes
 against, not caused by it.** `python -m pytest tests/test_wiring_accessors.py
@@ -670,28 +702,95 @@ behaviour change to `strategy` and outside this issue's allowed scope, so it
 is recorded here rather than made. The same defect is recorded in commit
 `d30b226` (issue #95).
 
-## 9. Gate E — PENDING
+## 9. Gate E — MEASURED, SHIP
 
-**Gate E: pending, run by issue-solver after this session.**
+Run **`is97-ts_above_mean_20-5d78f565`**, measured **2026-11-13** by
+issue-solver on the module at this branch's HEAD
+(`module_sha1 9d0484a70d03c1df4fe6b6ec9f1e36a839dd7507`). Default parameters
+(`kwargs {}`), 89 ALTPORT-1 BIST frames, **398,849** pooled bars, **687**
+comparators (329 `compute_all` + 358 `ml_features` manifest), canary
+`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`, pandas 2.3.3 / numpy
+1.26.4, data stamp `1be6495e`. Bands: `r3-perframe-0.90`.
 
-The command, per issue #97 and `CLAUDE.md`, is
+**`TS_ABOVE_MEAN_20` → SHIP.** Pooled max |ρ| **0.35937568662749647**
+(ρ = −0.3594) against `PVT_Slope_norm` of the manifest set at
+**n = 396,970**; per-frame max median **0.3580864882804631** against the same
+comparator over 89 frames. Over the `compute_all` set alone the maximum is
+**0.2757739752658469** against `QQE_RSIMA` at n = 397,069. Both are far under
+the 0.76 ship line, and the gap to the 0.90 strike line is not close.
 
-```
-python scripts/analysis/gate_e_overlap.py run \
-    --module pandas_ta.statistics.ts_above_mean_20
-```
+Pooled top five (`top25.csv`), all from the manifest set:
 
-from the parent repo, followed by
-`python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`.
+| comparator | ρ | \|ρ\| | n |
+|---|---|---|---|
+| `PVT_Slope_norm` | −0.35937568662749647 | 0.3594 | 396,970 |
+| `PVT_Slope_norm_Pctl` | −0.33359970463205696 | 0.3336 | 391,719 |
+| `PVT_Slope_norm_State` | −0.31657291979466284 | 0.3166 | 391,719 |
+| `OBV_Price_Divergence` | +0.3031756274449332 | 0.3032 | 397,058 |
+| `OBV_Price_Divergence_Pctl` | +0.2921864675278119 | 0.2922 | 392,786 |
 
-What the screen measured on the PROTOTYPE on 2026-10-24, for context only —
-a prototype is not a port, and §A7 says exactly how the two differ:
+Per-frame, the same five (`perframe.csv`, 89 frames each):
 
-* max |ρ| **0.3594** vs `PVT_Slope_norm`, n = 396,970; top-5 per-frame max
-  median 0.3581 → SHIP;
-* next comparators `PVT_Slope_norm_Pctl` 0.3336, `PVT_Slope_norm_State`
-  0.3166;
-* run `screen_20261024`, 89 ALTPORT-1 frames, 398,849 bars, 329 + 358
-  comparators, canary bit-equal.
+| comparator | median | mean | max | min | ≥0.90 | ≥0.80 |
+|---|---|---|---|---|---|---|
+| `PVT_Slope_norm` | 0.3581 | 0.3422 | 0.5230 | 0.0400 | 0.0% | 0.0% |
+| `PVT_Slope_norm_Pctl` | 0.3264 | 0.3209 | 0.4968 | 0.0588 | 0.0% | 0.0% |
+| `PVT_Slope_norm_State` | 0.3117 | 0.3040 | 0.5097 | 0.0607 | 0.0% | 0.0% |
+| `OBV_Price_Divergence` | 0.3190 | 0.3203 | 0.5312 | 0.1870 | 0.0% | 0.0% |
+| `OBV_Price_Divergence_Pctl` | 0.2977 | 0.3007 | 0.4555 | 0.1062 | 0.0% | 0.0% |
+
+**No single frame of the 445 (5 comparators × 89) reaches 0.80**, and the
+largest single-frame reading anywhere in that table is 0.5312. The 25th and
+last row of `top25.csv` is `apo_pct` at 0.2600, so the whole visible tail
+sits between 0.26 and 0.36. One of the 687 comparators was degenerate —
+`squeeze_SQZ_NO`, constant over the pooled sample (`degenerate.csv`).
+
+### Did the screen's prototype figures carry over? To every digit it published
+
+Issue #97 quotes the 2026-10-24 screen on the PROTOTYPE as max |ρ| 0.3594 vs
+`PVT_Slope_norm` at n = 396,970 with a top-5 per-frame max median of 0.3581.
+This run on the PORT lands on the same comparator, at the same n, and its two
+figures round to those same four decimals (0.35937568… → 0.3594,
+0.35808648… → 0.3581). The screen's rounded values are all that exists here,
+so **this is agreement to four decimals and not bit-equality** — the finer
+comparison cannot be made from the inputs available to this session.
+
+That n is equal is worth one line, because §A7 measures the prototype firing
+one bar EARLIER per frame (bar 19 against bar 20), which would give it 89 more
+bars. This column's own non-NaN count is 397,069 while the pooled Spearman
+uses 396,970, i.e. `PVT_Slope_norm` is itself NaN on 99 of the bars this
+column reports; the simplest reading is that it is NaN at bar 19 of every
+frame too, so the prototype's extra bars drop out of the pair. **That reading
+is an inference, not a measurement**: the screen's own run outputs are not in
+this worktree.
+
+### What this run does NOT settle
+
+* **The overlap with the shipped `OSAP_RETSKEW_21`** (§5) stays
+  SYNTHETIC-ONLY. No `OSAP`, `RETSKEW` or `SKEW` column appears anywhere in
+  the run's four output files — Gate E's comparators are the ENGINE's columns
+  and hold no pandas_ta port — so −0.6141 / −0.8581 / −0.9619 remain measured
+  on a walk, a heavy-tailed frame and a two-point frame.
+* **The 0.8428 pair with the screen's `ts_medskew_20` candidate** (§5) is
+  untouched for the same reason, and `ts_medskew_20` is still unshipped
+  (issue #98). This run says what this column does against the engine, not
+  what it does against another skewness reading of the same window.
+* **Non-default `length`.** `docs/gate_e_ledger.py record` refuses a run with
+  non-default parameters, so the row and this section are about `length` 20
+  only.
+
+### What the top comparators look like, labelled as a reading
+
+The five above are a volume-price-trend slope, its percentile and its state,
+and an OBV/price divergence with its percentile; the rest of `top25.csv` is
+21-day return, EFI, SMI, RSI, CMO, TSI, z-score, PPO and APO — momentum and
+return-direction readings, at 0.26 … 0.36 and mostly NEGATIVE. **That grouping
+is read off their names, and it is an interpretation.** It sits beside §D5's
+measurement that the COUNT is invariant to any affine map of the returns, and
+beside §5's synthetic Spearman of 0.0699 against the window's mean return and
+−0.0746 against its standard deviation: on real BIST data this column is
+further from being orthogonal to direction than those two synthetic numbers
+would suggest, and the sign is the backwards one §6 describes. Both are
+recorded; neither is reconciled here.
 
 The receipt session fills in the measured numbers and the ledger row here.
