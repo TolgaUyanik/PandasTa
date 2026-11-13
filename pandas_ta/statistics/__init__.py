@@ -10,6 +10,8 @@ from .g191_190 import g191_190
 from .ie_asym import ie_asym
 from .kpss import kpss
 from .kurtosis import kurtosis
+from .lean_hurst_100 import lean_hurst_100
+from .lean_tdd_20 import lean_tdd_20
 from .lot_zeroret_60 import lot_zeroret_60
 from .mad import mad
 from .median import median
@@ -20,6 +22,16 @@ from .rank import rank
 from .skew import skew
 from .stdev import stdev
 from .tf_centroid_20 import tf_centroid_20
+from .ts_above_mean_20 import ts_above_mean_20
+from .ts_ac1_60 import ts_ac1_60
+from .ts_aggac_60 import ts_aggac_60
+from .ts_binent_20 import ts_binent_20
+from .ts_c3_20 import ts_c3_20
+from .ts_cid_ce_20 import ts_cid_ce_20
+from .ts_kurt_60 import ts_kurt_60
+from .ts_medskew_20 import ts_medskew_20
+from .ts_peaks_20 import ts_peaks_20
+from .ts_perment_20 import ts_perment_20
 from .variance import variance
 from .zscore import zscore
 from .rolling_sum import rolling_sum
