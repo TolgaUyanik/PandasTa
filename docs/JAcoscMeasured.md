@@ -2,7 +2,7 @@
 
 PandasTa issue **#106** (parent #31 ALPHASETS, screen of 2026-10-24).
 Module `pandas_ta/momentum/j_acosc.py`, column **`J_ACOSC_5_34_5`**.
-Tests `tests/test_j_acosc.py` (175).
+Tests `tests/test_j_acosc.py` (176).
 
 Every number in §A, §B, §C, §D, §F(the filter), §G, §L, §W and §Z is
 printed by `python docs/measure_j_acosc.py` on this worktree (**pandas
@@ -18,9 +18,10 @@ What does NOT come from that command, marked again where it appears:
   show how far they move. The claims there are exactly the four §Z lists
   — the traced peaks, the 4.0× memory ratio, a time ratio within a small
   constant factor of linear with no digit attached, and the ordering.
-* **§E**, which is **pending**: issue-solver runs Gate E after this
-  session and a later receipt session writes the result here and into
-  `docs/gate_e_ledger.csv`.
+* **§E**, which is the launcher's Gate E run `is106-j_acosc-92ad5686`
+  (2026-11-14), read off that run's own CSVs and `meta.json` by this
+  receipt session, which did not run the harness. §E2's real-data
+  reachability counts come from the same row.
 * **§E0**, the 2026-10-24 screen's figures, measured on the PROTOTYPE and
   quoted from issue #106.
 * **§SUITES**, which is pytest's own output.
@@ -433,8 +434,10 @@ values, and `AO`'s first is at bar 33. Reading the warm-up as `SLOW - 1`
 
 ### §C2 real data, and the dictionary
 
-⚠ **Real-data reachability is OWED with Gate E**, which issue-solver runs
-after this session. Every count in §C1 is synthetic.
+⚠ Every count in §C1 is SYNTHETIC. **Real-data reachability came with Gate
+E and is in §E2**: 395,556 of 398,849 pooled bars over 89 BIST frames fire,
+the 3,293 empty ones being exactly `WARMUP * 89`, and no fired real bar
+reads 0.0.
 
 The dictionary regenerated clean
 (`python docs/gen_indicator_dictionary.py`, 596 lines):
@@ -837,36 +840,125 @@ asserts any of it; §Z is a disclosure.
 
 ---
 
-## §E Gate E — **pending, run by issue-solver after this session**
+## §E Gate E — **DISCLOSE_GAP**, measured 2026-11-14
 
-Gate E needs the parent repo's private engine, its 827 MB BIST cache and
-`../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py`, none of
-which this session may touch. The launcher runs
+The launcher ran
+`gate_e_overlap.py run --module pandas_ta.momentum.j_acosc` on the code at
+commit `f38b486` after the porting session; outputs
+`is106-j_acosc-92ad5686`, recorded into `docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-14`.
+Every figure in §E1–§E3 is read off that run's `overlap_max.csv`,
+`top25.csv`, `perframe.csv`, `degenerate.csv` and `meta.json`; this session
+did not run the harness.
+
+### §E1 the verdict
 
 ```
-python scripts/analysis/gate_e_overlap.py run --module pandas_ta.momentum.j_acosc
+column            J_ACOSC_5_34_5
+verdict           DISCLOSE_GAP           (0.80 <= rho < 0.90, r3-perframe-0.90)
+pooled max |rho|  0.8381076869979721  vs FWMA_Slope_pct_Pctl  (manifest)  n = 391,996
+per-frame         0.8430510886211635  vs FWMA_Slope_pct_Pctl   median over 89 frames
+                  0.0 % of the 89 frames at |rho| >= 0.90
+best in compute_all  0.8156084789395279 vs StochRSI_K          n = 395,556
+best in manifest     0.8381076869979721 vs FWMA_Slope_pct_Pctl n = 391,996
+comparators       687 (329 compute_all + 358 manifest), 1 dropped as degenerate
+kwargs            {} -- defaults
+canary            AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal
+universe          89 ALTPORT-1 frames, 398,849 pooled bars
 ```
 
-after this session, and a later receipt session writes the result into this
-section and records the row with
-`python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`.
+`verdict_pooled_only` is **also** `DISCLOSE_GAP`, so neither limb of the
+band carried the other: the pooled figure and the per-frame limb agree.
+The one dropped comparator is `squeeze_SQZ_NO` (manifest), dropped as
+`constant` — a comparator fault, not this column's.
 
-Until then `docs/gate_e_ledger.csv` has **no row for `j_acosc`**, and that
-is deliberate and pinned twice:
+**DISCLOSE_GAP is a ship with a note, not a strike**, so nothing is
+removed: the column stays in `Category`, in `core.py` and in the
+dictionary, and the ledger row needs no waiver (only STRUCK does).
 
-* `tests/test_j_acosc.py::test_the_gate_e_row_is_owed` asserts the row is
-  absent, so the receipt session has a cue that fails the moment it
-  records one;
-* `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-  fails locally, reporting
-  `['arch_lm', 'diff2_acf1', 'edge', 'firstzero_ac', 'halflife', 'j_acosc', 'lumpiness', 'mtd_ret']`.
-  On a PR into `dev` that same check SKIPS with a reason starting "Gate E
-  owed" (`GATE_E_PENDING_OK=1`); toward `main` it fails, so a release needs
-  the row.
+### §E2 what the run adds that §E0 could not
 
-**Gate C's real-data limb is owed from the same run**, and so is the
-question of whether any BIST bar reads exactly 0.0 (no synthetic varying
-frame does; the `flat` frame reads 0.0 on all 1,463).
+**It reproduced the screen's PROTOTYPE figures to every digit issue #106
+printed** — same comparator `FWMA_Slope_pct_Pctl`, same n = 391,996, same
+0.8381 and 0.8431, and the same runners-up `FWMA_Slope_pct` 0.8278 and
+`StochRSI_K` 0.8156. That is the expected outcome rather than a surprise,
+because §A2 asserts this module BIT-equal to the retyped prototype on all
+seven frames — and an expected agreement is the easiest kind of row to copy
+over by mistake, which is why
+`tests/test_j_acosc.py::test_the_gate_e_row_is_this_ports_own_measurement`
+pins the row's own run id `is106-j_acosc-92ad5686` and not only its
+arithmetic.
+
+**No single frame reaches 0.90 on any of the top five comparators**, which
+is more than the band requires (it reads the MEDIAN):
+
+```
+against                n_frames  median    mean      max       min      >=0.80
+FWMA_Slope_pct_Pctl          89  0.84305   0.84089   0.88222   0.75580   94.38 %
+FWMA_Slope_pct               89  0.83217   0.82964   0.87477   0.75383   87.64 %
+StochRSI_K                   89  0.81799   0.81776   0.84775   0.77707   88.76 %
+StochRSI_K_Pctl              89  0.81228   0.81138   0.84083   0.77329   76.40 %
+StochRSI_D                   89  0.80586   0.80475   0.84196   0.75357   68.54 %
+```
+
+The worst single frame of the whole table is **0.8822** on the top
+comparator, so the agreement is uniform across the universe and nowhere
+near the 0.90 strike line — the opposite shape to `j_damiani`, where two
+runners-up each touched 0.90 on one frame while their medians sat at 0.74.
+`top25.csv` then falls away to **0.6856** (`Dist_to_PSAR_pct`) at rank 25,
+and the band is driven by two comparator FAMILIES and not by one column:
+`FWMA_Slope_pct*` (0.8381 / 0.8278 / 0.7877) and `StochRSI_*` (0.8156 /
+0.8096 / 0.8011 / 0.7446), with `smi_SMIo_5_20_5` 0.7897 and
+`MACD_Hist_ATR*` 0.7892 / 0.7833 just under them — every one of those a
+differenced or oscillating momentum reading, which is what §F says this
+column is.
+
+**Gate C's real-data limb closes here**, off the same row:
+
+```
+pooled bars  398,849
+fires        395,556   -> 0 < fires < n on real data
+empty          3,293   = WARMUP * 89 = 37 * 89, exactly
+non_zero     395,556   = non_nan: NO fired real bar reads exactly 0.0
+```
+
+The empty bars are the warm-up and nothing else — 37 × 89 = 3,293 with no
+remainder — which is §C1's "the NaNs are a LEADING PREFIX" holding on 89
+real BIST frames and not only on the seven synthetic ones. And the open
+question §E carried before the run is answered: **no real bar reads exactly
+0.0**, so the exact-zero reading is specific to the synthetic `flat` frame
+(where both rolling means equal the constant level, §C1), and `0.0` is not
+a value a consumer will meet on BIST daily data.
+
+### §E3 what the run does NOT settle
+
+* **The 687 comparators are the ENGINE's and hold no pandas_ta port**, so
+  every in-fork figure of §L1 stays SYNTHETIC-only. In particular the two
+  that matter most there — `AO`'s 1-bar change over close at 0.8638 ..
+  0.9016 and the fork's `stochrsi:STOCHRSIk_14_14_3_3` at 0.7965 .. 0.8682
+  — are not Gate E comparators at all. The run's `StochRSI_K` SHARES a name
+  with the second one, but it is the engine's column and this session did
+  not read the engine, so no claim is made that they are the same
+  computation. (That the two land within 0.03 of each other is worth
+  noticing and is not evidence.)
+* ⚠ **§L1's invented `fwma` proxy was wrong in magnitude, and this run is
+  what shows it.** `fwma(close, 10)` 1-bar percent change read 0.5283 ..
+  0.6155 on the synthetic frames; the engine's `FWMA_Slope_pct_Pctl` — the
+  column the proxy was guessing at — reads **0.8381** here, roughly 0.22
+  higher. The label ("a PROXY this session invented", "evidence about
+  nothing but itself") is what kept that from becoming an argument, and
+  this is the receipt that the label was needed.
+* **The module's docstring is deliberately NOT edited** by this receipt
+  session. The ledger row's `module_sha1` is the sha1 of `j_acosc.py` as
+  the harness imported it (`348d9d27`), so a one-character docstring edit
+  would move the hash and make `tests/test_gate_e_ledger.py` read the row
+  as a measurement of code that no longer exists. The docstring's own Gate
+  E sentence — "The screen measured the prototype at DISCLOSE_GAP anyway …
+  Gate E on this port is what decides the band" — is still accurate, and
+  the band it decided is the same DISCLOSE_GAP.
+* **Which frames are which.** `perframe.csv` carries the five comparators
+  above and their 89-frame distributions; it does not name the frames, and
+  this session did not run the harness, so no per-ticker claim is made.
 
 ### §E0 what the 2026-10-24 screen measured, on the PROTOTYPE
 
@@ -892,10 +984,11 @@ the screen.
 * Pre-flight on 6 frames (`sanity.csv`): prefix-causal, unchanged under
   price ×8 and volume ×8.
 
-⚠ **DISCLOSE_GAP is a ship with a note, not a strike.** If the launcher's
-run lands STRUCK instead — pooled |ρ| ≥ 0.90, or a top-5 comparator's
-per-frame median ≥ 0.90 — the column is reverted or waived before a
-release, and this file stays as the receipt either way.
+⚠ **DISCLOSE_GAP is a ship with a note, not a strike.** The launcher's run
+on this port landed in the same band and not STRUCK (§E1), so the column
+ships; had it read pooled |ρ| ≥ 0.90 or a top-5 comparator's per-frame
+median ≥ 0.90, the column would have been reverted or waived and this file
+would be the receipt either way.
 
 ⚠ **`StochRSI_K` at 0.8156 in that list is the engine's column, and §L1
 measures the FORK's `stochrsi` at 0.7965 .. 0.8682 on synthetic frames.**
@@ -910,15 +1003,17 @@ is encouraging and is not a substitute for either measurement.
 |---|---|---|
 | **A** Correctness | **PASS** | three independent spellings on 1,463 of 1,463 bars of each of seven frames: a `math.fsum` oracle within 4.536e-16 absolute (asserted 1e-14; 4.569e-16 under reduced dispatch), the screen prototype bit-equal, and the fork's own `ao` + `sma` bit-equal. §A4 prices the three readings not taken, and discloses that the EMA reading is NEAR (0.8966 .. 0.9277) rather than far |
 | **B** Causality | **PASS** | the module caught 0 of 36 perturbation offsets on each of six varying frames; all five look-ahead mutants caught 36 of 36 on all six, each live on `walk` at every shared bar (1,445 of 1,445 `fast-lead`, 1,462 of 1,462 the other four), the one exception across the six frames being `divisor-lead` on `grid` at 1,456 of 1,462 (§B2); smallest single catch 5.971e-08 against §D2's 1.886e-10 noise |
-| **C** Reachability | **PASS synthetic, real data OWED** | 1,463 of 1,500 bars on each of seven frames, 1,463 distinct values on the six varying ones, exactly 0.0 on all 1,463 of the flat one; NaNs a leading prefix on all seven. Real-data counts come with Gate E (§C2, §E) |
+| **C** Reachability | **PASS** | synthetic: 1,463 of 1,500 bars on each of seven frames, 1,463 distinct values on the six varying ones, exactly 0.0 on all 1,463 of the flat one; NaNs a leading prefix on all seven. Real: 395,556 of 398,849 pooled bars over 89 BIST frames fire, the 3,293 empty ones exactly `WARMUP * 89`, and no fired real bar reads 0.0 (§E2) |
 | **D** Scale-free | **PASS** | ×8 / ×64 bit-identical on 1,463 of 1,463 bars of seven frames and at levels 1e−6 / 1e+6 / 1e+100; inexact factors within 1.812e-10 (1.886e-10 under reduced dispatch) against a 1e-7 bound, masks matching; `0 < 1,463 < 1,500` on all seven |
-| **E** Attribution | **PENDING — run by issue-solver after this session** | the screen measured the PROTOTYPE at **DISCLOSE_GAP**: max \|ρ\| 0.8381 vs `FWMA_Slope_pct_Pctl` (n = 391,996), top-5 per-frame max median 0.8431 (§E0). §A2 makes this module bit-equal to that prototype, so those are the figures the run is expected to reproduce |
-| **F** Suites | **PASS here, both repos are the launcher's** | 175 for the module, the same 175 under reduced CPU dispatch, full suite 3 failed / 9,120 passed / 85 skipped — the three being `dev`'s two clean-checkout failures plus the owed Gate E row (§SUITES) |
+| **E** Attribution | **DISCLOSE_GAP — ship with a note** | run `is106-j_acosc-92ad5686`, 2026-11-14: max \|ρ\| **0.8381** vs the manifest's `FWMA_Slope_pct_Pctl` over n = 391,996, top-5 per-frame max median **0.8431** over 89 frames with **0.0 %** of them at 0.90, 687 comparators, no waiver. Every digit the screen printed on the bit-equal PROTOTYPE, reproduced (§E1, §E2) |
+| **F** Suites | **PASS here, both repos are the launcher's** | 176 for the module after this receipt session, the same 176 under reduced CPU dispatch, full suite 3 failed / 9,128 passed / 85 skipped — the three being `dev`'s two clean-checkout failures plus the Gate E rows owed by seven OTHER indicators, `j_acosc` named in none of them (§SUITES) |
 
-**Why this ships into the launcher's Gate E rather than reverting now.**
-Issue #106 closes either way, so the question is whether anything measured
-here argues for deleting the column before Gate E sees it. Two things come
-close and neither decides it:
+**Why this ships rather than reverting.** Gate E read DISCLOSE_GAP on the
+only column (§E1), which is a ship with a note under `r3-perframe-0.90`, so
+the revert branch of the issue's *Done when* is not taken. The porting
+session asked the same question before the run — whether anything measured
+in this worktree argued for deleting the column before Gate E saw it — and
+two things came close without deciding it; the run did not change either:
 
 1. **It is close to a differenced `AO`** — 0.8638 .. 0.9016 against `AO`'s
    1-bar change over close (§L1). But that comparator is NOT a shipped
@@ -934,10 +1029,11 @@ close and neither decides it:
 
 Everything else passes: the formula is right by three spellings, the column
 is causal under five mutants, scale-free bit-exactly under ×8/×64, and
-reachable on every synthetic frame. The screen's own Gate E figure on the
-bit-identical prototype was 0.8381 — DISCLOSE_GAP, not STRUCK. If the
-launcher's run on this module lands STRUCK, the column is reverted or
-waived and this file is the receipt.
+reachable on every synthetic frame and on 395,556 of 398,849 real bars. The
+engine's own view agrees with both: its nearest comparator is 0.8381 and
+its `StochRSI_K` is 0.8156, both inside DISCLOSE_GAP, with no single frame
+of the 89 reaching 0.90 on any top-5 comparator (§E2). The note the band
+asks for is item 2 of the consumer list and §E2's comparator families.
 
 What a consumer must know, in one place:
 
@@ -957,8 +1053,12 @@ What a consumer must know, in one place:
    high/low empties the 38 bars its windows reach and moves nothing
    earlier, with an `inf` behaving exactly like a NaN; a cross-scale frame
    overflows and is not guarded (§G1, §G3, §G5).
-7. **Gate E is PENDING** (§E). Until the row is recorded, `dev` carries an
-   unmeasured column, which is what `GATE_E_PENDING_OK=1` is for.
+7. **Gate E is DISCLOSE_GAP** — 0.8381 against the engine's
+   `FWMA_Slope_pct_Pctl`, per-frame median 0.8431 over 89 frames, no frame
+   at 0.90 (§E1). A ship with a note: it is a differenced momentum reading
+   and it sits in a crowded neighbourhood (the `FWMA_Slope_pct` and
+   `StochRSI` families, §E2), so a miner should not be given it and those
+   together expecting two independent signals.
 
 ## Decisions this session made, and why
 
@@ -996,33 +1096,46 @@ the smaller scope:
 
 ## §SUITES suite output
 
+All three re-run by the receipt session of 2026-11-14, after §E and the
+tests were rewritten:
+
 ```
-$ python -m pytest tests/test_j_acosc.py -q
-175 passed
+$ python -m pytest tests/test_j_acosc.py tests/test_gate_e_ledger.py tests/test_ml_companions.py -q
+FAILED tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one
+1 failed, 1142 passed
 
 $ python docs/measure_j_acosc_cpu.py
 numpy 1.26.4
 NPY_DISABLE_CPU_FEATURES = 'AVX512F AVX512_SKX AVX2 FMA3'
 dispatchable features still enabled: ['SSSE3', 'SSE41', 'POPCNT', 'SSE42',
  'AVX', 'F16C', 'AVX512CD', 'AVX512_CLX', 'AVX512_CNL', 'AVX512_ICL']
-175 passed
+176 passed
 
 $ python -m pytest -q
 FAILED tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows
 FAILED tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one
 FAILED tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence
-3 failed, 9120 passed, 85 skipped in 233.91s
+3 failed, 9128 passed, 85 skipped in 232.24s
 ```
 
-⚠ The module's test COUNT moved during review and the figures above are
-the final run: round 1 left **175**, round 2's new
+⚠ The module's test COUNT moved during review and again here: round 1 left
+**175**, round 2's new
 `test_the_fast_lead_mutant_reaches_eighteen_bars_not_two` made it **176**,
 round 3's fix to `test_gate_d_scale_at_extreme_price_levels` folded three
 parametrized cases into one loop (the three levels now have to be compared
-WITH each other, which a parametrized test cannot do) giving **174**, and
-round 4's new
+WITH each other, which a parametrized test cannot do) giving **174**, round
+4's new
 `test_the_flat_frame_is_excluded_because_divisor_lead_cannot_be_caught_there`
-brought it back to **175**. The review log records each step.
+brought it back to **175**, and this receipt session replaced
+`test_the_gate_e_row_is_owed` with
+`test_the_gate_e_row_is_this_ports_own_measurement` plus
+`test_the_gate_e_run_closes_gate_c_on_real_data` for **176**. The review
+log records each step up to round 4.
+
+The eight extra passes in the full suite against the porting session's
+9,120 are that one net new test plus seven the ledger ROW itself adds —
+six `test_gate_e_ledger.py` tests parametrised per row and one per
+indicator holding a row, read off that file.
 
 The three failures are `dev`'s own, not this port's:
 
@@ -1031,8 +1144,11 @@ The three failures are `dev`'s own, not this port's:
 * `test_audited_rows_carry_their_evidence` is the known break of
   `CLAUDE.md` § *Known breaks* (`8d8f705` untracked `docs/pine/`) and is
   also deselected in CI;
-* `test_every_indicator_that_needs_a_row_has_one` is the OWED Gate E row,
-  red by design here and a skip on a PR into `dev` (§E).
+* `test_every_indicator_that_needs_a_row_has_one` reports the Gate E rows
+  still owed by SEVEN OTHER indicators —
+  `['arch_lm', 'diff2_acf1', 'edge', 'firstzero_ac', 'halflife', 'lumpiness', 'mtd_ret']`
+  — and `j_acosc` is no longer among them. It is a skip on a PR into `dev`
+  (`GATE_E_PENDING_OK=1`) and red locally.
 
 ⚠ **A pre-existing ordering defect, recorded and not fixed** (outside this
 issue's scope; already recorded by #100 … #105). `pandas_ta/core.py:453`

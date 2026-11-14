@@ -168,3 +168,46 @@ issue. The manifest carries a ⚠ note instead.
    a price level — and the nearest shipped fork column is
    `stochrsi:STOCHRSIk_14_14_3_3` at 0.7965 .. 0.8682 synthetic, matching
    the screen's 0.8233 on 12 real frames.
+
+## ✅ Closed by the Gate E receipt session (2026-11-14, same day)
+
+Follow-ups 1 and 2 above are **done**. The four review rounds happened
+before this section, so nothing in it was reviewed by any of them.
+
+* **Gate E ran** as `is106-j_acosc-92ad5686` and reproduced the
+  prototype's figures to every digit issue #106 printed: max |ρ|
+  **0.8381** vs `FWMA_Slope_pct_Pctl` (manifest, n = 391,996), top-five
+  per-frame max median **0.8431** over 89 frames, 687 comparators, one
+  dropped as degenerate (`squeeze_SQZ_NO`, constant). **DISCLOSE_GAP** —
+  the 0.80 .. 0.90 band, so nothing is STRUCK and the column ships with
+  the disclosure follow-up 6 already carries. Recorded in
+  `docs/gate_e_ledger.csv`; no waiver needed.
+  Stronger than the band requires: **no single one of the 89 frames
+  reaches 0.90 on any of the top five comparators** (worst 0.8822 on the
+  top one), and `verdict_pooled_only` is the same DISCLOSE_GAP, so neither
+  limb carried the other.
+* **Gate C's real-data limb** came with it (§E2): 395,556 of 398,849
+  pooled BIST bars fire, all non-zero, the 3,293 empty ones being exactly
+  `WARMUP * 89` with no remainder. So the synthetic exact-0.0 reading of
+  the `flat` frame does not occur on real BIST daily prices — the question
+  §E carried before the run.
+* ⚠ **One in-fork figure was refuted by the run, and it was a labelled
+  guess.** §L1's invented `fwma(close, 10)` 1-bar-percent-change proxy
+  read 0.5283 .. 0.6155; the engine's `FWMA_Slope_pct_Pctl` it was
+  guessing at reads **0.8381**. The label is what kept the proxy from
+  becoming evidence, and §E3 records the miss.
+* `test_the_gate_e_row_is_owed` became
+  `test_the_gate_e_row_is_this_ports_own_measurement`, and
+  `test_the_gate_e_run_closes_gate_c_on_real_data` was added: **176**
+  module tests, the same 176 under reduced CPU dispatch, full suite
+  3 failed / 9,128 passed / 85 skipped with `j_acosc` named in none of the
+  three failures (the ledger one now reports seven OTHER indicators). The
+  "175 tests" and "Gate E pending" in *What shipped* are the porting
+  session's and are superseded here.
+* One thing this session deliberately did NOT touch: the module's
+  docstring. The ledger row's `module_sha1` is the sha1 of `j_acosc.py` as
+  the harness imported it (`348d9d27`), so any edit there — including a
+  one-character one — would make `tests/test_gate_e_ledger.py` read the
+  row as a measurement of code that no longer exists.
+  `docs/JAcoscMeasured.md` §E3 says so where a reader of the docstring
+  will find it.

@@ -133,12 +133,22 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    infinite) -- bad data rather than a price, and pinned so the disclosure
    cannot rot.
 
-8. **Gate E is OWED, and that is deliberate.**
-   `test_the_gate_e_row_is_owed` asserts the ledger has NO row for
-   `j_acosc`: the launcher runs `gate_e_overlap.py` after this session and
-   a later receipt session records the row, replacing that test with one
-   pinning the row's identity. Gate C's REAL-data counts are owed from the
-   same run; everything in item 4 and §C is synthetic.
+8. **Gate E is DISCLOSE_GAP, and whose measurement the ledger row is.**
+   `test_the_gate_e_row_is_this_ports_own_measurement` pins the row to run
+   `is106-j_acosc-92ad5686` (2026-11-14, on THIS module): pooled **0.8381**
+   against the manifest's `FWMA_Slope_pct_Pctl` at n = 391,996, top-five
+   per-frame max median **0.8431** over 89 frames, 687 comparators, no
+   waiver. That is the 0.80 .. 0.90 band -- a ship with a note, pinned as
+   the band's two BOUNDS rather than as digits. The screen's PROTOTYPE read
+   the same digits on 2026-10-24, which is why the row needs its identity
+   pinned and not just its arithmetic.
+   `test_the_gate_e_run_closes_gate_c_on_real_data` reads Gate C's real
+   limb off the same row -- 395,556 of 398,849 bars fire, the 3,293 empty
+   ones being exactly `WARMUP * 89`, and NO fired bar reads 0.0, so item
+   4's exact-zero `flat` reading is synthetic-only.
+   ⚠ Not pinned, because the band does not read it: no single one of the 89
+   frames reaches 0.90 on any of the top five comparators (the worst is
+   0.8822 on the top one, and 94.38 % of frames pass 0.80 there).
 
 Every number above is printed by `python docs/measure_j_acosc.py` on this
 worktree (pandas 2.3.3, numpy 1.26.4), and
@@ -148,9 +158,12 @@ The full receipt is `docs/JAcoscMeasured.md`.
 
 NOT pinned here: Gate E's own arithmetic (the launcher runs it; 687
 comparators over 89 real BIST frames, re-derived by
-`tests/test_gate_e_ledger.py`). The in-fork overlap figures of item 2 are
-SYNTHETIC and are disclosures, not gates: the 687 engine comparators hold
-no pandas_ta port, so the Gate E run cannot see them.
+`tests/test_gate_e_ledger.py`) -- item 8 pins the ROW it produced and the
+real-data counts in it. The in-fork overlap figures of item 2 are SYNTHETIC
+and are disclosures, not gates: the 687 engine comparators hold no
+pandas_ta port, so the Gate E run cannot see them -- which is also why
+item 2's invented `fwma` proxy (0.5283 .. 0.6155) understated the engine's
+`FWMA_Slope_pct_Pctl` (0.8381) by roughly 0.22.
 """
 import csv
 import importlib.util
@@ -853,7 +866,10 @@ def test_reachability_and_the_flat_frame(name):
     values of an `np.exp` path collide in the last bits is a property of
     this machine's kernels.
 
-    ⚠ Real-data counts are owed with Gate E, which the launcher runs."""
+    ⚠ These counts are SYNTHETIC. The real-data ones came with Gate E and
+    are pinned by `test_the_gate_e_run_closes_gate_c_on_real_data`, where
+    no fired bar reads 0.0 at all -- the exact 0.0 above is the flat
+    frame's and does not occur on 89 frames of BIST daily prices."""
     col = j_acosc(*FRAMES[name]())
     v = col.dropna()
     assert v.size == FIRED
@@ -1123,14 +1139,81 @@ def test_the_docstrings_first_paragraph_survives_the_dictionary_cut():
     assert desc({"desc": longer}) != longer
 
 
-def test_the_gate_e_row_is_owed():
-    """Gate E is run by issue-solver after this session, so the ledger has
-    NO row for this indicator yet -- which is what
-    `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-    reports as owed, and what the receipt session replaces with the
-    measured row (and this test with one pinning its identity).
-    `docs/JAcoscMeasured.md` §E says so too."""
+def _j_acosc_ledger_row():
     ledger = Path(__file__).resolve().parents[1] / "docs" / "gate_e_ledger.csv"
     rows = list(csv.DictReader(ledger.open(encoding="utf-8")))
     assert rows, "the ledger should not be empty"
-    assert [r for r in rows if r["indicator"] == "j_acosc"] == []
+    rows = [r for r in rows if r["indicator"] == "j_acosc"]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_the_gate_e_row_is_this_ports_own_measurement():
+    """The ledger row for `j_acosc` must come from the run on THIS module,
+    `is106-j_acosc-92ad5686` (measured 2026-11-14), and NOT from the screen
+    of 2026-10-24, which measured the PROTOTYPE. The two agree to every
+    digit issue #106 printed -- pooled 0.8381 against the manifest's
+    `FWMA_Slope_pct_Pctl` at n = 391,996, top-five per-frame max median
+    0.8431 over 89 frames, runners-up `FWMA_Slope_pct` 0.8278 and
+    `StochRSI_K` 0.8156 -- which is exactly why the row's identity needs
+    pinning: `tests/test_gate_e_ledger.py` re-derives a row's `module_sha1`
+    and output fingerprint from the tree and checks its verdict arithmetic,
+    but it cannot see WHOSE measurement a row came from. Item 1's §A2 limb
+    asserts this module bit-equal to the prototype on all seven frames, so
+    the agreement is expected -- and an expected agreement is the easiest
+    kind of row to copy over by mistake.
+
+    The verdict is **DISCLOSE_GAP**, the 0.80 .. 0.90 band of
+    `r3-perframe-0.90`: a ship with a note, not a strike, so the column
+    stays and the row needs no waiver. Both limbs are asserted as BOUNDS
+    and not as digits -- pooled in [0.80, 0.90), top-five per-frame max
+    median below the 0.90 strike line -- so a re-recorded row that moved
+    within the band still has to stay in it.
+
+    This test replaced `test_the_gate_e_row_is_owed`, which asserted the
+    row was ABSENT and so failed the moment the receipt session recorded
+    it. `docs/JAcoscMeasured.md` §E1 .. §E3 carries the result in full,
+    including the part the band does not read: no single one of the 89
+    frames reaches 0.90 on ANY of the top five comparators, the worst being
+    0.8822 on the top one."""
+    row = _j_acosc_ledger_row()
+    assert row["module"] == "pandas_ta.momentum.j_acosc"
+    assert row["column"] == f"J_ACOSC_{FAST}_{SLOW}_{SIGNAL}"
+    assert row["run"] == "is106-j_acosc-92ad5686"
+    assert row["verdict"] == "DISCLOSE_GAP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert row["against"] == "FWMA_Slope_pct_Pctl"
+    assert row["against_set"] == "manifest"
+    assert row["perframe_max_against"] == "FWMA_Slope_pct_Pctl"
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    # DISCLOSE_GAP is 0.80 <= pooled < 0.90, and STRUCK needs a top-5
+    # comparator's per-frame median >= 0.90.
+    assert 0.80 <= float(row["max_abs_rho"]) < 0.90
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+
+
+def test_the_gate_e_run_closes_gate_c_on_real_data():
+    """Gate C's real-data limb, read off the SAME ledger row rather than
+    retyped: the column fires on 395,556 of the run's 398,849 pooled bars
+    over 89 real BIST frames, so `0 < fires < n` holds there and not only
+    on the synthetic frames of item 4.
+
+    The 3,293 empty bars are EXACTLY the warm-up -- `WARMUP * 89` with no
+    remainder -- which is the real-data form of item 4's synthetic finding
+    that the NaNs are a leading prefix of 37 bars and nothing else. Pinned
+    as that product rather than as 3,293, so a changed constant fails here.
+
+    `non_zero` equals `non_nan`, i.e. NO fired real bar reads exactly
+    0.0. That is the question §E carried before the run: the exact 0.0 of
+    item 4's `flat` frame -- where both rolling means equal the constant
+    level, so `AO` is exactly 0.0 before any tap arithmetic -- is a
+    synthetic reading and does not occur on 89 frames of BIST daily
+    prices."""
+    row = _j_acosc_ledger_row()
+    pooled = int(row["pooled_bars"])
+    fires = int(row["non_nan"])
+    frames = int(row["n_frames"])
+    assert 0 < fires < pooled
+    assert pooled - fires == WARMUP * frames
+    assert int(row["non_zero"]) == fires
