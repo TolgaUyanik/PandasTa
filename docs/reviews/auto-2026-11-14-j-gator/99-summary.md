@@ -148,3 +148,13 @@ clean-checkout failures (`docs/JGatorMeasured.md` §F1).
   Codex review; `codex` is not an allowed command in this headless session
   (the shell is restricted to `python -m pytest`, `python docs/…` and read-only
   `git`), so only the BHR loop ran. The launcher's reviewer is the second eye.
+
+⚠ Superseded 2026-11-14 by the receipt session: the launcher's run
+`is104-j_gator-59830d09` returned SHIP, `docs/JGatorMeasured.md` §E and the
+ledger row now carry it, and `j_gator` has left the owed list of
+`test_every_indicator_that_needs_a_row_has_one` (seven names remain). Gate C's
+real-data limb closed with that run (§E2), so the first two bullets of this
+section describe the porting session only. The `137` / `8736` counts at lines
+135-138 are superseded too: re-measured at HEAD, the module run is `138
+passed`, the same 138 under reduced CPU dispatch, and the full suite `3 failed,
+8744 passed, 85 skipped`. The round-by-round body above is left as history.

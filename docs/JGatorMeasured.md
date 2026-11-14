@@ -690,7 +690,7 @@ module's long frames.
 | **C** Reachability | **PASS** | 1,492 of 1,500 bars on each of seven frames, 1,492 distinct values on the six varying ones, exactly 0.0 on the flat one; on real data 398,137 of 398,849 pooled bars over 89 BIST frames, the 712 empty ones being 8 × 89 (§E2) |
 | **D** Scale-free | **PASS** | ×8 / ×64 bit-identical on 1,492 of 1,492 bars of seven frames and at levels 1e−6 / 1e+6 / 1e+100; inexact factors within 6.480e-10 (9.221e-10 under reduced dispatch) against a 1e-7 bound; `0 < 1,492 < 1,500` |
 | **E** Attribution | **PASS — SHIP** | max \|ρ\| **0.3736** vs `TK_Cross_Age` (manifest, n = 396,624), per-frame max median **0.3784** over 89 frames, 0 of 89 frames ≥ 0.80 on any of the top five, 0 comparators dropped; run `is104-j_gator-59830d09`, 2026-11-14, 687 comparators (§E) |
-| **F** Suites | **PASS here, both repos are the launcher's** | 137 for the module, the same 137 under reduced CPU dispatch, full suite 3 failed / 8,736 passed / 85 skipped with the three being `dev`'s clean-checkout failures (§F1) |
+| **F** Suites | **PASS here, both repos are the launcher's** | 138 for the module, the same 138 under reduced CPU dispatch, full suite 3 failed / 8,744 passed / 85 skipped with the three being `dev`'s clean-checkout failures (§F1) |
 
 **Why this ships rather than reverts.** Issue #104 closes either way, so the
 question is whether anything measured argues for deleting the column.
