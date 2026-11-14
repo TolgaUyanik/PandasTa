@@ -25,7 +25,10 @@ appears:
   states what survives a re-run instead — the flat traced peak, the
   monotone ordering of the minima and their ratio, each of which
   `section_Z` prints for itself;
-* **§E**, which is owed — the launcher runs Gate E after this session;
+* **§E and §E1**, which are the launcher's Gate E run on this module
+  (`is102-ts_energy_last_20-3468c96b`, 2026-11-14), read out of that run's
+  own `overlap_max.csv`, `top25.csv`, `perframe.csv`, `degenerate.csv` and
+  `meta.json`;
 * **§E0 and §O2's screen figures**, which are the 2026-10-24 screen's,
   measured on the PROTOTYPE and quoted from the issue;
 * **§F**, which is pytest's own output.
@@ -60,9 +63,9 @@ parameters.
 |---|---|
 | A Correctness | **PASS.** BIT-equal to an independent retyping of the source's own spelling (`np.array_split` + `np.sum`) on 1,480 of 1,480 bars of each of ten frames with identical NaN masks, and at `length` 4, 5, 7, 21, 40 and 250 — the script's §A sweep, which ends at 40 where §C's and §D's ends at 60; both sets are the sweeps those sections actually run, not a typo. Within 5 ulps of an exact rational oracle, and closer to it than the left-to-right spelling on 10 of 10 frames. |
 | B Causality | **PASS.** 0 of 36 offsets leak on four frames and at `length` 4, 7, 60 and 250. Six mutants: five live and caught 36 of 36 on every frame, the sixth invisible to the blind sweep (0 of 36) and caught 12 of 12 on a designed frame, moving exactly bar J−1 at all twelve. |
-| C Reachability | **PASS on synthetic frames; real-data counts owed** with the Gate E run. Fires 1,480 of 1,500 on each of ten frames; 1,480 distinct values on nine of them and a constant 0.25 (plus 1.2e-14 of rounding) on the two-point one. |
+| C Reachability | **PASS.** Fires 1,480 of 1,500 on each of ten synthetic frames; 1,480 distinct values on nine of them and a constant 0.25 (plus 1.2e-14 of rounding) on the two-point one. On the Gate E universe `0 < 397,069 < 398,849`, of which 396,809 are non-zero (§E1). |
 | D Scale-free | **PASS.** x8/x64 bit-identical on 1,480/1,480 of each of ten frames, at `length` 4, 5, 7, 21, 60 and 250 (§C's and §D's sweep) and at price 1e-6, 1e+6 and 1e+100. x10 / x3.7 / x0.1 / x1.0000001: masks identical, max relative difference 4.6e-13. `0 < fires < n` on every frame. |
-| E Attribution | **Gate E: pending, run by issue-solver after this session.** §E0 carries the screen's figure for the PROTOTYPE (max \|ρ\| 0.7020 vs `natr_Chg_5d`, n = 397,069, SHIP), which this port is rank-identical to but not bit-equal to. |
+| E Attribution | **SHIP.** Run `is102-ts_energy_last_20-3468c96b`, 2026-11-14: pooled \|ρ\| **0.7020** vs `natr_Chg_5d` (manifest, n = 397,069), per-frame max median **0.7036** over 89 frames, 0 of 89 frames ≥ 0.90 and 0 ≥ 0.80 on any of the top five. The same comparator and the same two figures §E0's screen printed for the PROTOTYPE. |
 | F Suites | This repo: 226 for the module, 226 again with AVX-512/AVX2/FMA3 disabled; full suite in §F. The Backtesting suite is the launcher's. |
 
 ---
@@ -297,9 +300,10 @@ market cannot print. With a NaN close the two agree, because pandas
 propagates it.
 
 Because Gate E's statistic is a Spearman over the bars where both fire,
-the screen's figures (§E0) are expected to carry over in rank; the
-launcher's Gate E run on THIS module is still the number that decides
-ship or revert.
+the screen's figures (§E0) were expected to carry over in rank, and §E
+says they did: the run on this module reads 0.7020 pooled and 0.7036
+per-frame max median against the prototype screen's 0.7020 and 0.7036,
+against the same comparator and over the same n = 397,069.
 
 ---
 
@@ -398,9 +402,10 @@ At other lengths on a walk:
 | 60 (15) | 1440 / 1500 | 1440 | [5.304e-02, 0.542782] | 0.240872 |
 | 250 (62) | 1250 / 1500 | 1250 | [1.638e-01, 0.383407] | 0.252472 |
 
-`0 < fires < n` on every frame and at every length. The real-data
-reachability counts (Gate C on the 89 ALTPORT-1 frames) are **owed from
-the launcher's Gate E run**, like §E.
+`0 < fires < n` on every frame and at every length. ⚠ These counts are
+synthetic. The real-data counts (Gate C on the 89 ALTPORT-1 frames) are
+**§E1**, from the Gate E run: 397,069 fired of 398,849 pooled bars, 396,809
+of them non-zero.
 
 ---
 
@@ -668,9 +673,10 @@ volatile the window was — only where in it the volatility sat.
 `natr chg 5d` is this fork's `natr` over a synthetic ±0.4% high/low band
 divided by its own value 5 bars earlier; `|r| 5/20` is the ratio of mean
 \|return\| over 5 bars to mean \|return\| over 20, built from the same
-closes. Both read 0.87 .. 0.999 here. The engine's real columns, measured
-by the screen on 89 REAL frames against the prototype, read **0.7020**
-(`natr_Chg_5d`) and **0.5460** (`ATR_Ratio_5_20`). The gap between 0.96
+closes. Both read 0.87 .. 0.999 here. The engine's real columns read **0.7020**
+(`natr_Chg_5d`) and **0.5460** (`ATR_Ratio_5_20`) — the screen's figures on
+89 REAL frames against the prototype, and §E's Gate E run on THIS module
+reproduced both to every printed digit. The gap between 0.96
 and 0.55 is the whole reason Gate E exists: a close-based stand-in built
 from the same returns is a much nearer neighbour than a true-range
 column, so these two rows are an upper bound on the fork's exposure and
@@ -728,57 +734,166 @@ not, and reads a constant on one whose every move is the same size.
 
 ## E — Gate E
 
-**Gate E: pending, run by issue-solver after this session.**
+**Gate E: SHIP.** Run `is102-ts_energy_last_20-3468c96b`, measured
+2026-11-14 by issue-solver on **this** module, not on the prototype.
 
-`docs/gate_e_ledger.csv` therefore has no row for `ts_energy_last_20`,
-and `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-reports it as owed — expected, and the reason
-`tests/test_ts_energy_last_20.py::test_the_gate_e_row_is_owed` asserts
-the row is ABSENT: it is the receipt session's cue to record the run and
-replace that test with one pinning the row's identity.
+| | |
+|---|---|
+| column | `TS_ENERGY_LAST_20_4` |
+| pooled max \|ρ\| | **0.7020** (signed +0.7019760071757274) |
+| against | `natr_Chg_5d`, from the `ml_features` manifest |
+| n | **397,069** |
+| per-frame max median \|ρ\| | **0.7036** (0.7035745545967381), also against `natr_Chg_5d` |
+| frames at \|ρ\| ≥ 0.90 | **0 of 89** — and 0 of 89 at ≥ 0.80, on each of the top five |
+| verdict | **SHIP** (`r3-perframe-0.90`; SHIP is < 0.76 pooled and < 0.90 per-frame median) |
+| best `compute_all` comparator | `pvo_PVOh_12_26_9`, 0.3814323236250707, n = 396,624 |
+| comparators | 687 = 329 `compute_all` + 358 manifest, 1 degenerate |
+| universe | 89 frozen ALTPORT-1 BIST frames, 398,849 pooled bars |
+| defaults | `kwargs: {}` — no non-default parameter |
+| canary | AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal |
+| versions | pandas 2.3.3 / numpy 1.26.4 |
+| module sha1 | `e0baceb438b5056961ee928bd0183cbd5d59aeb2` |
+| tree sha1 | `ffa0a50762394d9c74c82a02702ee60327fb6166` |
 
-What the screen measured on the PROTOTYPE is §E0: max \|ρ\| **0.7020** vs
-`natr_Chg_5d` over n = 397,069, top-5 per-frame max median 0.7036 →
-SHIP. This port is rank-identical to that prototype on the nine varying
-frames (Spearman 1.000000, §A6) though not bit-equal to it, and a
-Spearman is what Gate E measures, so the figure is expected to carry
-over. It is not a substitute for the run: the band is decided on this
-module's own columns over the 89 frames.
+The one degenerate comparator is `squeeze_SQZ_NO` (manifest), constant over
+the 397,069 shared bars.
 
-Gate C's real-data reachability counts are owed from the same run.
+The top five, pooled and per frame:
+
+| against | set | pooled \|ρ\| | per-frame median | per-frame max | per-frame min |
+|---|---|---|---|---|---|
+| `natr_Chg_5d` | manifest | 0.7020 | 0.7036 | 0.7721 | 0.5729 |
+| `ATR_Ratio_5_20_Pctl` | manifest | 0.5530 | 0.5480 | 0.5973 | 0.4288 |
+| `ATR_Ratio_5_20` | manifest | 0.5460 | 0.5450 | 0.5923 | 0.4281 |
+| `ATR_Ratio_5_20_State` | manifest | 0.5252 | 0.5241 | 0.5619 | 0.4304 |
+| `Range_ATR` | manifest | 0.3926 | 0.3963 | 0.4781 | 0.3214 |
+
+⚠ The single worst frame-and-comparator pair in the top five is **0.7721**,
+which is ABOVE the 0.76 line — and it is a per-frame MAX on one of 89
+frames, which neither limb of `r3-perframe-0.90` reads. The band is decided
+on the pooled ρ (0.7020) and on a top-5 comparator's per-frame MEDIAN
+(0.7036), both under 0.76, and the per-frame distribution against
+`natr_Chg_5d` runs 0.5729 .. 0.7721 with 0 of 89 frames at or above 0.80.
+The figure is reported because a reader should see it, not because it moves
+the verdict; the next comparator's worst frame is 0.5973.
+
+The whole top 25 is the `natr_Chg_5d` / ATR-ratio family and then volatility
+and volume ratios: after `Range_ATR` come `Range_ATR_Pctl` 0.3851,
+`pvo_PVOh_12_26_9` 0.3814 (the highest `compute_all` column), `Range_ATR_State`
+0.3690 and the `THERMO_pct` trio at 0.3412 / 0.3277 / 0.3193. Nothing in the
+687 reads the column as a price level: §O2's point that a share cancels the
+window's size survives the real run.
+
+Recorded with
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-14`;
+`record` accepted it, which is what checks that the harness imported a
+`pandas_ta` tree byte-identical to this one, that the parameters were the
+defaults, that the universe was the 89 frames, that the comparator set was
+687 and that the canary was bit-equal. The row is
+`docs/gate_e_ledger.csv` line 97, with no waiver.
+`tests/test_ts_energy_last_20.py::test_the_gate_e_row_is_this_ports_own_measurement`
+pins the row's identity (run id, module, column, verdict); the porting
+session's `test_the_gate_e_row_is_owed` is gone.
+
+⚠ What the run does NOT settle is §O1: the 687 comparators are the engine's
+`compute_all` and `ml_features` columns and hold no pandas_ta port, so the
+pairs against the fork's own `TFCENTROID_20` (0.7493 pooled synthetic) and
+`TS_IMQ_20` (0.6093) are still measured on synthetic frames only. SHIP here
+is a verdict about the engine's columns, not about those two.
+
+### E1 — Gate C on real data, from that run
+
+The run's own counts over the 89 frames, 398,849 pooled bars:
+
+| | bars |
+|---|---|
+| pooled | 398,849 |
+| non-NaN (`TS_ENERGY_LAST_20_4` fires) | **397,069** |
+| non-zero | **396,809** |
+| NaN | 1,780 |
+| exactly 0.0 | **260** |
+
+So `0 < 397,069 < 398,849` on real data. The 1,780 empty bars are 20 warm-up
+bars per frame (20 × 89 = 1,780), so the bad-close mask (§G1) and the
+per-return bound (§G2) emptied **no** further real bar. That is a count, and
+what it rules out is bounded: a bad close at any bar from 1 on would empty
+windows the warm-up does not already cover, so no close after bar 0 of any
+of the 89 frames is NaN, non-positive, subnormal or infinite, and no return
+exceeded 2.1200e+153. A bad close at bar **0** of a frame would be invisible
+to this count, since the only window it empties is one the warm-up empties
+anyway.
+
+The **260** bars that read exactly 0.0 are §A4's second closed form reached
+on real prices. That the count is 260 is measured; what has to produce a
+zero is read off the formula rather than counted per bar: the numerator is a
+sum of five squares, so it is exactly zero only when each of the newest five
+returns is, i.e. when the six closes ending at that bar are all equal — the
+exact-tie behaviour BIST daily data is full of (the FVGDEAD note in
+`CLAUDE.md` measured 21.17% of 408,253 bars closing exactly at an extreme).
+The denominator cannot be zero on those bars, or the bar would be NaN
+instead, so the older 15 returns carry energy. 260 of 397,069 is 0.065%, and
+it is the end of the [0, 1] range the synthetic frames of §C never reach by
+accident — their minimum is 1.1e-04, and §A4 reaches exactly 0.0 only by
+construction. The other end, exactly 1.0, has no count here: the run records
+non-zero and non-NaN, not a maximum.
+
+⚠ Those are the Gate E universe's counts. Separately, the ledger row stores
+an output fingerprint taken on `gate_e_ledger.py`'s own fixed 600-bar
+tick-rounded frame —
+`580;148.7631420052424;48.470026690154874;46230.23903319545`, i.e. finite
+count, sum, sum of squares and index-weighted sum (`gate_e_ledger.py:148`) —
+which is what `tests/test_gate_e_ledger.py` re-derives to catch a later edit
+moving the output. 580 = 600 − 20, the same warm-up as above, and
+148.763 / 580 = 0.2565 is a mean within a tenth of §S's neutral 0.25.
 
 ---
 
 ## F — Gate F: the suites
 
-* `python -m pytest tests/test_ts_energy_last_20.py -q` → **226 passed**.
+Re-run in the receipt session (2026-11-14), after the Gate E row was
+recorded:
+
+* `python -m pytest tests/test_ts_energy_last_20.py -q` → **226 passed**
+  in 6.07 s, including the new
+  `test_the_gate_e_row_is_this_ports_own_measurement`, which replaced the
+  porting session's `test_the_gate_e_row_is_owed`. The count is unchanged
+  because that was a one-for-one replacement.
 * `python docs/measure_ts_energy_last_20_cpu.py` → the same **226
-  passed** with `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2
-  FMA3"`; the run prints the dispatchable features still enabled
+  passed** in 5.74 s with `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX
+  AVX2 FMA3"`; the run prints the dispatchable features still enabled
   (`SSSE3 SSE41 POPCNT SSE42 AVX F16C AVX512CD AVX512_CLX AVX512_CNL
   AVX512_ICL`) and refuses to report anything if the environment edit did
   not take. ⚠ That run is what turns §A1's reasoning into evidence: this
   module's Gate A is bit-equality between two `np.add.reduce` calls over
   the same bytes, and both are dispatched kernels. It is also what forced
   §G4's prototype column to be pinned as a bound rather than a count.
-* `python -m pytest -q` → **3 failed, 8,359 passed, 85 skipped** (in
-  212.37 s on this worktree, the run on the final tree — the elapsed time
-  is this machine's and this run's, the counts are the claim; four
-  full-suite runs in this session read 221.53, 214.53, 212.38 and
-  212.37 s for the same three failures). The three are the ones a clean
-  checkout of `dev` already
-  carries plus this port's owed row, and `ts_energy_last_20` appears in
-  exactly one of them:
+* `python -m pytest tests/test_ts_energy_last_20.py
+  tests/test_gate_e_ledger.py -q` → **1 failed, 1,146 passed**: the 226
+  above plus 921 ledger checks, the one failure being the owed-row test,
+  which now reports **seven other** indicators — `['arch_lm',
+  'diff2_acf1', 'edge', 'firstzero_ac', 'halflife', 'lumpiness',
+  'mtd_ret']`, all owed by someone else and none of them this port. Those
+  921 are what re-derive this row's `module_sha1` and output fingerprint
+  from the tree and check its verdict arithmetic.
+* `python -m pytest -q` → **3 failed, 8,366 passed, 85 skipped** in
+  213.00 s. The three are the ones a clean checkout of `dev` already
+  carries, and `ts_energy_last_20` is in none of them:
   * `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
     — the CLAUDE.md *Known breaks* entry, owner's call;
   * `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
     — needs the sibling `../AlternativeRepos` checkout; CI deselects it
     by name;
   * `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-    — the owed Gate E row, which reports `['arch_lm', 'diff2_acf1',
-    'edge', 'firstzero_ac', 'halflife', 'lumpiness', 'mtd_ret',
-    'ts_energy_last_20']`. CI into `dev` sets `GATE_E_PENDING_OK=1` and
-    skips it with a reason starting "Gate E owed".
+    — the seven indicators above, all owed by other issues. CI into `dev`
+    sets `GATE_E_PENDING_OK=1` and skips it with a reason starting "Gate E
+    owed".
+* The porting session's own figure, kept for the record: `python -m pytest
+  -q` → **3 failed, 8,359 passed, 85 skipped** (in 212.37 s; four
+  full-suite runs that session read 221.53, 214.53, 212.38 and 212.37 s for
+  the same three failures), where the third failure listed
+  `ts_energy_last_20` as an eighth owed indicator. The 7 extra passes this
+  session are `tests/test_gate_e_ledger.py`'s per-row parametrised checks
+  over the row this session added.
 * ⚠ One more failure appeared on the first full-suite run of this session
   and was FIXED, not excused:
   `test_pine_coverage_csv.py::test_no_other_document_retypes_the_split`

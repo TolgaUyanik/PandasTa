@@ -120,7 +120,14 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    0.9986. That stand-in is not the engine's column: the screen measured
    the real `ATR_Ratio_5_20` at 0.5460 on real data, where its own
    stand-in would have said 0.96, which is why Gate E and not this file
-   is what decides the band.
+   is what decides the band. Gate E then ran on this module as
+   `is102-ts_energy_last_20-3468c96b` (2026-11-14) and read **SHIP**:
+   pooled 0.7020 against `natr_Chg_5d` (n = 397,069), per-frame max
+   median 0.7036 over 89 frames, 0 of them at or above 0.90, with the
+   real `ATR_Ratio_5_20_Pctl` and `ATR_Ratio_5_20` behind it at 0.5530
+   and 0.5460. `test_the_gate_e_row_is_this_ports_own_measurement` pins
+   which run the ledger row came from; `docs/TsEnergyLast20Measured.md`
+   §E carries it in full.
 
 8. **That it is the screen prototype in RANK but NOT bit-for-bit.** The
    prototype is two `rolling().sum()` calls, which carry one running
@@ -1195,27 +1202,37 @@ def test_the_prototype_parts_company_only_on_the_guards():
         assert int(_prototype(c).notna().sum()) == pro_fires, value
 
 
-def test_the_gate_e_row_is_owed():
-    """Gate E is run by issue-solver AFTER this session, so there is no
-    ledger row yet and `tests/test_gate_e_ledger.py::
-    test_every_indicator_that_needs_a_row_has_one` reports this indicator
-    as owed. This test is the receipt session's cue: when the row is
-    recorded it fails, and is replaced by one pinning the row's identity --
-    the module, the column, the run id and the verdict -- the way
-    `tests/test_ts_q05_60.py` does for issue #101.
+def test_the_gate_e_row_is_this_ports_own_measurement():
+    """The ledger row for `ts_energy_last_20` must come from the run on THIS
+    module, `is102-ts_energy_last_20-3468c96b` (measured 2026-11-14), and
+    NOT from the screen of 2026-10-24, which measured the PROTOTYPE. The two
+    agree to every printed digit -- pooled 0.7020 against `natr_Chg_5d` at
+    n = 397,069, per-frame max median 0.7036 -- which is exactly why the
+    row's identity needs pinning: `tests/test_gate_e_ledger.py` re-derives a
+    row's `module_sha1` and output fingerprint from the tree and checks its
+    verdict arithmetic, but it cannot see WHOSE measurement a row came from.
 
-    ⚠ The 2026-10-24 screen measured the PROTOTYPE at max |rho| 0.7020 vs
-    `natr_Chg_5d` over n = 397,069 (SHIP), per-frame max median 0.7036. The
-    module is rank-identical to that prototype on the nine varying frames
-    (Spearman 1.000000), so the figure is expected to carry over -- but the
-    launcher's run on THIS module is the number that decides ship or
-    revert."""
+    This test replaced `test_the_gate_e_row_is_owed`, which asserted the row
+    was ABSENT and so failed the moment the receipt session recorded it.
+    `docs/TsEnergyLast20Measured.md` §E carries the result in full."""
     import csv
     from pathlib import Path
     ledger = Path(__file__).resolve().parents[1] / "docs" / "gate_e_ledger.csv"
     rows = list(csv.DictReader(ledger.open(encoding="utf-8")))
     assert rows, "the ledger should not be empty"
-    assert [r for r in rows if r["indicator"] == "ts_energy_last_20"] == []
+    rows = [r for r in rows if r["indicator"] == "ts_energy_last_20"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["module"] == "pandas_ta.statistics.ts_energy_last_20"
+    assert row["column"] == f"TS_ENERGY_LAST_{LENGTH}_{SEGMENTS}"
+    assert row["run"] == "is102-ts_energy_last_20-3468c96b"
+    assert row["verdict"] == "SHIP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+    assert 0 < int(row["non_nan"]) < int(row["pooled_bars"])
 
 
 # ====================================================== wiring and arguments
