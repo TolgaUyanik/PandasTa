@@ -1208,6 +1208,14 @@ class AnalysisIndicators(BasePandasObject):
 
         return self._post_process(result, **kwargs)
 
+    def j_acosc(self, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = j_acosc(high=high, low=low, close=close, offset=offset,
+                         **kwargs)
+        return self._post_process(result, **kwargs)
+
     def j_gator(self, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))

@@ -38,6 +38,7 @@ from .g191_187 import g191_187
 from .gapm import gapm
 from .inertia import inertia
 from .imi import imi
+from .j_acosc import j_acosc
 from .j_gator import j_gator
 from .kalman_rsi import kalman_rsi
 from .kdj import kdj
