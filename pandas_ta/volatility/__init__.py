@@ -18,6 +18,7 @@ from .g191_188 import g191_188
 from .garman_klass import garman_klass
 from .har_park import har_park
 from .hwc import hwc
+from .j_damiani import j_damiani
 from .kc import kc
 from .massi import massi
 from .pdist import pdist
