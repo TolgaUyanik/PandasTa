@@ -73,10 +73,27 @@ What this file pins, in order of how much it would hurt to lose:
    no EARLIER bar, and its forward reach is not bounded by a window. The
    high/low guard exists for infinities only: unguarded, a `+inf` high
    becomes a fractal and the band carries `inf`.
-8. **Gate E is owed.** `test_the_gate_e_row_is_owed` asserts the ledger has
-   no row yet, which is the receipt session's cue;
-   `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-   reports it as owed in the meantime.
+8. **Gate E is SHIP, and whose measurement the ledger row is.**
+   `test_the_gate_e_row_is_this_ports_own_measurement` pins the row to run
+   `is107-sk_fcb_width-8f25baf3` (2026-11-15, on THIS module): pooled
+   **0.6104** against the engine's `natr` at n = 397,416, top-five
+   per-frame max median **0.5846** over 89 frames, 687 comparators, no
+   waiver. That is the SHIP band, pinned as the band's BOUND (pooled and
+   per-frame both below 0.76) and not as digits. The screen's PROTOTYPE
+   read the same digits on 2026-10-24, and item 1's §A2 limb asserts this
+   module bit-equal to that prototype -- an expected agreement is the
+   easiest kind of row to copy over by mistake, so the row's identity is
+   pinned and not only its arithmetic.
+   `test_the_gate_e_run_closes_gate_c_on_real_data` reads Gate C's real
+   limb off the same row: 397,609 of 398,849 bars fire, the 1,240 empty
+   ones are NOT a whole number of bars per frame (13.93 on average), which
+   is item 5's data-dependent warm-up on real data, and 108 fired bars
+   read exactly 0.0, which is item 5's tick-grid zero on real prices.
+   ⚠ Not pinned, because the band does not read it: no single one of the
+   89 frames reaches even 0.80 on any of the top five comparators (the
+   worst is 0.6785, on the top one). ⚠ Not available at all: the row
+   counts NaNs and zeros, not SIGNS, so item 5's negative readings stay a
+   synthetic figure.
 
 Every number above is printed by `python docs/measure_sk_fcb_width.py` on
 this tree, and `python docs/measure_sk_fcb_width_cpu.py` re-runs this
@@ -91,10 +108,12 @@ SYNTHETIC and are disclosures, not gates: the 687 engine comparators hold
 no pandas_ta port, and against `natr` this file's seven firing frames read
 0.0722 .. 0.3202 -- while the screen's OWN fork stage measured the
 identical pair at 0.5873 on 12 REAL frames (per-frame max median 0.5772),
-i.e. roughly 0.27 above these, and the engine's comparator read 0.6104 on
-89. The synthetic frames understate it badly, so they are not evidence
-about Gate E either way; §F also records that the obvious explanation for
-the gap was tested and refuted.
+i.e. roughly 0.27 above these, and this port's OWN Gate E run read 0.6104
+against the engine's `natr` on 89 real frames (item 8). The synthetic
+frames understated it badly, so they were not evidence about Gate E either
+way; §F also records that the obvious explanation for the gap was tested
+and refuted, and §E3 that the fork's `natr:NATR_14` is not the engine's
+`natr` -- this session did not read the engine.
 """
 import csv
 import importlib.util
@@ -1158,14 +1177,92 @@ def test_the_docstrings_first_paragraph_survives_the_dictionary_cut():
     assert desc({"desc": longer}) != longer
 
 
-def test_the_gate_e_row_is_owed():
-    """Gate E is run by issue-solver after this session, so the ledger has
-    NO row for this indicator yet -- which is what
-    `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-    reports as owed, and what the receipt session replaces with the
-    measured row (and this test with one pinning its identity).
-    `docs/SkFcbWidthMeasured.md` §E says so too."""
+def _sk_fcb_width_ledger_row():
     ledger = Path(__file__).resolve().parents[1] / "docs" / "gate_e_ledger.csv"
     rows = list(csv.DictReader(ledger.open(encoding="utf-8")))
     assert rows, "the ledger should not be empty"
-    assert [r for r in rows if r["indicator"] == "sk_fcb_width"] == []
+    rows = [r for r in rows if r["indicator"] == "sk_fcb_width"]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_the_gate_e_row_is_this_ports_own_measurement():
+    """The ledger row for `sk_fcb_width` must come from the run on THIS
+    module, `is107-sk_fcb_width-8f25baf3` (measured 2026-11-15), and NOT
+    from the catalog screen of 2026-10-24, which measured the PROTOTYPE.
+    The two agree to every digit issue #107 printed -- pooled 0.6104
+    against `compute_all`'s `natr` at n = 397,416, top-five per-frame max
+    median 0.5846 over 89 frames, runners-up `Stop_2ATR_pct` 0.6104 and
+    `Swing_Range_pct` 0.5530 -- which is exactly why the row's identity
+    needs pinning: `tests/test_gate_e_ledger.py` re-derives a row's
+    `module_sha1` and output fingerprint from the tree and checks its
+    verdict arithmetic, but it cannot see WHOSE measurement a row came
+    from. The §A2 limb of item 1 asserts this module bit-equal to the
+    retyped prototype on all eight frames, so the agreement is expected.
+
+    The verdict is **SHIP**, the `< 0.76` band of `r3-perframe-0.90`: the
+    column stays and the row needs no waiver (only STRUCK needs one).
+    Both limbs are asserted as BOUNDS and not as digits -- pooled below
+    0.76 and the top-five per-frame max median below 0.76 -- so a
+    re-recorded row that moved within the band still has to stay in it.
+
+    This test replaced `test_the_gate_e_row_is_owed`, which asserted the
+    row was ABSENT and so failed the moment the receipt session recorded
+    it. `docs/SkFcbWidthMeasured.md` §E .. §E3 carries the result in full,
+    including the part the band does not read: no single one of the 89
+    frames reaches even 0.80 on ANY of the top five comparators."""
+    row = _sk_fcb_width_ledger_row()
+    assert row["module"] == "pandas_ta.volatility.sk_fcb_width"
+    assert row["column"] == COLUMN
+    assert row["run"] == "is107-sk_fcb_width-8f25baf3"
+    assert row["verdict"] == "SHIP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert row["against"] == "natr"
+    assert row["against_set"] == "compute_all"
+    assert row["perframe_max_against"] == "natr"
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    # SHIP is pooled |rho| < 0.76 with no top-5 comparator's per-frame
+    # median >= 0.90; this row clears the stricter of the two lines on
+    # both limbs.
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.76
+
+
+def test_the_gate_e_run_closes_gate_c_on_real_data():
+    """Gate C's real-data limb, read off the SAME ledger row rather than
+    retyped: the column fires on 397,609 of the run's 398,849 pooled bars
+    over 89 real BIST frames, so `0 < fires < n` holds there and not only
+    on the synthetic frames of item 5.
+
+    The 1,240 empty bars are NOT a constant warm-up, and that is the
+    real-data form of item 5's finding: 1,240 is not a whole number of
+    bars per frame (13.93 on average), so no per-frame constant can
+    produce it, while the floor `2 * SPAN` per frame is 356 of the 1,240.
+    Asserted as those two relations -- not a whole multiple of
+    `n_frames`, and at least `2 * SPAN * n_frames` -- rather than as
+    1,240. ⚠ 13.93 is EMPTY BARS per frame and not a mean first-fire bar:
+    the two coincide only if the real NaNs are a leading prefix, which
+    this row cannot show, because a bad close empties its own bar wherever
+    it sits (`test_a_bad_close_empties_its_own_bar_and_no_other`).
+
+    `non_zero` is 108 SHORT of `non_nan`, i.e. 108 fired real bars read
+    exactly 0.0. Item 5's exact zeros were measured on a 2.0-tick
+    synthetic frame, and this is the same reading on real prices, where
+    21.17% of BIST daily bars close exactly at an extreme: both band legs
+    land on one tick. Asserted as `0 < non_zero < non_nan`, the
+    structural fact, with 108 the figure measured by that run.
+
+    ⚠ The row carries no count of NEGATIVE readings -- it reports NaN and
+    zero only -- so item 5's 5 .. 91 negatives per frame stay a SYNTHETIC
+    figure and nothing here pins them on real data."""
+    row = _sk_fcb_width_ledger_row()
+    pooled = int(row["pooled_bars"])
+    fires = int(row["non_nan"])
+    frames = int(row["n_frames"])
+    empty = pooled - fires
+    assert 0 < fires < pooled
+    assert empty % frames != 0, empty
+    assert empty >= 2 * SPAN * frames
+    # 108 bars read exactly 0.0 in this run; pinned as the relation.
+    assert 0 < int(row["non_zero"]) < fires

@@ -6,6 +6,10 @@
 screen prototype's scale-free form.
 **Measured:** 2026-11-14, on this tree, by `python docs/measure_sk_fcb_width.py`.
 Every figure below is printed by that script; nothing here is derived or carried over.
+**§E and §E1–§E3 are the exception**: they are read out of the launcher's Gate E run
+`is107-sk_fcb_width-8f25baf3` (2026-11-15) — `overlap_max.csv`, `top25.csv`,
+`perframe.csv`, `degenerate.csv`, `meta.json` — and out of the row
+`python docs/gate_e_ledger.py record` wrote into `docs/gate_e_ledger.csv`.
 `python docs/measure_sk_fcb_width_cpu.py` re-runs it (and the test module) with
 numpy's `AVX512F`, `AVX512_SKX`, `AVX2` and `FMA3` dispatch disabled — §CPU records
 which figures moved.
@@ -278,7 +282,7 @@ frames.
 
 ---
 
-## C — Gate C, reachability (synthetic; real-data counts owed with Gate E)
+## C — Gate C, reachability (synthetic; the real-data counts are §E2)
 
 | frame | bars | fired | first fire | distinct | min | max | `< 0` | `== 0` |
 |---|---|---|---|---|---|---|---|---|
@@ -300,7 +304,9 @@ here, bar **89** on another. The earliest it can ever be is bar `2 * SPAN` = 4, 
 needs one bar to be both the strict high and the strict low of its window — an outside
 bar. That is reachable, and §L pins it with a hand frame. `MIN_BARS` = 5 is a floor on
 the **input**, and `docs/IndicatorDictionary.md`'s warm-up column shows **10**, which is
-that one probe frame's figure and not a property of the column.
+that one probe frame's figure and not a property of the column. §E2 is the real-data form
+of the same finding: 1,240 empty bars over 89 frames, i.e. 13.93 per frame, which no
+per-frame constant can produce.
 
 ⚠ **A flat price never fires**, on all 1,500 bars. A constant price has no strict local
 extreme, so no fractal ever confirms. That is a statement about the instrument, not
@@ -314,7 +320,10 @@ readings on each firing frame (the `< 0` column above: 20 / 91 / 5 / 33 / 21 / 2
 down to **-0.1294**, plus **85** readings of exactly **0.0** on `coarse`, where both legs
 land on one tick — so the `<= 0` count runs to **5 .. 105** once those zeros are included,
 and the two figures are different things. §H is the mechanism. A consumer clipping at
-zero, or taking a log, discards a real reading.
+zero, or taking a log, discards a real reading. The exact zeros are **not** a synthetic
+artefact: §E2's Gate E run reads **108** of them on 397,609 fired real BIST bars. The
+negative readings are a synthetic figure only — the ledger row counts NaNs and zeros, not
+signs.
 
 ### The band is a step function over a moving divisor
 
@@ -437,21 +446,101 @@ once present, survive any rescale.
 
 ---
 
-## E — Gate E
+## E — Gate E, measured on this port
 
-**Gate E: pending, run by issue-solver after this session.**
+**Run `is107-sk_fcb_width-8f25baf3`, measured 2026-11-15** by issue-solver on the code at
+this branch's HEAD, recorded in `docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record`. One column, one row:
 
-No ledger row exists yet, so `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-reports `sk_fcb_width` as owed, and `tests/test_sk_fcb_width.py::test_the_gate_e_row_is_owed`
-asserts that absence deliberately. The receipt session records the row and replaces that
-test with one pinning the row's identity, and fills in Gate C's real-data counts from the
-same run.
+| column | max \|ρ\| | against | set | n | per-frame max median | frames | verdict |
+|---|---|---|---|---|---|---|---|
+| `SK_FCB_WIDTH_2` | **0.6103868035919393** | `natr` | compute_all | **397,416** | **0.584568208291009** (`natr`) | 89 | **SHIP** |
 
-What the **prototype** measured on 2026-10-24 (a prototype is not a port, and §A2 is the
-limb that ties the two together): pooled max \|ρ\| **0.6104** vs `natr` (n = 397,416),
-top-5 per-frame max median 0.5846 → **SHIP**; next comparators `Stop_2ATR_pct` 0.6104 and
-`Swing_Range_pct` 0.5530. Run `screen_r2_20261024`, 89 ALTPORT-1 frames, 398,849 bars,
-329 + 358 comparators, canary bit-equal.
+Under `r3-perframe-0.90` that is the **SHIP** band — pooled \|ρ\| < 0.76 and no top-5
+comparator's per-frame median at 0.90 — so **nothing is removed** and no waiver is needed
+(only STRUCK needs one). `verdict_pooled_only` is the same `SHIP`, so neither limb carried
+the other. Run facts from `meta.json`: default parameters (`kwargs {}`), 89 frames,
+398,849 pooled bars, 329 compute_all + 358 manifest = **687** comparators, canary
+`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`, **0** comparators dropped as degenerate
+(`degenerate.csv` is empty), data stamp `1be6495e`, pandas 2.3.3 / numpy 1.26.4.
+
+**The run reproduced the 2026-10-24 screen's prototype figures to every digit issue #107
+printed** — same comparator `natr`, same n = 397,416, the same 0.6104 and 0.5846, and the
+same runners-up `Stop_2ATR_pct` 0.6104 and `Swing_Range_pct` 0.5530. That is the expected
+outcome rather than a surprise: §A2 asserts this module **bit-equal** to the retyped
+prototype on all eight frames. An expected agreement is also the easiest kind of row to
+copy over by mistake, which is why
+`tests/test_sk_fcb_width.py::test_the_gate_e_row_is_this_ports_own_measurement` pins the
+row's own **run id** and not only its arithmetic.
+
+### E1 — what the row says beyond the band
+
+Top five by pooled \|ρ\| (`top25.csv`), with each one's per-frame figures over the 89
+frames (`perframe.csv`):
+
+| comparator | set | pooled ρ | per-frame median | per-frame max | per-frame min | % frames ≥ 0.80 |
+|---|---|---|---|---|---|---|
+| `natr` | compute_all | 0.6104 | 0.5846 | 0.6785 | 0.4382 | **0.0** |
+| `Stop_2ATR_pct` | manifest | 0.6104 | 0.5846 | 0.6785 | 0.4382 | **0.0** |
+| `Swing_Range_pct` | manifest | 0.5530 | 0.5262 | 0.6412 | 0.2948 | **0.0** |
+| `BB_BWidth` | compute_all | 0.4998 | 0.4755 | 0.5785 | 0.2570 | **0.0** |
+| `mad_pct` | manifest | 0.4463 | 0.4172 | 0.5191 | 0.1604 | **0.0** |
+
+Stronger than the band requires, and reported because the band reads a top-5 comparator's
+per-frame **median**: **no single one of the 89 frames reaches 0.80** on any of the top
+five, let alone 0.90 — the worst single frame of that table is **0.6785**, on the top
+comparator. `top25.csv` then falls away to 0.2632 (`BOS_BULL`) at rank 25.
+
+⚠ **`natr` and `Stop_2ATR_pct` are rank-identical here**, and that is read off the files
+rather than reasoned: both are printed with the same pooled ρ to all 16 digits
+(0.6103868035919393), the same n = 397,416 and the same five per-frame statistics to all
+their digits. Spearman sees only ranks, and `2 * ATR / close` is an increasing function of
+`100 * ATR / close`, so the two comparators are one measurement under two names — the
+engine's columns are not this session's to inspect, so that mechanism is a reading of
+their names and the identity is the measurement.
+
+The nearest comparators are all **range or dispersion over price** — NATR, a 2-ATR stop
+distance, a swing range, Bollinger bandwidth, mean absolute deviation. That is the same
+family §F names, so the band is driven by the thing this column measures and not by an
+unrelated column.
+
+### E2 — Gate C's real-data limb, which this run closes
+
+Read off the ledger row rather than retyped: **397,609 of 398,849** pooled bars fire, so
+`0 < fires < n` holds on 89 real BIST frames and not only on the synthetic ones of §C.
+
+⚠ **The 1,240 empty bars are NOT a constant warm-up**, and that is §C's data-dependent
+warm-up confirmed on real data: 1,240 / 89 = **13.93 bars per frame on average**, which is
+not a whole number of bars, so no per-frame constant can produce it. The floor is
+`2 * SPAN` = 4 bars per frame, i.e. 356 of the 1,240, and the rest is how long each
+instrument took to confirm a fractal high **and** a fractal low. ⚠ 13.93 is **empty bars
+per frame**, not a mean first-fire bar, and the two are the same number only if the real
+NaNs are a leading prefix — which this row cannot show, since §G1's bad close empties its
+own bar wherever it sits. §C's synthetic first fires ran bar 7 .. 89, so the mean is inside
+that range; nothing here says each frame is.
+
+**108 fired bars read exactly 0.0** (`non_nan` 397,609 − `non_zero` 397,501, the harness's
+`non_zero` being the non-NaN readings that are not exactly 0.0, as `j_acosc`'s receipt reads
+it). That is §C's `coarse`-frame disclosure holding on real prices: both band legs land on
+one tick, so the width is exactly zero. ⚠ The row carries **no** count of NEGATIVE real
+readings — it reports NaN and zero only — so §C's 5 .. 91 negatives per frame stay a
+**synthetic** figure, and the real-data question is open. A consumer clipping at zero or
+taking a log is throwing away at least those 108 bars.
+
+### E3 — what the run does not settle
+
+The 687 comparators are the engine's and hold no pandas_ta port, so **every in-fork figure
+of §F stays synthetic-only** — including the `natr:NATR_14` pair, which is the fork's
+column and not the engine's `natr` of this table. The run's `natr` shares a NAME with it;
+this session did not read the engine, so no claim is made that the two are the same
+computation. What §F's gap paragraph said before the run still stands unexplained: the
+synthetic frames read 0.0722 .. 0.3202 against the fork's `natr:NATR_14`, and the engine's
+comparator reads 0.6104 here — roughly 0.29 apart.
+
+The module's docstring is deliberately **not** edited. The ledger row's `module_sha1`
+(`6e27a955`) is the sha1 of `sk_fcb_width.py` as the harness imported it, so a
+one-character docstring edit would move the hash and make `tests/test_gate_e_ledger.py`
+read the row as a measurement of code that no longer exists.
 
 ## F — non-redundancy against the fork's own volatility columns
 
@@ -492,7 +581,7 @@ table.
 ### The real-data figure for this same pair, which the screen already measured
 
 ⚠ **These numbers understate the overlap badly, and the apples-to-apples comparison is
-not the engine's 0.6104.** The 2026-10-24 screen ran a second, *fork* stage — scale-free
+not §E's engine figure of 0.6104.** The 2026-10-24 screen ran a second, *fork* stage — scale-free
 `Category` outputs at defaults, 12 real frames — and it put the prototype's nearest fork
 comparator at **`natr:NATR_14` 0.5873**, per-frame max median **0.5772**, i.e. not a
 restatement at the 0.90 line (`docs/issues/106-sk-fcb-width.md`, which is the owner's
@@ -504,9 +593,11 @@ bit-equality to the prototype is what carries it to this port.
 | this file, synthetic | `natr:NATR_14` | **7** synthetic (`flat` cannot contribute) | **0.0722 .. 0.3202** |
 | screen stage 2, fork columns | `natr:NATR_14` | **12 real** | **0.5873** (per-frame max median 0.5772) |
 | screen Gate E, engine comparators | `natr` | **89 real** | **0.6104** (top-5 per-frame max median 0.5846) |
+| **§E, Gate E on THIS port** | `natr` | **89 real** | **0.6104** (top-5 per-frame max median 0.5846) |
 
-So the synthetic frames fall short of the real fork figure by roughly **0.27**, and of
-the engine figure by roughly **0.29**. The same asymmetry hit `j_acosc`, whose invented
+The last row is this port's own run, `is107-sk_fcb_width-8f25baf3` of 2026-11-15, and it
+reproduced the screen's digits exactly (§E). So the synthetic frames fall short of the
+real fork figure by roughly **0.27**, and of the engine figure by roughly **0.29**. The same asymmetry hit `j_acosc`, whose invented
 `fwma` proxy understated the engine's comparator by about 0.22.
 
 **Why they fall short is not established here, and the obvious explanation was tested and
@@ -693,7 +784,10 @@ both invocations, and 26.4 / 6.6 = 4.0 for 4x the bars.
 re-runs port tests under; the run prints the dispatchable features still enabled and
 refuses to continue if any of the four survived).
 
-- `tests/test_sk_fcb_width.py`: **160 passed** under both dispatches.
+- `tests/test_sk_fcb_width.py`: **160 passed** under both dispatches in the porting
+  session, and **161** under both in the receipt session of 2026-11-15 — the owed-row test
+  became `test_the_gate_e_row_is_this_ports_own_measurement` and
+  `test_the_gate_e_run_closes_gate_c_on_real_data` was added, so the count moved by one.
 - §A3, §B2 and §C are **identical**, cell for cell: the same fired counts, first-fire
   bars, step counts, ages, Spearman figures to four decimals, exposed/caught/missed
   counts and band-held counts. A comparison is either taken or not, so a last-bit move in
@@ -715,11 +809,11 @@ refuses to continue if any of the four survived).
 |---|---|---|
 | **A** Correctness | against the source formula | **pass** — bit-equal to an INDEPENDENT loop transcription of `Fractal` + `Fcb`, and to the screen prototype (the same rolling expression, so a tie to the Gate E figures rather than a second derivation), on all eight frames; the centre-index divergence named and measured (§A3), the `>=` and `EndType.Close` readings priced (§A4). ⚠ `Fcb.Series.cs` not read |
 | **B** Causality | mutant test | **pass** — module caught 0 of 1,499 offsets on each of eight frames (0 of 299 asserted in the suite); five mutants each live and each caught on each of six frames, and the weakest carried by §B2's mechanism-aware sweep: 0 catches on 8,743 unexposed offsets and every one of the 30 exposed-but-missed offsets explained (17 / 9 / 4, 0 left over). ⚠ Not 36 of 36, and why, in §B |
-| **C** Reachability | every column fires, counts stated | **pass** on synthetic — 1,411 .. 1,493 of 1,500 on seven frames, 0 on `flat` with the reason. Real-data counts **owed** with Gate E |
+| **C** Reachability | every column fires, counts stated | **pass** — 1,411 .. 1,493 of 1,500 on seven synthetic frames, 0 on `flat` with the reason, and **397,609 of 398,849** real BIST bars in §E2's run, of which **108** read exactly 0.0 |
 | **D** Scale-free | x8/x64 bit-identical, `0 < fires < n` | **pass** — bit-identical on all 10,330 fired bars and at three price levels; inexact factors ≤ 1.229e-12 with masks matching and 0 selection flips |
-| **E** Attribution | Spearman vs 687 comparators, 89 frames | **pending, run by issue-solver after this session** |
-| **F** Suites | both repos green | this module 160 passed, and 160 under reduced CPU dispatch; the full suite and the Backtesting suite are the launcher's, in clean worktrees |
+| **E** Attribution | Spearman vs 687 comparators, 89 frames | **pass, SHIP** — run `is107-sk_fcb_width-8f25baf3` (2026-11-15), pooled **0.6104** vs `natr` at n = 397,416, top-five per-frame max median **0.5846** over 89 frames with **no single frame past 0.80** on any top-five comparator, 0 degenerate, no waiver (§E) |
+| **F** Suites | both repos green | this module 161 passed in this receipt session, and 161 under reduced CPU dispatch; the full suite and the Backtesting suite are the launcher's, in clean worktrees |
 
-**Shipped**, as one column, `SK_FCB_WIDTH_2`, on the prototype's SHIP figure and on
-Gates A–D. Gate E decides whether it stays: if the run comes back STRUCK, the column is
-reverted and this file is the receipt.
+**Shipped**, as one column, `SK_FCB_WIDTH_2`, on Gates A–E: Gate E came back **SHIP** on
+this port's own run, at the prototype's figures to every digit, so nothing is reverted and
+nothing is waived.
