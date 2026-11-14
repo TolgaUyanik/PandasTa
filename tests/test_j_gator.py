@@ -87,11 +87,20 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    infinite) -- bad data rather than a price, and pinned so the
    disclosure cannot rot.
 
-8. **Gate E is OWED.** `test_the_gate_e_row_is_owed` asserts the ledger has
-   NO row for this indicator, which is what
-   `tests/test_gate_e_ledger.py` reports as owed and what the receipt
-   session replaces with the measured row. Gate C's real-data counts come
-   from the same run.
+8. **Gate E is SHIP, and whose measurement the ledger row is.**
+   `test_the_gate_e_row_is_this_ports_own_measurement` pins the row to run
+   `is104-j_gator-59830d09` (2026-11-14, on THIS module): pooled 0.3736
+   against `TK_Cross_Age` at n = 396,624, per-frame max median 0.3784 over
+   89 frames, both under the 0.76 ship line, 687 comparators, no waiver.
+   The screen's PROTOTYPE read the same digits on 2026-10-24, which is why
+   the row needs its identity pinned and not just its arithmetic.
+   `test_the_gate_e_run_closes_gate_c_on_real_data` reads Gate C's real
+   limb off the same row -- 398,137 of 398,849 bars fire, the 712 empty
+   ones being exactly `JAW[1] * 89`, and NO fired bar reads exactly 0.0,
+   unlike the synthetic `flat` frame. ⚠ Not pinned because the band does
+   not read it: the worst single frame of the top five is 0.5079 and 0 of
+   89 frames reach 0.80 on any of them. `docs/JGatorMeasured.md` §E has
+   it in full.
 
 Every number above is printed by `python docs/measure_j_gator.py` on this
 worktree (pandas 2.3.3, numpy 1.26.4), and
@@ -99,9 +108,12 @@ worktree (pandas 2.3.3, numpy 1.26.4), and
 section -- under numpy's `AVX512F AVX512_SKX AVX2 FMA3` dispatch disabled.
 The full receipt is `docs/JGatorMeasured.md`.
 
-NOT pinned here: Gate E itself (the launcher's run; 687 comparators over 89
-real BIST frames) and Gate C's real-data limb, which comes with it. The
-in-fork overlap figures of §L are SYNTHETIC and are disclosures, not gates.
+NOT pinned here: Gate E's own arithmetic (the launcher runs it; 687
+comparators over 89 real BIST frames, re-derived by
+`tests/test_gate_e_ledger.py`) -- item 8 pins the ROW it produced and the
+real-data counts in it. The in-fork overlap figures of §L are SYNTHETIC
+and are disclosures, not gates: the 687 engine comparators hold no
+pandas_ta port, so the Gate E run cannot see them.
 """
 import csv
 import importlib.util
@@ -873,14 +885,73 @@ def test_the_docstrings_first_paragraph_survives_the_dictionary_cut():
     assert desc({"desc": longer}) != longer
 
 
-def test_the_gate_e_row_is_owed():
-    """Gate E is run by issue-solver after this session, so the ledger has
-    NO row for this indicator yet -- which is what
-    `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-    reports as owed, and what the receipt session replaces with the
-    measured row (and this test with one pinning its identity).
-    `docs/JGatorMeasured.md` §E says so too."""
+def _j_gator_ledger_row():
     ledger = Path(__file__).resolve().parents[1] / "docs" / "gate_e_ledger.csv"
     rows = list(csv.DictReader(ledger.open(encoding="utf-8")))
     assert rows, "the ledger should not be empty"
-    assert [r for r in rows if r["indicator"] == "j_gator"] == []
+    rows = [r for r in rows if r["indicator"] == "j_gator"]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_the_gate_e_row_is_this_ports_own_measurement():
+    """The ledger row for `j_gator` must come from the run on THIS module,
+    `is104-j_gator-59830d09` (measured 2026-11-14), and NOT from the screen
+    of 2026-10-24, which measured the PROTOTYPE. The two agree to every
+    printed digit -- pooled 0.3736 against `TK_Cross_Age` at n = 396,624,
+    per-frame max median 0.3784 over 89 frames -- which is exactly why the
+    row's identity needs pinning: `tests/test_gate_e_ledger.py` re-derives
+    a row's `module_sha1` and output fingerprint from the tree and checks
+    its verdict arithmetic, but it cannot see WHOSE measurement a row came
+    from. §A2 asserts this module bit-equal to the prototype, so the
+    agreement is expected -- and an expected agreement is the easiest kind
+    of row to copy over by mistake.
+
+    This test replaced `test_the_gate_e_row_is_owed`, which asserted the
+    row was ABSENT and so failed the moment the receipt session recorded
+    it. `docs/JGatorMeasured.md` §E carries the result in full, including
+    what the band does not read: the worst SINGLE frame of the top five is
+    0.5079 (`TK_Cross_Age`) and 0 of 89 frames reach 0.80 on any of
+    them."""
+    row = _j_gator_ledger_row()
+    assert row["module"] == "pandas_ta.momentum.j_gator"
+    assert row["column"] == f"J_GATOR_{JAW[0]}_{TEETH[0]}_{LIPS[0]}"
+    assert row["run"] == "is104-j_gator-59830d09"
+    assert row["verdict"] == "SHIP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert row["against"] == "TK_Cross_Age"
+    assert row["against_set"] == "manifest"
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    # The two band limbs, as bounds and not as digits: SHIP is < 0.76
+    # pooled and < 0.90 on a top-5 comparator's per-frame median.
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.76
+    assert 0 < int(row["non_nan"]) < int(row["pooled_bars"])
+
+
+def test_the_gate_e_run_closes_gate_c_on_real_data():
+    """Gate C's real-data limb, read off the SAME ledger row rather than
+    retyped: the column fires on 398,137 of the run's 398,849 pooled bars
+    over 89 real BIST frames, so `0 < fires < n` holds there and not only
+    on the synthetic seven.
+
+    The 712 empty bars are pinned as an IDENTITY and not as a constant:
+    they are exactly `JAW[1] * n_frames`, the 8-bar warm-up of each frame
+    (item 5), which says the bad-close guard of item 7 emptied no further
+    real bar on this universe.
+
+    `non_zero` equals `non_nan`, i.e. NO fired real bar reads exactly 0.0.
+    That is the one real-data fact that differs in kind from the synthetic
+    frames: the `flat` frame reads 0.0 on all 1,492 of its bars because
+    the three lines coincide, and no BIST bar does. Pinned as the
+    inequality `non_zero == non_nan` because it is a statement about real
+    prices moving, not a float digit."""
+    row = _j_gator_ledger_row()
+    pooled = int(row["pooled_bars"])
+    fires = int(row["non_nan"])
+    non_zero = int(row["non_zero"])
+    frames = int(row["n_frames"])
+    assert 0 < fires < pooled
+    assert pooled - fires == JAW[1] * frames
+    assert non_zero == fires
