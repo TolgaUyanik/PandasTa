@@ -2077,6 +2077,12 @@ class AnalysisIndicators(BasePandasObject):
                                   **kwargs)
         return self._post_process(result, **kwargs)
 
+    def ts_energy_last_20(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ts_energy_last_20(close=close, length=length, offset=offset,
+                                   **kwargs)
+        return self._post_process(result, **kwargs)
+
     def ts_imq_20(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = ts_imq_20(close=close, length=length, offset=offset,
