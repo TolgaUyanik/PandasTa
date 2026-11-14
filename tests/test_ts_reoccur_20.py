@@ -103,11 +103,19 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    Measured at `length` 2, 3, 20 and 60 over eight frames -- `k = 1`
    absent at every one.
 
-10. **Gate E is OWED.** `test_the_gate_e_row_is_owed` asserts the ledger
-    has NO row for this indicator, which is what
-    `tests/test_gate_e_ledger.py` reports as owed and what the receipt
-    session replaces with the measured row. Gate C's real-data counts come
-    from the same run.
+10. **Gate E is SHIP, and whose measurement the ledger row is.**
+    `test_the_gate_e_row_is_this_ports_own_measurement` pins the row to
+    run `is103-ts_reoccur_20-d6edb473` (2026-11-14, on THIS module):
+    pooled 0.7222 against `stdev` at n = 397,158, per-frame max median
+    0.7700 over 89 frames, both under the 0.76 ship line. The screen's
+    prototype read the same digits on 2026-10-24, which is why the row
+    needs its identity pinned and not just its arithmetic.
+    `test_the_gate_e_run_closes_gate_c_on_real_data` reads Gate C's real
+    limb off the same row -- 397,158 of 398,849 bars fire, the 1,691 empty
+    ones being exactly `(LENGTH - 1) * 89`, and 0.1324 of the fired bars
+    read exactly 0.0 (pinned as a band). ⚠ Not pinned because the band
+    does not read it: 1 of 89 frames is at |rho| >= 0.90 against `stdev`
+    and 35 of 89 at >= 0.80. `docs/TsReoccur20Measured.md` §E has it.
 
 Every number above is printed by `python docs/measure_ts_reoccur_20.py`,
 and `python docs/measure_ts_reoccur_20_cpu.py` re-runs this module -- and
@@ -1074,19 +1082,71 @@ def test_every_zero_return_in_the_window_is_counted_and_then_some():
     assert strictly_more > 0, "no window repeated a close non-adjacently"
 
 
-def test_the_gate_e_row_is_owed():
-    """Gate E is run by issue-solver after this session, so the ledger has
-    NO row for this indicator yet -- which is what
-    `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-    reports as owed, and what the receipt session replaces with the
-    measured row (and this test with one pinning its identity).
-    `docs/TsReoccur20Measured.md` §E says so too."""
+def test_the_gate_e_row_is_this_ports_own_measurement():
+    """The ledger row for `ts_reoccur_20` must come from the run on THIS
+    module, `is103-ts_reoccur_20-d6edb473` (measured 2026-11-14), and NOT
+    from the screen of 2026-10-24, which measured the PROTOTYPE. The two
+    agree to every printed digit -- pooled 0.7222 against `stdev` at
+    n = 397,158, per-frame max median 0.7700 -- which is exactly why the
+    row's identity needs pinning: `tests/test_gate_e_ledger.py` re-derives
+    a row's `module_sha1` and output fingerprint from the tree and checks
+    its verdict arithmetic, but it cannot see WHOSE measurement a row came
+    from. §A1 measures this module bit-equal to the prototype, so the
+    agreement is expected -- and an expected agreement is the easiest kind
+    of row to copy over by mistake.
+
+    This test replaced `test_the_gate_e_row_is_owed`, which asserted the
+    row was ABSENT and so failed the moment the receipt session recorded
+    it. `docs/TsReoccur20Measured.md` §E carries the result in full,
+    including the disclosure the band does not read: 1 of 89 frames at
+    |rho| >= 0.90 and 35 of 89 at >= 0.80 against `stdev`."""
     import csv
     from pathlib import Path
     ledger = Path(__file__).resolve().parents[1] / "docs" / "gate_e_ledger.csv"
     rows = list(csv.DictReader(ledger.open(encoding="utf-8")))
     assert rows, "the ledger should not be empty"
-    assert [r for r in rows if r["indicator"] == "ts_reoccur_20"] == []
+    rows = [r for r in rows if r["indicator"] == "ts_reoccur_20"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["module"] == "pandas_ta.statistics.ts_reoccur_20"
+    assert row["column"] == f"TS_REOCCUR_{LENGTH}"
+    assert row["run"] == "is103-ts_reoccur_20-d6edb473"
+    assert row["verdict"] == "SHIP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+    assert 0 < int(row["non_nan"]) < int(row["pooled_bars"])
+
+
+def test_the_gate_e_run_closes_gate_c_on_real_data():
+    """Gate C's real-data limb, read off the SAME ledger row rather than
+    retyped: the column fires on 397,158 of the run's 398,849 pooled bars
+    and 344,576 of those are non-zero, so `0 < fires < n` holds on 89 real
+    BIST frames and not only on the synthetic eight.
+
+    The 1,691 empty bars are pinned as an IDENTITY and not as a constant:
+    they are exactly `(LENGTH - 1) * n_frames`, the warm-up of each frame,
+    which says the §G1 bad-close guard emptied no further real bar. The
+    zero-reading share is pinned as a BAND (0.05 .. 0.30, measured 0.1324)
+    because it is the answer to §C1's open question -- whether the real
+    universe looks like the near-binary `grid-200tick` frame, which reads
+    0.909 -- and a band is what that question needs, not a digit."""
+    import csv
+    from pathlib import Path
+    ledger = Path(__file__).resolve().parents[1] / "docs" / "gate_e_ledger.csv"
+    rows = list(csv.DictReader(ledger.open(encoding="utf-8")))
+    row = [r for r in rows if r["indicator"] == "ts_reoccur_20"][0]
+    pooled = int(row["pooled_bars"])
+    fires = int(row["non_nan"])
+    non_zero = int(row["non_zero"])
+    frames = int(row["n_frames"])
+    assert 0 < fires < pooled
+    assert pooled - fires == (LENGTH - 1) * frames
+    assert 0 < non_zero <= fires
+    zero_share = (fires - non_zero) / fires
+    assert 0.05 < zero_share < 0.30, zero_share
 
 
 # ====================================================== wiring and arguments

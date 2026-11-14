@@ -2,7 +2,7 @@
 
 PandasTa issue **#103** (parent #31 ALPHASETS, screen of 2026-10-24).
 Module `pandas_ta/statistics/ts_reoccur_20.py`, column **`TS_REOCCUR_20`**.
-Tests `tests/test_ts_reoccur_20.py` (223).
+Tests `tests/test_ts_reoccur_20.py` (224).
 
 Every number in §A1–§A6, §B, §C, §D, §G, §O, §L and §W, and §Z's traced
 peak,
@@ -34,8 +34,9 @@ What does NOT come from that command, marked again where it appears:
   they are this machine's and this run's. §Z gives three whole runs of a
   best-of-3 and states what survives a re-run — the flat traced peak, the
   monotone ordering and the ratio;
-* **§E**, which is **OWED**: Gate E is run by issue-solver after this
-  session;
+* **§E**, which is the launcher's Gate E run
+  `is103-ts_reoccur_20-d6edb473` (measured 2026-11-14), quoted from its
+  `overlap_max.csv`, `perframe.csv`, `top25.csv` and `meta.json`;
 * **§E0**, the 2026-10-24 screen's figures, measured on the PROTOTYPE and
   quoted from issue #103;
 * **§F**, which is pytest's own output;
@@ -92,19 +93,23 @@ this fork's rule and the source's differ by construction.
 |---|---|
 | A Correctness | **PASS, and it is bit-equality rather than a tolerance.** The module's only arithmetic is one integer count divided by `length`, so a per-window `value_counts()` oracle and the retyped screen prototype agree with it on **11,848 of 11,848** fired bars over eight frames with identical NaN masks, and at `length` 2, 3, 5, 21, 60 and 250. The output lattice is `k / length` with `k = 1` unreachable, measured absent at four lengths over all eight frames. |
 | B Causality | **PASS.** 0 of 36 offsets leak on four frames and at `length` 2, 7, 60 and 250; the first fired bar is `length - 1` at every length. Six mutants: five live on every frame and each is the real column back-dated by a DERIVED number of bars, bit for bit (1,462 … 1,480 bars each). ⚠ The blind sweep catches those five at only 1 … 36 of 36 offsets, and §B says why — the column lives on a 21-point lattice. The sixth mutant shifts the bad-close mask's own index, is invisible to the sweep (0 of 36 on four clean frames) and is caught 12 of 12 on a designed frame, moving exactly bar J−1 at all twelve. |
-| C Reachability | **PASS on synthetic data, OWED on real.** Fires 1,481 of 1,500 on each of eight frames, so `0 < fires < n` everywhere. 3 … 19 distinct values on the seven grid frames, spanning 0.00 … 1.00 across them. ⚠ On the `continuous` frame it is a CONSTANT 0.0 — 1 distinct value — which is the feature and not a failure (§A5). Gate C's real-data counts come from the Gate E run and are owed with it. |
+| C Reachability | **PASS, on synthetic and on real data.** Fires 1,481 of 1,500 on each of eight frames, so `0 < fires < n` everywhere. 3 … 19 distinct values on the seven grid frames, spanning 0.00 … 1.00 across them. ⚠ On the `continuous` frame it is a CONSTANT 0.0 — 1 distinct value — which is the feature and not a failure (§A5). On the 89 real BIST frames of the Gate E run: **397,158 of 398,849** bars fire (the 1,691 empty ones are exactly the 19 warm-up bars of each of 89 frames) and **344,576** of those read non-zero, so `0 < fires < n` and the column is not a constant on real prices either (§E2). |
 | D Scale-free | **PASS.** ×8/×64 are EXACT and so cannot merge or split a tie: bit-identical on 11,848 of 11,848 bars over eight frames at both factors, at `length` 2 / 3 / 5 / 21 / 60 / 250, and at price levels 1e-6, 1e+6 and 1e+100. ×10 / ×3.7 / ×0.1 / ×1.0000001 are not exact and CAN merge two closes — bit-identical on all 11,848 at all four, and separately 0 merges in all 32 cells (bit-equality does not imply that; §D2) — and a frame of 20 consecutive doubles shows the merge happening, so that is a measurement and not a theorem. `price ** 2` and `price ** 0.5` keep every tie on all 10,367 grid bars. ⚠ The tick grid is not part of the column, so it is not comparable ACROSS instruments: §D4. |
-| E Attribution | **Gate E: pending, run by issue-solver after this session.** |
-| F Suites | This repo: 223 for the module, 223 again with `AVX512F AVX512_SKX AVX2 FMA3` disabled; the full-suite figure is in the commit message, and §F says why it is not here. The Backtesting suite is the launcher's. |
+| E Attribution | **SHIP**, run `is103-ts_reoccur_20-d6edb473`, measured 2026-11-14 on this module over the 89 ALTPORT-1 frames against 687 comparators. Pooled max \|ρ\| **0.7222** against `stdev` (compute_all, n = 397,158), per-frame max median **0.7700** against the same comparator over 89 frames. Both limbs are under the 0.76 ship line of `r3-perframe-0.90`. ⚠ Not verdict-moving but disclosed: 1 of 89 frames reads \|ρ\| ≥ 0.90 against each of `stdev`, `mad` and `variance`, and 35 of 89 read ≥ 0.80 against `stdev` (§E1). |
+| F Suites | This repo: 224 for the module, 224 again with `AVX512F AVX512_SKX AVX2 FMA3` disabled; the full-suite figure is in the commit message, and §F says why it is not here. The Backtesting suite is the launcher's. |
 
 **What a consumer must know, in one place.** The column is a
 **tick-grid** feature: it reads exact price equality, so it is identically
 0.0 on continuous-float prices and its level is set by how many TICKS the
 price moves in a bar (mean 0.9124 at one tick, 0.0379 at a hundred; §L1).
 That makes it **negative volatility measured in ticks** — per-frame |ρ|
-median 0.7974 against `stdev(close, 20)` within one tick regime (§O3),
-against the screen's **0.7222** for the prototype on 89 real frames, where
-`stdev` was the top of 687 comparators. It is **order-blind** (§A6) and
+median 0.7974 against `stdev(close, 20)` within one tick regime (§O3), and
+**0.7222** against the engine's `stdev` on 89 real frames, where `stdev` is
+the top of 687 comparators. That last figure is now measured twice on real
+data and agrees to every printed digit: the screen's prototype on
+2026-10-24 and **this module** in Gate E run
+`is103-ts_reoccur_20-d6edb473` on 2026-11-14 (§E). It is **order-blind**
+(§A6) and
 **not comparable across instruments** whose tick is a different fraction of
 their price (§D4).
 
@@ -547,9 +552,11 @@ What answers the CONST tag is the rule that table itself states —
   which a constant column cannot produce;
 * §A1 measures this module **bit-equal to that prototype** on every
   frame, so the real-data behaviour is the same column's;
-* the pooled fired and non-zero counts from the 89 frames are **owed**
-  with the Gate E run (§E), which is where that table's "confirm on real
-  data" is actually discharged.
+* the pooled fired and non-zero counts from the 89 frames now come from
+  the Gate E run on **this module** — 397,158 of 398,849 bars fire and
+  344,576 of them are non-zero (§E2) — which is where that table's
+  "confirm on real data" is discharged. The `CONST` tag is the probe
+  frame's, and the real data says otherwise.
 
 `docs/MLCompanionContract.md`'s tag counts carry the same warning, and
 they move 686 → 687 tagged / 42 → 43 `CONST` rather than `SF`, because
@@ -564,8 +571,11 @@ otherwise changes only the four package counts (343 → 344 probed,
 `grid-200tick` reads 0.00 on 90.9% of bars and 0.10 on 8.8%, over 3
 distinct values. That is the regime a BIST stock at 100 TRY on a 0.01 tick
 sits in, and it is the honest shape of the feature there: "did any close
-repeat in the last 20 bars". Gate E's real-data reachability counts will
-say how much of the 89-frame universe looks like that; this file cannot.
+repeat in the last 20 bars". ⚠ **The real universe is NOT mostly that
+regime**, which is what the Gate E run settles: 52,582 of the 397,158
+fired real bars read exactly 0.0, a share of **0.1324** against
+`grid-200tick`'s 0.909 (§E2). The synthetic frame was the pessimistic
+corner, not the typical one.
 
 ---
 
@@ -803,13 +813,21 @@ engine's `stdev` over 89 real frames (top-5 per-frame max median 0.7700)
 and bounded its whole fork sweep at **0.4851**, `LOT_ZERORET_60` included
 by construction. Both of those are in the SHIP band, and both are close
 enough to the 0.76 line that **Gate E on this module is what decides it**
-— the synthetic numbers here cannot.
+— the synthetic numbers here cannot. ⚠ It has since decided it: the run
+on this module read the same **0.7222** pooled and the same **0.7700**
+per-frame max median against the same `stdev`, which is SHIP (§E). The
+synthetic same-regime figure of 0.7974 against `stdev(close, 20)` was
+therefore the more pessimistic of the two readings, and the one that was
+wrong about the band was the mixed-regime pooled −0.4746.
 
 So the one-sentence summary of §O: this is **negative volatility measured
 in ticks**, closest to a window dispersion measure (0.70 … 0.85 per frame
-synthetic, 0.7222 real on the prototype), and distinct from the fork's own
+synthetic, 0.7222 real on this module), and distinct from the fork's own
 zero-return share both in correlation (per-frame median ~0.50) and by the
-derivation in §O2.
+derivation in §O2. ⚠ The fork's own columns are still SYNTHETIC-only:
+Gate E's 687 comparators are the engine's and hold no pandas_ta port, so
+the `LOT_ZERORET_60` pair is bounded on real data only by the screen's
+stage-2 sweep (0.4851 over 12 frames, §E0).
 
 ---
 
@@ -914,35 +932,138 @@ that does the cutting.)
 
 ## E — Gate E
 
-**Gate E: pending, run by issue-solver after this session.**
+**SHIP.** Run `is103-ts_reoccur_20-d6edb473`, measured **2026-11-14** by
+issue-solver on **this module** (`gate_e_overlap.py run --module
+pandas_ta.statistics.ts_reoccur_20`, no non-default parameters), and
+recorded in `docs/gate_e_ledger.csv`. Every figure in §E is read off that
+run's `overlap_max.csv`, `perframe.csv`, `top25.csv` and `meta.json`; this
+session did not run the harness and could not.
 
-`docs/gate_e_ledger.csv` therefore has no row for `ts_reoccur_20`, and
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-reports it as owed — which is the expected state on the way to `dev`
-(CLAUDE.md, "Owed, not failed"), since `ci.yml` and `gate-e-guard.yml` set
-`GATE_E_PENDING_OK=1`. `tests/test_ts_reoccur_20.py::test_the_gate_e_row_is_owed`
-asserts the row is ABSENT, so it fails the moment the receipt session
-records it; replacing it with a test that pins the row's identity is part
-of recording the row.
+The run's own facts, from `meta.json`: 89 frames, 398,849 pooled bars,
+329 compute_all + 358 manifest = **687** comparators, canary
+`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`, pandas 2.3.3 /
+numpy 1.26.4, candidate source sha1 `70db283c`, `pandas_ta_src_sha1`
+`7c0711cb`. `degenerate.csv` is **empty** — 0 comparators were dropped as
+degenerate — and `overlap_max.csv` records `n_degenerate` 0.
 
-What the run owes this file:
+### E1 — the verdict
 
-1. the verdict under `r3-perframe-0.90` — pooled \|ρ\| and the top-5
-   per-frame median, against the 687 comparators over the 89 ALTPORT-1
-   frames;
-2. **Gate C on real data**: the pooled fired and non-zero counts, which
-   §C cannot supply. The question that matters is how much of the real
-   universe sits in `grid-200tick`'s near-binary regime — on a frame where
-   the column almost never fires, it carries almost no information
-   however low its correlation is;
-3. whether the port reproduces the screen's prototype figures. It should,
-   and more strongly than this port's siblings did: §A1 measures the
-   module **bit-equal** to the prototype on every frame, not merely
-   rank-identical, so the only sources of difference on real data are the
-   missing-data rule (§A4) and the harness.
+| what | figure |
+|---|---|
+| column | `TS_REOCCUR_20` (the only one) |
+| pooled max \|ρ\| | **0.7221814232622749** |
+| against | `stdev`, set `compute_all` |
+| n (pooled, pairwise) | **397,158** |
+| per-frame max median \|ρ\| | **0.7699613620705119**, against `stdev`, over 89 frames |
+| verdict under `r3-perframe-0.90` | **SHIP** (both limbs < 0.76) |
+| pooled-only verdict | SHIP (the two agree here) |
 
-If the run comes back STRUCK, the column is reverted and this file is kept
-as the receipt — which closes #103 exactly as well as a ship.
+The band's two limbs, applied: STRUCK needs pooled \|ρ\| ≥ 0.90 or a top-5
+comparator's per-frame median ≥ 0.90; DISCLOSE_GAP is 0.80 ≤ ρ < 0.90 and
+DISCLOSE 0.76 ≤ ρ < 0.80. The pooled figure is 0.7222 and the largest
+per-frame median among the top five is 0.7700, so **neither limb reaches
+even the 0.76 DISCLOSE line** and the column ships whole. The best
+manifest comparator is well behind: `Pct_Up_Days_63` at **0.4711** over
+n = 396,179.
+
+**Top five, pooled** (`top25.csv`; every ρ is NEGATIVE, which is §O's
+"negative volatility measured in ticks" on real prices rather than on a
+synthetic grid):
+
+| against | set | ρ | \|ρ\| | n |
+|---|---|---|---|---|
+| `stdev` | compute_all | −0.7221814232622749 | 0.7222 | 397,158 |
+| `mad` | compute_all | −0.7099011819304782 | 0.7099 | 396,268 |
+| `variance` | compute_all | −0.7089583646979859 | 0.7090 | 396,268 |
+| `LINREG_DEV` | compute_all | −0.7004556973795134 | 0.7005 | 397,158 |
+| `CHANNEL_WIDTH` | compute_all | −0.6874313634066828 | 0.6874 | 397,158 |
+
+All five are dispersion measures of the same 20-ish-bar window, which is
+the shape §O predicted and §L1 explains: the number of distinct grid
+points a window visits IS its spread, counted in ticks.
+
+**The same five per frame** (`perframe.csv`, 89 frames each):
+
+| against | median | mean | min | max | ≥ 0.90 | ≥ 0.80 |
+|---|---|---|---|---|---|---|
+| `stdev` | 0.7700 | 0.6695 | 0.1197 | **0.9279** | 1 of 89 | **35 of 89** |
+| `mad` | 0.7457 | 0.6362 | 0.1196 | 0.9025 | 1 of 89 | 27 of 89 |
+| `variance` | 0.7455 | 0.6350 | 0.1154 | 0.9036 | 1 of 89 | 27 of 89 |
+| `LINREG_DEV` | 0.7267 | 0.6166 | 0.0142 | 0.8979 | 0 of 89 | 22 of 89 |
+| `CHANNEL_WIDTH` | 0.6971 | 0.5916 | 0.0538 | 0.8750 | 0 of 89 | 17 of 89 |
+
+(the counts are the run's `pct_frames_ge_090` and `pct_frames_ge_080`
+turned back into frames by × 89: 1.1235955056179776% is 1 frame,
+39.325842696629216% is 35, 30.337078651685395% is 27,
+24.719101123595504% is 22, 19.101123595505616% is 17)
+
+⚠ **Disclosed, and not verdict-moving.** The band reads the per-frame
+MEDIAN, and that is 0.7700. But the spread behind it is wide — the worst
+single frame reads **0.9279** against `stdev`, and **35 of 89 frames**
+(39.3%) are at or above 0.80 against it. On a BIST stock whose tick is a
+large fraction of its price, this column and a 20-bar standard deviation
+are close to the same feature; on one whose tick is small, they are not
+(min 0.1197). That is §D4's cross-instrument limit showing up as a
+cross-frame one, and a miner pooling the universe sees the median rather
+than the tail.
+
+### E2 — Gate C on real data
+
+From `overlap_max.csv`'s `non_nan` and `non_zero`, over the run's 398,849
+pooled bars:
+
+| what | count | share of pooled |
+|---|---|---|
+| bars that fire | **397,158** | 0.9958 |
+| of those, non-zero | **344,576** | — |
+| of those, exactly 0.0 | **52,582** | — |
+| empty bars | 1,691 | 0.0042 |
+
+`0 < fires < n` on real data, so Gate C is closed on more than synthetic
+frames. Two things are worth reading off those numbers:
+
+* the 1,691 empty bars are **exactly 19 × 89** — the `length - 1` warm-up
+  of each of the 89 frames and nothing else. No bad close, no NaN and no
+  short frame emptied a further real bar, which says the §G1 guard never
+  fired on this universe;
+* **52,582 fired bars, 0.1324 of them, read exactly 0.0**: a real window
+  of 20 closes with no repeat at all. That is the §A3 closed form reached
+  on real prices, and it is the answer to §C1's open question — the real
+  universe does **not** look like `grid-200tick` (0.909 reading zero). It
+  sits in the band §L1 calls useful, roughly 2 to 20 ticks a bar.
+
+### E3 — the port against the screen's prototype
+
+The run reproduces the 2026-10-24 screen's prototype figures to **every
+printed digit**: the same comparator `stdev`, the same n = 397,158, the
+same pooled 0.7222, the same per-frame max median 0.7700, and the same
+runners-up `mad` 0.7099 and `variance` 0.7090. §A1 measured this module
+**bit-equal** to the retyped prototype on 11,848 of 11,848 synthetic bars,
+so that agreement is the expected outcome rather than a surprise — and it
+also means the missing-data difference of §A4, this fork's rule against
+the source-literal one, moved **nothing** at the four-digit level on this
+universe. (It could not have moved the n either way without changing it:
+n = 397,158 is identical in both runs.)
+
+⚠ **Two sentences of the module's own docstring are now stale, and they
+stay that way on purpose.** `pandas_ta/statistics/ts_reoccur_20.py` still
+reads "Gate E on this module is what decides the band" (line 185) and
+"the pooled real-data counts are owed with the Gate E run" (line 201).
+Both were true when the port was written and neither is now. They are not
+corrected here because the ledger row's `module_sha1` is the sha1 of that
+file as the harness imported it (`70db283c`): editing one character of
+the docstring moves the hash, and `tests/test_gate_e_ledger.py` would
+then read the row as a measurement of code that no longer exists and
+report it owed again. The receipt is this file and the contract entry,
+both of which say SHIP; a later session that re-runs Gate E for any other
+reason can fix the docstring in the same commit.
+
+What this run does **not** settle, unchanged by it: the 687 comparators
+are the engine's and hold no pandas_ta port, so every §O figure against
+the fork's own columns — `LOT_ZERORET_20/60`, `TS_BINENT_20`,
+`TS_PERMENT_20`, `TS_CROSS_MEAN_20` — is still synthetic-only. The only
+real-data bound on the nearest of them is the screen's stage-2 fork sweep,
+0.4851 over 12 frames (§E0), with the caveat recorded there.
 
 ---
 
@@ -950,8 +1071,14 @@ as the receipt — which closes #103 exactly as well as a ship.
 
 | run | result |
 |---|---|
-| `python -m pytest tests/test_ts_reoccur_20.py -q` | **223 passed** |
-| `python docs/measure_ts_reoccur_20_cpu.py` (the same module with `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`) | **223 passed** |
+| `python -m pytest tests/test_ts_reoccur_20.py -q` | **224 passed** |
+| `python docs/measure_ts_reoccur_20_cpu.py` (the same module with `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`) | **224 passed** |
+
+(223 in the porting session; the receipt session replaced
+`test_the_gate_e_row_is_owed` with
+`test_the_gate_e_row_is_this_ports_own_measurement` and added
+`test_the_gate_e_run_closes_gate_c_on_real_data`, so the count moved by
+one)
 
 The reduced-dispatch run prints the features that survive, so the claim
 cannot drift from what was turned off: `['SSSE3', 'SSE41', 'POPCNT',
