@@ -26,7 +26,7 @@ window per ticker before concatenating tickers.
 `*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is
 invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
-**343 indicators** probed; 1 raise on this environment (pandas 2.x) -- see [Known breaks](#known-breaks).
+**344 indicators** probed; 1 raise on this environment (pandas 2.x) -- see [Known breaks](#known-breaks).
 
 ### How many indicators is that, exactly
 
@@ -34,8 +34,8 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | surface | n | what it means |
 |---|---|---|
-| registered in `Category` | **341** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **349** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| registered in `Category` | **342** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **350** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
@@ -219,7 +219,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `seas` | C | `length=None`, `years=None` | `SEAS_21_1` SF | 252 | Heston-Sadka annual-lag seasonality: the return over the next `length` bars, measured `years` ago, one trading year (252 bars) at a time, averaged. |
 | `trend_return` | C | `trend`, `log=True`, `asbool=None`, `trend_reset=0`, `trade_offset=None` | `TR_LOGRET_1` SF<br>`TR_CUMLOGRET_1` SF<br>`TR_Trends` BIN<br>`TR_Trades` BIN<br>`TR_Entries` BIN<br>`TR_Exits` BIN | 1 | Calculates the Returns and Cumulative Returns of a Trend as defined by a sequence of booleans called a 'trend'. One popular example in TA literature… |
 
-## statistics (49)
+## statistics (50)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -270,6 +270,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `ts_peaks_20` | C | `length=None` | `TS_PEAKS_20_2` ORD | 19 | How many closes of the window are a local maximum with support 2: strictly above the two closes before AND the two closes after them. |
 | `ts_perment_20` | C | `length=None` | `TS_PERMENT_20_3` SF | 19 | Bandt-Pompe permutation entropy at order 3: slide a three-close triple over the window, label each triple by the ORDER of its three closes (six… |
 | `ts_q05_60` | C | `length=None` | `TS_Q05_60` SF | 60 | How bad a bad day is: the 5% quantile of the last `length` simple returns -- a one-day historical VaR. ⚠ NEGATIVE volatility: -0.58..-0.74 vs NATR.… |
+| `ts_reoccur_20` | C | `length=None` | `TS_REOCCUR_20` CONST | 19 | Share of the last `length` closes that repeat inside the window. ⚠ EXACT price equality: a tick-grid feature, identically 0.0 on continuous prices.… |
 | `variance` | C | `length=None`, `ddof=None` | `VAR_30` PX2 | 29 | Sources: |
 | `zscore` | C | `length=None`, `std=None` | `Z_30` SF | 29 | Sources: |
 
@@ -455,6 +456,7 @@ or delete* — was followed here, and the answer was that they are fine.
 | `macd_area_divergence` | `MADIV_TOP_20_60_120` `MADIV_BOT_20_60_120` | — unregistered, file one |
 | `rsi_divergence` | `RSIDIV_BEAR_14_4_4` | — unregistered, file one |
 | `lot_zeroret_60` | `LOT_ZERORET_60` | — unregistered, file one |
+| `ts_reoccur_20` | `TS_REOCCUR_20` | — unregistered, file one |
 | `band_cross_retest` | `BANDXR_CROSS_UP_EMA_66_288` `BANDXR_CROSS_DN_EMA_66_288` `BANDXR_RETEST_FAST_EMA_66_288` `BANDXR_RETEST_SLOW_EMA_66_288` `BANDXR_GAP_ATR_EMA_66_288` | — unregistered, file one |
 | `flag_breakout` | `FLAG_CONF_BULL_12_0.85_0.15` `FLAG_CONF_BEAR_12_0.85_0.15` | — unregistered, file one |
 | `fvg_sweep_magnet` | `FSME_MAG_BULL_5` `FSME_MAG_BEAR_5` | — unregistered, file one |

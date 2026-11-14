@@ -39,6 +39,7 @@ from .ts_medskew_20 import ts_medskew_20
 from .ts_peaks_20 import ts_peaks_20
 from .ts_perment_20 import ts_perment_20
 from .ts_q05_60 import ts_q05_60
+from .ts_reoccur_20 import ts_reoccur_20
 from .variance import variance
 from .zscore import zscore
 from .rolling_sum import rolling_sum
