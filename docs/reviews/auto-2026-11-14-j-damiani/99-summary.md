@@ -116,3 +116,36 @@ instruction "fix the exponents before you commit". They were applied, so
   `tests/test_wiring_accessors.py` followed by
   `tests/test_altport2_ports.py` in one process reads "Category total
   341, expected 344" (§F).
+
+## ✅ Closed by the Gate E receipt session (2026-11-14, same day)
+
+The first three follow-ups above are **done**, and the review verdicts in
+this folder were given before them, so what this section records is not
+reviewed by any of the four rounds.
+
+* **Gate E ran** as `is105-j_damiani-fa64c9c2` and reproduced the
+  prototype's figures to every digit the issue printed: max |ρ|
+  **0.7621** vs `ATR_Ratio_5_20` (manifest, n = 397,069), top-five
+  per-frame max median **0.7639** over 89 frames, 687 comparators,
+  `degenerate.csv` empty. **DISCLOSE** — the 0.76 .. 0.80 band. Nothing
+  is STRUCK, so the column ships with the disclosure §E0 and §A5(d)
+  already carry, and the third follow-up resolves the way it anticipated.
+  Recorded in `docs/gate_e_ledger.csv`.
+* **Gate C's real-data limb** came with it (§E2): 398,570 of 398,849
+  pooled BIST bars fire, all non-zero, the 279 empty ones being the
+  loop's 267-bar warm-up plus 12 from a leading NaN run on real prices.
+* `test_the_gate_e_row_is_owed` became
+  `test_the_gate_e_row_is_this_ports_own_measurement`, and
+  `test_the_gate_e_run_closes_gate_c_on_real_data` was added: **192**
+  module tests, the same 192 under reduced CPU dispatch, full suite
+  3 failed / 8,944 passed / 85 skipped with `j_damiani` named in none of
+  the three failures. The "191 tests" in *What shipped* and the "Gate E
+  pending" sentence below it are the porting session's and are superseded
+  by this section.
+* One thing this session deliberately did NOT touch: the module's
+  docstring. The ledger row's `module_sha1` is the sha1 of
+  `j_damiani.py` as the harness imported it (`b792cd99`), so any edit
+  there — including a one-character one — would make
+  `tests/test_gate_e_ledger.py` read the row as a measurement of code
+  that no longer exists. `docs/JDamianiMeasured.md` §E3 says so where a
+  reader of the docstring will find it.

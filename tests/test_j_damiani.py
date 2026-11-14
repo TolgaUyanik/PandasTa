@@ -93,12 +93,31 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    bar 0. Each is a different column, pinned as such, with the
    convergence of the seed differences pinned as a SHAPE.
 
+9. **Gate E is DISCLOSE, and whose measurement the ledger row is.**
+   `test_the_gate_e_row_is_this_ports_own_measurement` pins the row to
+   run `is105-j_damiani-fa64c9c2` (2026-11-14, on THIS module): pooled
+   **0.7621** against the manifest's `ATR_Ratio_5_20` at n = 397,069,
+   top-five per-frame max median **0.7639** over 89 frames, 687
+   comparators, no waiver. That is the 0.76 .. 0.80 band -- a ship with
+   a note, pinned as the band's two BOUNDS rather than as digits. The
+   screen's PROTOTYPE read the same digits on 2026-10-24, which is why
+   the row needs its identity pinned and not just its arithmetic.
+   `test_the_gate_e_run_closes_gate_c_on_real_data` reads Gate C's real
+   limb off the same row -- 398,570 of 398,849 bars fire, the 279 empty
+   ones being `FAR * 89` plus **12** more (a leading NaN run on real
+   prices, item 5's mechanism), and NO fired bar reads exactly 0.0.
+   ⚠ Not pinned, because the band does not read it: `natr_percentile`
+   and `natr_Pctl` each reach 0.90 on ONE of the 89 frames (0.9043 /
+   0.9126) and 0.80 on 15, against per-frame medians of 0.7425 / 0.7441.
+
 The full receipt is `docs/JDamianiMeasured.md`.
 
-NOT pinned here: Gate E itself (the launcher's run; 687 comparators over
-89 real BIST frames) and Gate C's real-data limb, which comes with it.
-The in-fork overlap figures of §L are SYNTHETIC and are disclosures, not
-gates.
+NOT pinned here: Gate E's own arithmetic (the launcher runs it; 687
+comparators over 89 real BIST frames, re-derived by
+`tests/test_gate_e_ledger.py`) -- item 9 pins the ROW it produced and the
+real-data counts in it. The in-fork overlap figures of §L are SYNTHETIC
+and are disclosures, not gates: the 687 engine comparators hold no
+pandas_ta port, so the Gate E run cannot see them.
 """
 import csv
 import importlib.util
@@ -1270,14 +1289,86 @@ def test_the_docstrings_first_paragraph_survives_the_dictionary_cut():
     assert desc({"desc": longer}) != longer
 
 
-def test_the_gate_e_row_is_owed():
-    """Gate E is run by issue-solver after this session, so the ledger has
-    NO row for this indicator yet -- which is what
-    `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-    reports as owed, and what the receipt session replaces with the
-    measured row (and this test with one pinning its identity).
-    `docs/JDamianiMeasured.md` §E says so too."""
+def _j_damiani_ledger_row():
     ledger = Path(__file__).resolve().parents[1] / "docs" / "gate_e_ledger.csv"
     rows = list(csv.DictReader(ledger.open(encoding="utf-8")))
     assert rows, "the ledger should not be empty"
-    assert [r for r in rows if r["indicator"] == "j_damiani"] == []
+    rows = [r for r in rows if r["indicator"] == "j_damiani"]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_the_gate_e_row_is_this_ports_own_measurement():
+    """The ledger row for `j_damiani` must come from the run on THIS
+    module, `is105-j_damiani-fa64c9c2` (measured 2026-11-14), and NOT from
+    the screen of 2026-10-24, which measured the PROTOTYPE. The two agree
+    to every printed digit -- pooled 0.7621 against the manifest's
+    `ATR_Ratio_5_20` at n = 397,069, top-five per-frame max median 0.7639
+    over 89 frames, runners-up `natr_percentile` 0.7302 and `natr_Pctl`
+    0.7294 -- which is exactly why the row's identity needs pinning:
+    `tests/test_gate_e_ledger.py` re-derives a row's `module_sha1` and
+    output fingerprint from the tree and checks its verdict arithmetic,
+    but it cannot see WHOSE measurement a row came from. Item 1 asserts
+    this module bit-equal to the prototype on all eight frames, so the
+    agreement is expected -- and an expected agreement is the easiest kind
+    of row to copy over by mistake.
+
+    The verdict is **DISCLOSE**, the 0.76 .. 0.80 band of
+    `r3-perframe-0.90`: a ship with a note, not a strike. The band's two
+    limbs are asserted as BOUNDS and not as digits -- pooled in
+    [0.76, 0.80), top-five per-frame max median below the 0.90 strike line
+    -- so a re-recorded row that moved within the band still has to stay
+    in it.
+
+    This test replaced `test_the_gate_e_row_is_owed`, which asserted the
+    row was ABSENT and so failed the moment the receipt session recorded
+    it. `docs/JDamianiMeasured.md` §E carries the result in full,
+    including what the band does not read: `natr_percentile` and
+    `natr_Pctl` each reach 0.90 on ONE of the 89 frames (0.9043 / 0.9126)
+    and 0.80 on 15 of them, while their per-frame MEDIANS -- which is what
+    the band reads -- are 0.7425 and 0.7441."""
+    row = _j_damiani_ledger_row()
+    assert row["module"] == "pandas_ta.volatility.j_damiani"
+    assert row["column"] == f"J_DAMIANI_{FAST}_{SLOW}"
+    assert row["run"] == "is105-j_damiani-fa64c9c2"
+    assert row["verdict"] == "DISCLOSE"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert row["against"] == "ATR_Ratio_5_20"
+    assert row["against_set"] == "manifest"
+    assert row["perframe_max_against"] == "ATR_Ratio_5_20"
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    # DISCLOSE is 0.76 <= pooled < 0.80, and STRUCK needs a top-5
+    # comparator's per-frame median >= 0.90.
+    assert 0.76 <= float(row["max_abs_rho"]) < 0.80
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+
+
+def test_the_gate_e_run_closes_gate_c_on_real_data():
+    """Gate C's real-data limb, read off the SAME ledger row rather than
+    retyped: the column fires on 398,570 of the run's 398,849 pooled bars
+    over 89 real BIST frames, so `0 < fires < n` holds there and not only
+    on the synthetic frames of item 5.
+
+    The 279 empty bars are MORE than the loop's warm-up, and that is the
+    one real-data fact this run adds to the synthetic picture. A frame
+    whose `base` is defined from bar 0 loses exactly `FAR` = 3 bars
+    (item 6), i.e. 267 over 89 frames; the remaining **12** are a leading
+    NaN run somewhere in the universe, which is the `flat`/`flat-start`
+    mechanism of item 5 reaching real prices -- an opening stretch whose
+    true range is 0, so `ATR(40)` is 0 and the ratio is `0/0`. WHICH
+    frames carry those 12 bars is not visible from the ledger row, and
+    this session did not run the harness, so the mechanism is named from
+    item 6's measurement ("the NaNs are always a leading prefix") and the
+    COUNT is what is pinned.
+
+    `non_zero` equals `non_nan`, i.e. NO fired real bar reads exactly
+    0.0 -- consistent with `base` being a ratio of two positive EWMAs
+    wherever it is defined at all."""
+    row = _j_damiani_ledger_row()
+    pooled = int(row["pooled_bars"])
+    fires = int(row["non_nan"])
+    frames = int(row["n_frames"])
+    assert 0 < fires < pooled
+    assert pooled - fires == FAR * frames + 12
+    assert int(row["non_zero"]) == fires

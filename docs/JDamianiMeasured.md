@@ -18,8 +18,10 @@ What does NOT come from that command, marked again where it appears:
   of §Z on this worktree printed 32.35 / 30.46 / 30.13 / 30.78 ms for the
   same 100,000 bars. The claims there are the traced peak, the linear
   shape, the ordering, and the bit-identical output.
-* **§E**, which is the launcher's Gate E run — **pending, run by
-  issue-solver after this session**.
+* **§E**, which is the launcher's Gate E run (`is105-j_damiani-fa64c9c2`,
+  2026-11-14) — every figure there is read off that run's
+  `overlap_max.csv`, `top25.csv`, `perframe.csv`, `degenerate.csv` and
+  `meta.json`, and §E2's Gate C real-data counts come from the same row.
 * **§E0**, the 2026-10-24 screen's figures, measured on the PROTOTYPE and
   quoted from issue #105.
 * **§F**, which is pytest's own output.
@@ -484,8 +486,11 @@ of non-negative observations that is positive once stays positive, so
 
 ### §C2 real data, and the dictionary
 
-**Real-data counts are owed with the Gate E run** (§E), which is the
-launcher's. Nothing here claims a real-data count.
+**The real-data counts came with the Gate E run and are in §E2**:
+398,570 of 398,849 pooled BIST bars fire over 89 frames, all 398,570 of
+them non-zero, and the 279 empty bars are the loop's `3 × 89 = 267`
+warm-up plus 12 more. §C1's counts are synthetic and nothing else in §C
+claims a real-data count.
 
 `python docs/gen_indicator_dictionary.py` regenerated
 `docs/IndicatorDictionary.md` from a live probe: 345 → **346** indicators
@@ -563,15 +568,130 @@ True on the six varying frames (1,497 of 1,500 each) and on `flat-start`
 and the reason Gate D's constant-column guard is asserted on the seven
 frames that have a reading.
 
-## §E Gate E
+## §E Gate E — measured, **DISCLOSE**
 
-**Gate E: pending, run by issue-solver after this session.**
+Run **`is105-j_damiani-fa64c9c2`**, measured **2026-11-14** by the
+launcher with
+`../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run
+--module pandas_ta.volatility.j_damiani` (Backtesting #107), over the 89
+frozen ALTPORT-1 BIST frames (398,849 pooled bars) against the engine's
+`compute_all` ∪ `ml_features` manifest — 329 + 358 = **687**
+comparators, default parameters, canary bit-equal on AKBNK.IS, BIENY.IS,
+AGHOL.IS and SASA.IS, `degenerate.csv` empty (0 comparators dropped).
+Neither the porting session nor this one ran the harness or read
+`../Backtesting`; both read the run's own output folder.
 
-The harness is `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py
-run --module pandas_ta.volatility.j_damiani` (Backtesting #107), over the
-89 frozen ALTPORT-1 BIST frames against the engine's `compute_all` ∪
-`ml_features` manifest (329 + 358 = 687 comparators). This session does
-not run it and does not read `../Backtesting`.
+| column | max \|ρ\| | against | set | n | per-frame max median | over | verdict |
+|---|---|---|---|---|---|---|---|
+| `J_DAMIANI_13_40` | **0.7621132942195423** | `ATR_Ratio_5_20` | manifest | 397,069 | **0.7639307656872285** | 89 frames, same comparator | **DISCLOSE** |
+
+Under `r3-perframe-0.90` that is the **0.76 ≤ ρ < 0.80** band: a ship
+with a note. Both limbs land there — the pooled figure is 0.7621 and the
+top-five per-frame max median is 0.7639 — and the pooled verdict read
+alone (`verdict_pooled_only`) is the same DISCLOSE, so neither limb
+carried the other. The best `compute_all` comparator is separately
+`natr_percentile` at 0.7301534017346207 (n = 392,441).
+
+The ledger row is recorded (`docs/gate_e_ledger.csv`) and pinned by
+`tests/test_j_damiani.py::test_the_gate_e_row_is_this_ports_own_measurement`,
+which replaced the porting session's `test_the_gate_e_row_is_owed`.
+
+### §E1 the comparators, in order
+
+`top25.csv`'s first five, and the whole file falls away from there to
+0.4484 (`trix_TRIXs_14_9`) at rank 25:
+
+| rank | comparator | set | ρ | n |
+|---|---|---|---|---|
+| 1 | `ATR_Ratio_5_20` | manifest | 0.7621132942195423 | 397,069 |
+| 2 | `natr_percentile` | compute_all | 0.7301534017346207 | 392,441 |
+| 3 | `natr_Pctl` | manifest | 0.729398625356751 | 392,441 |
+| 4 | `massi` | compute_all | 0.7046131657676875 | 396,001 |
+| 5 | `natr_Regime` | manifest | 0.6785495858151261 | 392,441 |
+
+**This run reproduced the 2026-10-24 screen's prototype figures to every
+digit the issue printed** — same comparator, same n = 397,069, same
+0.7621 and 0.7639, and the same runners-up `natr_percentile` 0.7302 and
+`natr_Pctl` 0.7294. §A2 asserts this module BIT-equal to the retyped
+prototype on all eight synthetic frames, so that agreement is the
+expected outcome rather than a surprise — and an expected agreement is
+the easiest kind of row to copy over by mistake, which is why the test
+pins the row's own run id.
+
+⚠ **Reported, and NOT verdict-moving: two comparators do reach 0.90 on a
+single frame.** The band reads a top-five comparator's per-frame MEDIAN,
+and `perframe.csv` says:
+
+| comparator | median | mean | max frame | min frame | frames ≥ 0.90 | frames ≥ 0.80 |
+|---|---|---|---|---|---|---|
+| `ATR_Ratio_5_20` | 0.7639307656872285 | 0.758048 | 0.7851384219090343 | 0.6402035766359480 | 0 of 89 | 0 of 89 |
+| `natr_percentile` | 0.7425491892420569 | 0.735981 | **0.9043205093431989** | 0.4954939609354765 | **1** of 89 | 15 of 89 |
+| `natr_Pctl` | 0.7440513100548989 | 0.737564 | **0.9125939921577203** | 0.5191191540051321 | **1** of 89 | 15 of 89 |
+| `massi` | 0.7049996090828821 | 0.702132 | 0.7556170777154357 | 0.5370596756561298 | 0 of 89 | 0 of 89 |
+| `natr_Regime` | 0.6900181703367059 | 0.685904 | 0.8604410316995712 | 0.4621990018931257 | 0 of 89 | 4 of 89 |
+
+(the frame counts are the file's `pct_frames_ge_090` / `pct_frames_ge_080`
+times 89: 1.1235955056179776% and 16.853932584269664% are 1 and 15 frames
+exactly, and 4.49438202247191% is 4.) So on one BIST frame this column
+and `natr_Pctl` are 0.91 apart-from-nothing, while on the top comparator
+the WORST single frame is 0.785 — the column's disagreement with
+`ATR_Ratio_5_20` is remarkably uniform across the universe, and its
+agreement with the `natr` percentile family is not.
+
+### §E2 Gate C's real-data limb, from the same run
+
+| | bars |
+|---|---|
+| pooled, 89 frames | 398,849 |
+| fired (`non_nan`) | **398,570** |
+| of those, non-zero | **398,570** |
+| empty | 279 |
+
+`0 < fires < n` on real data, which closes Gate C's real limb. The 279
+empty bars are **more than the warm-up**: a frame whose `base` is defined
+from bar 0 loses exactly the loop's `FAR` = 3 bars (§A3), i.e. 267 over
+89 frames, so **12 bars** beyond that were emptied. The only mechanism
+measured in this worktree that can empty a further bar is §C1/§G6's
+leading NaN run — an opening stretch whose true range is 0, so `ATR(40)`
+is 0 and the ratio is `0 / 0` — and §G6 measures that those NaNs are
+always a contiguous prefix. ⚠ WHICH frames carry those 12 bars is not
+visible from the run's summary outputs, and this session did not run the
+harness: the COUNT is measured, the mechanism is named from §G6 and not
+re-measured here. It is the synthetic `flat-start` frame's behaviour
+appearing on real BIST prices.
+
+`non_zero` equals `non_nan`: **no** fired real bar reads exactly 0.0,
+which is what §C1 leads one to expect — wherever `base` is defined it is
+a ratio of two POSITIVE EWMAs, so the column can only hit 0.0 through the
+loop cancelling exactly, and it does not on this universe.
+
+### §E3 what the run does NOT settle
+
+The 687 comparators are the engine's and hold **no pandas_ta port**, so
+every figure in §L — `natr:NATR_14` 0.8362, `chop` 0.3120, `volvol`
+0.2614, `massi:MASSI_9_25` 0.2297, `atr_ma_multiple` 0.2186, `rvi`
+0.1871, and the bare `ATR(13)/ATR(40)` at 0.9322 — remains SYNTHETIC.
+
+Two of the run's comparators carry the SAME NAMES as §L's, `massi`
+(0.7046, rank 4) and `natr` (0.4944, rank 16), but they are the ENGINE's
+columns and this session did not read the engine, so whether either is
+the same computation as the fork's `massi:MASSI_9_25` or `natr:NATR_14`
+is not established here. What can be said is that §L's two universes
+still disagree after the run: §L puts the fork's `massi` sixth at 0.2297
+on six synthetic frames, the screen's stage-2 fork sweep put it first at
+0.7023 over 12 real frames, and the engine's `massi` lands at 0.7046
+over 89. ⚠ **The bare ratio is NOT a Gate E comparator** and §A5(d)'s
+0.8978 .. 0.9322 against it is still synthetic: the nearest thing the
+engine ships is `ATR_Ratio_5_20`, at 0.7621.
+
+⚠ The module's docstring is deliberately NOT edited by this session.
+The ledger row's `module_sha1` is the sha1 of `j_damiani.py` as the
+harness imported it (`b792cd99`), so a one-character docstring edit would
+move the hash and make `tests/test_gate_e_ledger.py` read the row as a
+measurement of code that no longer exists. Its Gate E paragraph says the
+prototype measured DISCLOSE and that "the port's own Gate E run is what
+decides its band (§E of `docs/JDamianiMeasured.md`)" — which is this
+section, and which says the same band.
 
 Until the receipt session records the row,
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
@@ -598,7 +718,8 @@ From issue #105 (2026-10-24; a prototype is not a port):
 synthetic frames, so the run on this module is expected to reproduce
 those figures. **An expected agreement is the easiest kind of row to copy
 over by mistake**, which is why the receipt session must pin the row's own
-run id.
+run id. ✅ It did reproduce them, to every digit the issue printed (§E1),
+and the row is pinned to run `is105-j_damiani-fa64c9c2`.
 
 ⚠ **This is the band to keep in mind when reading the rest of this
 file.** DISCLOSE is a ship, but it is a ship with a note attached: the
@@ -613,8 +734,12 @@ resonator, not a new reading.
 
 The launcher runs both repos' suites in clean worktrees. In this worktree:
 
-* `python -m pytest tests/test_j_damiani.py -q` → **191 passed**;
-* `python docs/measure_j_damiani_cpu.py` → the same **191 passed** with
+* `python -m pytest tests/test_j_damiani.py -q` → **192 passed**
+  (191 in the porting session: `test_the_gate_e_row_is_owed` became
+  `test_the_gate_e_row_is_this_ports_own_measurement` and
+  `test_the_gate_e_run_closes_gate_c_on_real_data` was added, so the
+  count moved by one);
+* `python docs/measure_j_damiani_cpu.py` → the same **192 passed** with
   `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (the script
   prints the dispatchable features still enabled and refuses to run if
   any of the four survived, so the claim cannot drift);
@@ -637,12 +762,23 @@ The launcher runs both repos' suites in clean worktrees. In this worktree:
     were "green" and attributed 73 / 39 to the wrong module groupings,
     which is how the red combination went unreported for one review
     round.**
-* the full suite → §F1: **3 failed, 8,936 passed, 85 skipped**, the three
-  being `dev`'s clean-checkout failures with the owed Gate E row among
-  them.
+* the full suite → §F1: **3 failed, 8,944 passed, 85 skipped**, the three
+  being `dev`'s clean-checkout failures. ⚠ `j_damiani` is in NONE of
+  them now: the owed-Gate-E failure still fires, but for seven OTHER
+  indicators. The eight extra passes against the porting session's 8,936
+  are this session's: one net new test in the module plus seven that the
+  ledger row itself adds. The seven are read off
+  `tests/test_gate_e_ledger.py` — four tests parametrised over `LIVE`
+  (`test_row_names_the_module_that_defines_the_indicator`,
+  `test_row_still_describes_its_module`, `test_row_output_has_not_moved`,
+  `test_struck_rows_carry_the_waiver_for_this_exact_measurement`), two
+  over `ROWS` (`test_verdict_follows_the_bands`,
+  `test_every_column_fires_on_real_data`) and
+  `test_ledger_columns_are_the_default_output` over the indicators
+  holding a row — and 7 + 1 is the 8 the two suite runs differ by.
 
 ⚠ **Those two counts move together, and that is worth stating as a rule
-rather than as a number.** 191 of the suite's tests are this module's, so
+rather than as a number.** 192 of the suite's tests are this module's, so
 every test added to `tests/test_j_damiani.py` moves the module count AND
 the suite count, and both have to be re-run. Review round 1 added three
 tests; the re-run of the module module happened, the re-run of the suite
@@ -1017,10 +1153,10 @@ alone needs: a Python list of 400,000 floats. 39.7 MB against
 |---|---|
 | A correctness | **met.** The issue's formula spelled independently, bit-equal on 1,497 of 1,497 bars of each of six frames (§A1); bit-equal to the screen prototype on all eight (§A2); the four alternative readings of "ATR" priced (§A4); the loop characterised as a filter (§A5). |
 | B causality | **met.** 0 of 36 offsets on each of six frames; five source-read mutants, each live on every shared bar and caught at 36 of 36 on every frame, each catch 5.8e-02 .. 1.9e-01 loud (§B, §B1). |
-| C reachability | **synthetic only.** 1,497 of 1,500 bars with 1,497 distinct values on each varying frame (§C1). Real-data counts are owed with Gate E. |
+| C reachability | **met.** 1,497 of 1,500 bars with 1,497 distinct values on each varying frame (§C1), and on real data 398,570 of 398,849 pooled bars over 89 BIST frames, all non-zero, with 12 bars emptied beyond the loop's 267-bar warm-up (§E2). |
 | D scale-free | **met.** ×8/×64 bit-identical on every frame and at 1e−6 / 1e+6 / 1e+100; ×10/×3.7/×0.1/×1.0000001 within 2.098e-14 against a 1e-9 bound, the same worst figure under reduced CPU dispatch; `0 < fires < n` on seven of eight frames, with `flat` pinned separately (§D). |
-| E attribution | **pending, run by issue-solver after this session** (§E). The screen measured the PROTOTYPE — which this port is bit-equal to — at **DISCLOSE**, 0.7621 vs `ATR_Ratio_5_20` (§E0). |
-| F suites | **this worktree:** 191 module tests, the same 191 under reduced CPU dispatch, full suite in §F1 (3 failed, 8,936 passed, 85 skipped — `dev`'s clean-checkout failures plus the owed Gate E row). The launcher runs both repos' suites in clean worktrees. |
+| E attribution | **met, and the band is DISCLOSE** (§E). Run `is105-j_damiani-fa64c9c2`, 2026-11-14: pooled 0.7621 vs `ATR_Ratio_5_20` (manifest, n = 397,069), top-five per-frame max median 0.7639 over 89 frames, 687 comparators, no waiver. The same digits the screen read on the PROTOTYPE (§E0, §E1). The column ships with the note, since DISCLOSE is 0.76 ≤ ρ < 0.80 and nothing here is STRUCK. |
+| F suites | **this worktree, re-run in the receipt session:** 192 module tests, the same 192 under reduced CPU dispatch, full suite in §F1 (3 failed, 8,944 passed, 85 skipped — `dev`'s clean-checkout failures, with `j_damiani` named in none of them). The launcher runs both repos' suites in clean worktrees. |
 
 Six things a reader should carry away:
 
@@ -1041,14 +1177,19 @@ Six things a reader should carry away:
    exact-arithmetic: at subnormal true ranges `base` reads 5.0 and the
    column 6.8750, and the divisor guard is what keeps the same regime
    from reading `inf` (§G5(d)).
-6. **Gate E decides the band**, and the screen's figure on the identical
-   prototype is DISCLOSE rather than SHIP (§E, §E0).
+6. **Gate E decided the band and it is DISCLOSE, not SHIP** — 0.7621
+   against the engine's `ATR_Ratio_5_20`, the same figure the screen
+   read on the identical prototype, with a per-frame max median of
+   0.7639 and no frame of that comparator above 0.785 (§E, §E0, §E1).
 
 **FOUR Fletcher review rounds, 15 findings, all applied** (one NIT
 declined with a reason: `pandas_ta/core.py` is not alphabetical in that
 region). Round 4 returned PASS, and five of its findings landed after
-that verdict, so they are the only changes no reviewer has seen —
-`docs/reviews/auto-2026-11-14-j-damiani/99-summary.md` lists them.
+that verdict; those five and everything the Gate E receipt session added
+on the same day — §E, §E1, §E2, §E3, §C2's real-data paragraph, the two
+new tests and these re-run suite counts — are the changes no reviewer has
+seen. `docs/reviews/auto-2026-11-14-j-damiani/99-summary.md` lists both
+sets.
 **Not one finding in four rounds was about the mathematics**: every
 reviewer re-ran `docs/measure_j_damiani.py` and reported each table
 reproducing cell for cell, and round 4 re-ran the full suite, the
@@ -1103,19 +1244,28 @@ to take the smaller scope:
 
 ## §F1 suite output
 
+All five commands below were re-run in the RECEIPT session, after the
+Gate E row was recorded and the test module edited.
+
 ```
 $ python -m pytest tests/test_j_damiani.py -q
-191 passed
+192 passed
 
 $ python docs/measure_j_damiani_cpu.py
 numpy 1.26.4
 NPY_DISABLE_CPU_FEATURES = 'AVX512F AVX512_SKX AVX2 FMA3'
 dispatchable features still enabled: ['SSSE3', 'SSE41', 'POPCNT', 'SSE42',
  'AVX', 'F16C', 'AVX512CD', 'AVX512_CLX', 'AVX512_CNL', 'AVX512_ICL']
-191 passed
+192 passed
 ```
 
 ```
+$ python -m pytest tests/test_readme_counts.py tests/test_wiring_accessors.py -q
+73 passed
+
+$ python -m pytest tests/test_ml_companions.py tests/test_readme_counts.py tests/test_altport2_ports.py -q
+39 passed, 3 skipped
+
 $ python -m pytest tests/test_wiring_accessors.py tests/test_altport2_ports.py -q
 1 failed, 85 passed, 3 skipped
 E  AssertionError: Category total 341, expected 344
@@ -1123,15 +1273,14 @@ E  AssertionError: Category total 341, expected 344
 
 ```
 $ python -m pytest -q
-3 failed, 8936 passed, 85 skipped in 229.49s (0:03:49)
+3 failed, 8944 passed, 85 skipped in 229.29s (0:03:49)
 ```
 
-(the last of three full-suite runs this session, made after every edit
-above; the counts were identical in the previous one at 251.99s, the
-elapsed time being a timing figure and not a claim)
+(the porting session's run of the same command read 3 failed, 8,936
+passed, 85 skipped; the elapsed time is a timing figure and not a claim)
 
-The three failures are `dev`'s clean-checkout failures and `j_damiani` is
-the cause of none of them beyond being named in the third:
+The three failures are `dev`'s clean-checkout failures and `j_damiani`
+is the cause of none of them, nor is it named in any of them any more:
 
 * `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
   — the untracked `docs/pine/` citations, recorded in `CLAUDE.md`'s
@@ -1140,9 +1289,9 @@ the cause of none of them beyond being named in the third:
   — needs the sibling `../AlternativeRepos` checkout, which this
   worktree does not have;
 * `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-  — the owed Gate E rows, which now read
+  — the owed Gate E rows, which in the porting session read
   `['arch_lm', 'diff2_acf1', 'edge', 'firstzero_ac', 'halflife',
-  'j_damiani', 'lumpiness', 'mtd_ret']`. That is this port's one
-  expected failure: CI into `dev` sets `GATE_E_PENDING_OK=1` and turns
-  it into a skip whose reason starts "Gate E owed", and the receipt
-  session records the row.
+  'j_damiani', 'lumpiness', 'mtd_ret']` and now read the same list
+  **without `j_damiani`**: seven other indicators, none of them this
+  port's. (CI into `dev` sets `GATE_E_PENDING_OK=1` and turns that into
+  a skip whose reason starts "Gate E owed".)
