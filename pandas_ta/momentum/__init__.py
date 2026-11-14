@@ -65,6 +65,7 @@ from .rsi import rsi
 from .rsi_divergence import rsi_divergence
 from .rsx import rsx
 from .rvgi import rvgi
+from .sk_fcb_pos import sk_fcb_pos
 from .slope import slope
 from .smi import smi
 from .squeeze import squeeze
