@@ -37,6 +37,7 @@ from .ts_kurt_60 import ts_kurt_60
 from .ts_medskew_20 import ts_medskew_20
 from .ts_peaks_20 import ts_peaks_20
 from .ts_perment_20 import ts_perment_20
+from .ts_q05_60 import ts_q05_60
 from .variance import variance
 from .zscore import zscore
 from .rolling_sum import rolling_sum
