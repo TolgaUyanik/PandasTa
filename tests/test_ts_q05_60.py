@@ -103,11 +103,14 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    each of nine frames with IDENTICAL masks, parting company only where a
    guard fires.
 
-8. **That Gate E is still owed.** `test_the_gate_e_row_is_owed` asserts
-   `docs/gate_e_ledger.csv` has NO row for this indicator, which is the
-   receipt session's cue: the launcher runs Gate E after this session and a
-   later session records the row and replaces that test with one pinning
-   the row's identity.
+8. **Which Gate E run the ledger row came from.** Gate E ran on this module
+   as `is101-ts_q05_60-81f0696c` (measured 2026-11-14): pooled max |rho|
+   **0.6455** against `natr` (compute_all, n = 393,509), per-frame max
+   median **0.6131** over 89 frames, 0 of 89 frames at or above 0.90 (and 0
+   above 0.80) -- **SHIP**. The arithmetic of that row is
+   `tests/test_gate_e_ledger.py`'s job; what this file pins is the row's
+   identity, not the measurement. `docs/TsQ0560Measured.md` §E carries the
+   result in full.
 
 Numbers come from `docs/measure_ts_q05_60.py`; the receipt is
 `docs/TsQ0560Measured.md`.
@@ -1232,24 +1235,36 @@ def test_one_bar_moves_exactly_length_bars():
 # ----------------------------------------------------------- the Gate E row
 
 
-def test_the_gate_e_row_is_owed():
-    """Gate E is run by the issue-solver launcher AFTER this session, so
-    `docs/gate_e_ledger.csv` must have NO row for this indicator yet. That
-    makes `tests/test_gate_e_ledger.py::
-    test_every_indicator_that_needs_a_row_has_one` fail locally, which is
-    expected and is what CI's `GATE_E_PENDING_OK=1` turns into a skip.
+def test_the_gate_e_row_is_this_ports_own_measurement():
+    """The ledger row for `ts_q05_60` must come from the run on THIS module,
+    `is101-ts_q05_60-81f0696c` (measured 2026-11-14), and NOT from the
+    screen of 2026-10-24, which measured the prototype. The two agree to
+    every printed digit -- pooled 0.6455 against `natr` at n = 393,509,
+    per-frame max median 0.6131 -- which is exactly why the identity of the
+    row needs pinning: `tests/test_gate_e_ledger.py` re-derives a row's
+    `module_sha1` and output fingerprint from the tree and checks its
+    verdict arithmetic, but it cannot see WHOSE measurement a row came from.
 
-    ⚠ This test is the receipt session's CUE: it fails the moment the row
-    is recorded, and must then be replaced by one pinning the row's
-    IDENTITY (its `run`, module and column), the way `ts_imq_20` and
-    `ts_cross_mean_20` did. `docs/TsQ0560Measured.md` §E carries the
-    pending note."""
+    This test replaced `test_the_gate_e_row_is_owed`, which asserted the row
+    was ABSENT and so failed the moment the receipt session recorded it."""
     import csv
     from pathlib import Path
     ledger = Path(__file__).resolve().parents[1] / "docs" / "gate_e_ledger.csv"
     rows = list(csv.DictReader(ledger.open(encoding="utf-8")))
     assert rows, "the ledger should not be empty"
-    assert [r for r in rows if r["indicator"] == "ts_q05_60"] == []
+    rows = [r for r in rows if r["indicator"] == "ts_q05_60"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["module"] == "pandas_ta.statistics.ts_q05_60"
+    assert row["column"] == f"TS_Q05_{LENGTH}"
+    assert row["run"] == "is101-ts_q05_60-81f0696c"
+    assert row["verdict"] == "SHIP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+    assert 0 < int(row["non_nan"]) < int(row["pooled_bars"])
 
 
 # ------------------------------------------------------ wiring and arguments
