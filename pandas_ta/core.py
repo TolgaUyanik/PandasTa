@@ -2991,6 +2991,14 @@ class AnalysisIndicators(BasePandasObject):
         result = rvi(high=high, low=low, close=close, length=length, scalar=scalar, refined=refined, thirds=thirds, mamode=mamode, drift=drift, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def sk_fcb_width(self, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = sk_fcb_width(high=high, low=low, close=close, offset=offset,
+                              **kwargs)
+        return self._post_process(result, **kwargs)
+
     def thermo(self, long=None, short= None, length=None, mamode=None, drift=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))

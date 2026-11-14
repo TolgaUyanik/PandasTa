@@ -28,6 +28,7 @@ from .natr import natr
 from .rogers_satchell import rogers_satchell
 from .roll_spread import roll_spread
 from .rvi import rvi
+from .sk_fcb_width import sk_fcb_width
 from .tf_median_absdiff_20 import tf_median_absdiff_20
 from .thermo import thermo
 from .true_range import true_range
