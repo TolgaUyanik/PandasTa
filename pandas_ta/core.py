@@ -1387,6 +1387,13 @@ class AnalysisIndicators(BasePandasObject):
                             **kwargs)
         return self._post_process(result, **kwargs)
 
+    def sk_rocwb_ratio(self, length=None, band_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = sk_rocwb_ratio(close=close, length=length,
+                                band_length=band_length, offset=offset,
+                                **kwargs)
+        return self._post_process(result, **kwargs)
+
     def slope(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = slope(close=close, length=length, offset=offset, **kwargs)
