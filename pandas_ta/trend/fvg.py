@@ -134,7 +134,7 @@ Calculation:
     i.e. by tick rounding, not by the structure the indicator names.
 
     Measured after the repair, on 89 BIST_100 frames / 408,253 daily bars
-    (`Backtesting/scripts/analysis/measure_fvg_overlap_full.py`):
+    (`Backtesting/scripts/analysis/measure_fvg_overlap_full.py` (never committed, Backtesting #107; rebuilt harness: `gate_e_overlap.py`)):
 
       Gate C  IN_FVG_BULL 90,506 fires (rate 0.2217), IN_FVG_BEAR 81,021
               (0.1985); 89/89 frames fire, 0 saturated. FVG_BULL/FVG_BEAR are

@@ -3,7 +3,7 @@ from pandas_ta.overlap import sma
 from pandas_ta.utils import get_offset, verify_series
 
 
-def dpo(close, length=None, centered=True, offset=None, **kwargs):
+def dpo(close, length=None, centered=False, offset=None, **kwargs):
     """Indicator: Detrend Price Oscillator (DPO)"""
     # Validate Arguments
     length = int(length) if length and length > 0 else 20
@@ -50,18 +50,26 @@ Sources:
 
 Calculation:
     Default Inputs:
-        length=20, centered=True
+        length=20, centered=False
     SMA = Simple Moving Average
     t = int(0.5 * length) + 1
 
-    DPO = close.shift(t) - SMA(close, length)
+    DPO = close - SMA(close, length).shift(t)
     if centered:
-        DPO = DPO.shift(-t)
+        DPO = (close.shift(t) - SMA(close, length)).shift(-t)
+
+Causality:
+    centered=False (the default) is causal: bar T reads only bars <= T.
+    centered=True compares close[T] with the SMA ending at T + t, so it
+    reads t bars of the FUTURE and its last t values are NaN. It is the
+    classic chart form; never feed it to a model. Upstream pandas-ta
+    defaults to centered=True -- this fork flipped it (PandasTa issue #5).
 
 Args:
     close (pd.Series): Series of 'close's
     length (int): It's period. Default: 1
-    centered (bool): Shift the dpo back by int(0.5 * length) + 1. Default: True
+    centered (bool): Shift the dpo back by int(0.5 * length) + 1. Reads
+        the future. Default: False
     offset (int): How many periods to offset the result. Default: 0
 
 Kwargs:

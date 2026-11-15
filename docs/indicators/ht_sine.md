@@ -11,7 +11,7 @@
 > a run recorded in `_facts.json`. **Nothing here was hand-asserted.** Fields no measurement
 > covers carry the literal stub token instead of a plausible value.
 >
-> **Gate coverage:** measurements naming this indicator's columns are recorded in `docs/TalibPortsMeasured.md` (§7) — that match does not distinguish a ported column from a Gate E comparator, so read the campaign doc.
+> **Gate coverage:** a Gate E run exists (`../Backtesting/backtest_results/issue-107-gatee/g3_ht_sine/overlap_max.csv`) but its CSVs were not opened by this generator: §7–§9 are stubs.
 >
 > **Owed by a human, and marked as such below:** §1 (what it measures), §3 (which source this
 > was ported from), §4 (formula as computed here), §6, §11, and the *effective defaults* row.
@@ -27,7 +27,7 @@
 | Params (**declared signature**) | — |
 | Params (**effective defaults**) | STUB: not measured — fill from pandas_ta/cycles/ht_sine.py |
 | Warm-up (dictionary probe) | 63 |
-| Engine wiring | **not reached by the engine** — absent from `INDICATOR_SPECS`, the import aliases and the `ta.ht_sine(` scan of `indicator_engine.py` / `speedy_indicators.py` (INDREF-2 §5b). Call sites outside those two modules are a separate question: no script under `../Backtesting/scripts/analysis/` calls it either |
+| Engine wiring | no literal `ta.ht_sine(` call site; a `getattr`/alias dispatch is not visible to this scan |
 | Provenance | STUB: not measured — fill from pandas_ta/cycles/ht_sine.py |
 | Status | module first appears in this repo's history 2026-09-09 (`git log --diff-filter=A -- pandas_ta/cycles/ht_sine.py`) |
 
@@ -49,7 +49,7 @@ Hilbert Transform - SineWave (HT_SINE)
 
 Machine-filled from the live probe in `docs/gen_indicator_dictionary.py` (synthetic 600-bar
 OHLCV frame, computed twice with price ×137). The register verdict is joined on column name
-from `../Backtesting/docs/knowledgebase/IndicatorMLRegister.md` and copied verbatim; "no row"
+from `../Backtesting/Backtesting/docs/IndicatorMLRegister.md` and copied verbatim; "no row"
 means the engine's production config does not emit a column of that name, which is a fact
 about the engine, not about this indicator.
 
@@ -72,7 +72,7 @@ and were alive on real prices (`CLAUDE.md`, FVGDEAD).
 | | |
 |---|---|
 | Source | STUB: not measured — fill from pandas_ta/cycles/ht_sine.py |
-| Module length | 66 newline-terminated lines, 2187 bytes (`grep -c '' pandas_ta/cycles/ht_sine.py`) |
+| Module length | 66 newline-terminated lines, 2253 bytes (`grep -c '' pandas_ta/cycles/ht_sine.py`) |
 | Version / licence | STUB: not measured — fill from pandas_ta/cycles/ht_sine.py |
 | TA-Lib equivalent | STUB: not measured — fill from docs/TalibPortsMeasured.md |
 | Gate A anchor | STUB: not measured — fill from pandas_ta/cycles/ht_sine.py |
@@ -110,44 +110,37 @@ STUB: not measured — fill from tests/test_ht_sine.py
 
 ## 7. Overlap (Gate E)
 
-**A batch campaign document carries measurements naming this indicator's columns.**
-There is no `../Backtesting/scripts/analysis/measure_ht_sine_overlap_full.py`, because the campaigns gated many
-indicators in one run rather than one harness each:
+A Gate E run exists: `../Backtesting/backtest_results/issue-107-gatee/g3_ht_sine/overlap_max.csv`. Its CSVs live under the parent repo's gitignored
+`backtest_results/`, were not opened by this generator, and are not quoted here — quoting a
+ρ whose artifact you did not open is the exact defect these pages exist to prevent.
 
-- **TALIB-1** — per-column Gate A/C/D/E record in [`docs/TalibPortsMeasured.md`](../TalibPortsMeasured.md).
+STUB: not measured — fill from ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.cycles.ht_sine --name ht_sine
 
-⚠ **This match is by column name, and it does not distinguish a column the campaign
-*ported* from one it used as a Gate E *comparator*.** Both appear in the document.
-Open it to see which this indicator is — that is a two-line read and this generator
-will not guess it for you. The ρ values, sample sizes and ship/revert verdicts are
-there; they are deliberately not re-quoted here, because quoting a ρ whose artifact
-you did not open is the exact defect these pages exist to prevent.
-
-Ship line: ρ ≈ 0.9 → revert · 0.76–0.80 → ship with disclosure · below 0.76 → ship.
+Bands (`r3-perframe-0.90`): STRUCK if pooled |ρ| ≥ 0.90 or the per-frame median of any top-5 comparator ≥ 0.90 · DISCLOSE_GAP 0.80–0.90 · DISCLOSE 0.76–0.80 · SHIP below 0.76.
 
 ## 8. Reachability (Gate C)
 
 Per-frame firing counts against `BeamMiner(min_support=30)`
-(`../Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below
+(`../Backtesting/Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below
 `min_support` is a PARTIAL, not a PASS.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_ht_sine_overlap_full.py
+STUB: not measured — no harness yet (the Gate E harness measures Gate E only)
 
 ## 9. BIST specifics
 
 Behaviour on the DI-5 / DI-5b contaminated frames (`MGROS.IS`, `ARCLK.IS`) against clean
 controls, and the SHAPE of any failure — suppression, fabrication, or a pinned value.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_ht_sine_overlap_full.py
+STUB: not measured — no harness yet (the Gate E harness measures Gate E only)
 
 ## 10. Mining track record
 
 Column-name stems (the parameter tail is what a mined rule varies, so the grep drops it):
 
 ```sh
-grep -c 'HT_LEADSINE' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'HT_LEADSINE' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'HT_LEADSINE' ../Backtesting/backtest_results/
-grep -c 'HT_SINE' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'HT_SINE' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'HT_SINE' ../Backtesting/backtest_results/
 ```
 
@@ -176,9 +169,9 @@ STUB: not measured — fill from pandas_ta/cycles/ht_sine.py
 |---|---|---|
 | A Correctness | STUB: not measured — fill from pandas_ta/cycles/ht_sine.py | source not identified yet — see §3 |
 | B Causality | no recorded exception | §5: `LEAK_RULES` does not list this indicator; no mutant test recorded |
-| C Reachability | STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_ht_sine_overlap_full.py | §8 |
+| C Reachability | STUB: not measured — no harness yet (the Gate E harness measures Gate E only) | §8 |
 | D Scale-free | probe tag only, see §2 | `docs/gen_indicator_dictionary.py` ×137 ratio |
-| E Attribution | STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_ht_sine_overlap_full.py | §7 |
+| E Attribution | STUB: not measured — fill from ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.cycles.ht_sine --name ht_sine | §7 |
 | F Suites | no dedicated test module; the recorded full-suite run was 2983 passed / 0 failed / 0 error / 23 skipped, pytest exit 0, 2026-09-10 | §12 row above, `docs/indicators/_facts.json` |
 
 ---
@@ -194,9 +187,9 @@ changes, or deletes a number here without saying where it came from.
 
 | metric | n | @ artifact / provenance class |
 |---|---|---|
-| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=3 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/docs/knowledgebase/IndicatorMLRegister.md |
+| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=3 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/Backtesting/docs/IndicatorMLRegister.md |
 | §6#P — the probe's scale ratio | n=1 | @ docs/gen_indicator_dictionary.py — ×137 probe ratio, live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 |
-| §7#P — overlap ship line | n=4 | @ ../Backtesting/scripts/analysis/measure_ht_sine_overlap_full.py |
+| §7#P — overlap ship line | n=8 | @ ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.cycles.ht_sine --name ht_sine |
 
 ⚠ Parsed by `tests/test_indref_pages.py`. Every group holding a number appears above with a
 matching `n=`; adding a table, adding a row, or adding a number to a paragraph without

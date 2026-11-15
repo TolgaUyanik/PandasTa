@@ -99,7 +99,7 @@ took `df.ta.strategy()` down earlier in this batch.
 
 Gate E itself is NOT pinned here: overlap against the parent engine's
 485-column production output cannot run inside a unit test. It lives in
-`../Backtesting/scripts/analysis/measure_talib1_overlap_full.py` and its CSVs,
+`../Backtesting/scripts/analysis/measure_talib1_overlap_full.py` (never committed, Backtesting #107; rebuilt harness: `gate_e_overlap.py`) and its CSVs,
 and the verdicts are tabulated in `docs/TalibPortsMeasured.md`.
 """
 import glob

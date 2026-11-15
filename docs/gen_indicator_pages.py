@@ -83,6 +83,9 @@ ROOT = HERE.parent
 PAGES = HERE / "indicators"
 FACTS = PAGES / "_facts.json"
 PARENT = ROOT.parent / "Backtesting"
+# The parent repo's code moved one level down on 2026-09-16; `backtest_results/`
+# stayed at the repo root.
+CODE = PARENT / "Backtesting"
 
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
@@ -97,14 +100,37 @@ import pandas_ta as ta  # noqa: E402
 PROTECTED = {"tvstop"}
 
 STUB = "STUB: not measured — fill from %s"
+NO_HARNESS = "STUB: not measured — no harness yet (the Gate E harness measures Gate E only)"
 
-REGISTER = PARENT / "docs" / "knowledgebase" / "IndicatorMLRegister.md"
-STRATEGY_MASTER = PARENT / "datastore" / "source" / "StrategyMaster.csv"
+REGISTER = CODE / "docs" / "IndicatorMLRegister.md"
+STRATEGY_MASTER = CODE / "datastore" / "source" / "StrategyMaster.csv"
 BACKTEST_RESULTS = PARENT / "backtest_results"
-IE = PARENT / "backtesting_engine" / "indicator_engine.py"
-SI = PARENT / "backtesting_engine" / "speedy_indicators.py"
-ANALYSIS = PARENT / "scripts" / "analysis"
-INDREF2 = PARENT / "docs" / "indicators" / "_indref2_facts.json"
+IE = CODE / "backtesting_engine" / "indicator_engine.py"
+SI = CODE / "backtesting_engine" / "speedy_indicators.py"
+ANALYSIS = CODE / "scripts" / "analysis"
+# Exists nowhere under D:\AwakenAnalytics (2026-10-23); SWEPT_SET() tolerates it absent.
+INDREF2 = CODE / "docs" / "indicators" / "_indref2_facts.json"
+GATE_E = "../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py"
+
+
+def gate_e_runs(roots):
+    """{indicator name: [run dirs]} from <root>/*/meta.json with mode == 'run'.
+
+    Keyed on the module each `gate_e_overlap.py run` recorded, not on the run's
+    free `--name`: one module can need two runs (fvg: `g3_fvg` + `g3_fvg_in`).
+    `replay` runs are not per-indicator and do not count.
+    """
+    out = {}
+    for root in roots:
+        for p in sorted(root.glob("*/meta.json")):
+            m = json.loads(p.read_text(encoding="utf8"))
+            if m.get("mode") == "run":
+                out.setdefault(m["module"].rsplit(".", 1)[-1], []).append(p.parent)
+    return out
+
+
+# #107's runs are archived to `issue-107-gatee/` at issue close, hence two roots.
+GATE_E_RUNS = gate_e_runs([BACKTEST_RESULTS / "gatee", BACKTEST_RESULTS / "issue-107-gatee"])
 
 # Campaign documents: batch harnesses that measured many indicators at once.
 # The old `measure_<name>_overlap_full.py` filename test cannot see these, so
@@ -560,9 +586,11 @@ def render(name, meta, rec, facts, reg, guard):
     A("# `%s` — %s" % (name, esc(title)))
     A("")
 
-    harness = ANALYSIS / ("measure_%s_overlap_full.py" % name)
-    harness_rel = "../Backtesting/scripts/analysis/measure_%s_overlap_full.py" % name
-    has_harness = harness.is_file()
+    gate_e = GATE_E_RUNS.get(name, [])
+    has_harness = bool(gate_e)
+    gate_e_cmd = "%s run --module pandas_ta.%s.%s --name %s" % (GATE_E, cat, name, name)
+    gate_e_dirs = ", ".join("`../%s/overlap_max.csv`" % p.relative_to(PARENT.parent).as_posix()
+                            for p in gate_e)
     # ONE source of truth for campaign coverage.  The banner used to run its
     # own filename-only test while §7 ran CAMPAIGN_FOR, so on every page where
     # a campaign was found the two cells contradicted each other -- the banner
@@ -570,8 +598,8 @@ def render(name, meta, rec, facts, reg, guard):
     # unmeasured absolute this fix exists to remove.
     campaigns = CAMPAIGN_FOR(name, [c.get("name") for c in cols])
     if has_harness:
-        gate_cov = ("a dedicated overlap harness exists (`%s`) but its CSVs were not "
-                    "opened by this generator: §7–§9 are stubs naming it" % harness_rel)
+        gate_cov = ("a Gate E run exists (%s) but its CSVs were not opened by this "
+                    "generator: §7–§9 are stubs" % gate_e_dirs)
     elif campaigns:
         gate_cov = ("measurements naming this indicator's columns are recorded in %s "
                     "(§7) — that match does not distinguish a ported column from a "
@@ -651,9 +679,9 @@ def render(name, meta, rec, facts, reg, guard):
                 "Call sites outside those two modules are a separate question: "
                 % name)
         wire += ("**%d Gate-E/analysis script(s)** under "
-                 "`../Backtesting/scripts/analysis/` do call it" % n_ge
+                 "`../Backtesting/Backtesting/scripts/analysis/` do call it" % n_ge
                  if n_ge else
-                 "no script under `../Backtesting/scripts/analysis/` calls it either")
+                 "no script under `../Backtesting/Backtesting/scripts/analysis/` calls it either")
     else:
         wire = ("no literal `ta.%s(` call site; a `getattr`/alias dispatch is "
                 "not visible to this scan" % name)
@@ -713,7 +741,7 @@ def render(name, meta, rec, facts, reg, guard):
         A("")
     A("Machine-filled from the live probe in `docs/gen_indicator_dictionary.py` (synthetic 600-bar")
     A("OHLCV frame, computed twice with price ×137). The register verdict is joined on column name")
-    A("from `../Backtesting/docs/knowledgebase/IndicatorMLRegister.md` and copied verbatim; \"no row\"")
+    A("from `../Backtesting/Backtesting/docs/IndicatorMLRegister.md` and copied verbatim; \"no row\"")
     A("means the engine's production config does not emit a column of that name, which is a fact")
     A("about the engine, not about this indicator.")
     A("")
@@ -818,17 +846,17 @@ def render(name, meta, rec, facts, reg, guard):
     A("## 7. Overlap (Gate E)")
     A("")
     if has_harness:
-        A("A harness exists at `%s`. Its CSVs live under the parent repo's gitignored" % harness_rel)
+        A("A Gate E run exists: %s. Its CSVs live under the parent repo's gitignored" % gate_e_dirs)
         A("`backtest_results/`, were not opened by this generator, and are not quoted here — quoting a")
         A("ρ whose artifact you did not open is the exact defect these pages exist to prevent.")
         A("")
-        A("%s" % (STUB % harness_rel))
+        A("%s" % (STUB % gate_e_cmd))
     else:
         camp = campaigns
         if camp:
             A("**A batch campaign document carries measurements naming this indicator's columns.**")
-            A("There is no `%s`, because the campaigns gated many" % harness_rel)
-            A("indicators in one run rather than one harness each:")
+            A("No Gate E run (`gate_e_overlap.py run`) exists for this indicator, because the")
+            A("campaigns gated many indicators in one run rather than one harness each:")
             A("")
             for doc, tag in camp:
                 A("- **%s** — per-column Gate A/C/D/E record in [`docs/%s`](../%s)."
@@ -841,29 +869,29 @@ def render(name, meta, rec, facts, reg, guard):
             A("there; they are deliberately not re-quoted here, because quoting a ρ whose artifact")
             A("you did not open is the exact defect these pages exist to prevent.")
         else:
-            A("**This generator found no campaign record for this indicator.** There is no")
-            A("`%s`, and none of the batch campaign documents" % harness_rel)
+            A("**This generator found no campaign record for this indicator.** No Gate E run")
+            A("(`gate_e_overlap.py run`) exists for this indicator, and none of the batch campaign documents")
             A("(%s) names any of this"
               % ", ".join("`docs/%s`" % d for d in sorted(CAMPAIGN_DOCS)))
             A("indicator's emitted column names. **That is what the scan tested — column names, not")
             A("prose mentions** — so it is a statement about this scan, not proof that no")
-            A("measurement exists. To start")
-            A("a campaign, copy any existing `measure_*_overlap_full.py` and grid the shipped")
-            A("columns against `IndicatorEngine(include_advanced=True).compute_all()`.")
+            A("measurement exists. To measure it, run")
+            A("`gate_e_overlap.py run --module pandas_ta.%s.%s`." % (cat, name))
             A("")
-            A("%s" % (STUB % harness_rel))
+            A("%s" % (STUB % gate_e_cmd))
     A("")
-    A("Ship line: ρ ≈ 0.9 → revert · 0.76–0.80 → ship with disclosure · below 0.76 → ship.")
+    A("Bands (`r3-perframe-0.90`): STRUCK if pooled |ρ| ≥ 0.90 or the per-frame median of any "
+      "top-5 comparator ≥ 0.90 · DISCLOSE_GAP 0.80–0.90 · DISCLOSE 0.76–0.80 · SHIP below 0.76.")
     A("")
 
     # ---- 8
     A("## 8. Reachability (Gate C)")
     A("")
     A("Per-frame firing counts against `BeamMiner(min_support=30)`")
-    A("(`../Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below")
+    A("(`../Backtesting/Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below")
     A("`min_support` is a PARTIAL, not a PASS.")
     A("")
-    A("%s" % (STUB % harness_rel))
+    A("%s" % NO_HARNESS)
     A("")
 
     # ---- 9
@@ -872,7 +900,7 @@ def render(name, meta, rec, facts, reg, guard):
     A("Behaviour on the DI-5 / DI-5b contaminated frames (`MGROS.IS`, `ARCLK.IS`) against clean")
     A("controls, and the SHAPE of any failure — suppression, fabrication, or a pinned value.")
     A("")
-    A("%s" % (STUB % harness_rel))
+    A("%s" % NO_HARNESS)
     A("")
 
     # ---- 10
@@ -884,7 +912,7 @@ def render(name, meta, rec, facts, reg, guard):
     A("Column-name stems (the parameter tail is what a mined rule varies, so the grep drops it):")
     A("")
     L.extend(fence("\n".join(
-        "grep -c '%s' ../Backtesting/datastore/source/StrategyMaster.csv\n"
+        "grep -c '%s' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv\n"
         "grep -rl --no-ignore-files '%s' ../Backtesting/backtest_results/" % (s, s)
         for s in stems), "sh"))
     A("")
@@ -952,9 +980,9 @@ def render(name, meta, rec, facts, reg, guard):
     A("| B Causality | %s | §5: `LEAK_RULES` %s this indicator; no mutant test recorded |"
       % ("documented leak" if rule else "no recorded exception",
          "lists" if rule else "does not list"))
-    A("| C Reachability | %s | §8 |" % (STUB % harness_rel))
+    A("| C Reachability | %s | §8 |" % NO_HARNESS)
     A("| D Scale-free | probe tag only, see §2 | `docs/gen_indicator_dictionary.py` ×137 ratio |")
-    A("| E Attribution | %s | §7 |" % (STUB % harness_rel))
+    A("| E Attribution | %s | §7 |" % (STUB % gate_e_cmd))
     A("| F Suites | %s | §12 row above, `docs/indicators/_facts.json` |" % gf)
     A("")
     A("---")
@@ -985,12 +1013,12 @@ def render(name, meta, rec, facts, reg, guard):
     prov = {
         "0": "@ docs/gen_indicator_dictionary.py — %s + docs/indicators/_facts.json" % LIVE,
         "2": "@ docs/gen_indicator_dictionary.py — %s — joined to "
-             "../Backtesting/docs/knowledgebase/IndicatorMLRegister.md" % LIVE,
+             "../Backtesting/Backtesting/docs/IndicatorMLRegister.md" % LIVE,
         "3": "@ %s — direct read, %s" % (mod, facts["date"]),
         "5": "@ docs/gen_indicator_dictionary.py — LEAK_RULES, %s" % LIVE,
         "6": "@ docs/gen_indicator_dictionary.py — ×137 probe ratio, %s" % LIVE,
-        "7": "@ %s" % harness_rel,
-        "10": "@ ../Backtesting/datastore/source/StrategyMaster.csv + one direct read of "
+        "7": "@ %s" % gate_e_cmd,
+        "10": "@ ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv + one direct read of "
               "../Backtesting/backtest_results/, %s" % facts["date"],
         "12": "@ DERIVED %s from the recorded full-suite pytest run in "
               "docs/indicators/_facts.json" % facts["date"],
@@ -1070,9 +1098,8 @@ def render_index(names, meta_all, recs, facts, registered, accessor, module_only
     A("A page is counted **measured** if ANY of three things is true, and the union is what the")
     A("table below counts:")
     A("")
-    A("1. a dedicated overlap harness")
-    A("   (`../Backtesting/scripts/analysis/measure_<name>_overlap_full.py`) exists for that")
-    A("   indicator name;")
+    A("1. a Gate E run exists for the indicator's module (`gate_e_overlap.py run`: a")
+    A("   `../Backtesting/backtest_results/{gatee,issue-107-gatee}/*/meta.json` with mode `run`);")
     A("2. one of the batch campaign documents in this directory's parent")
     A("   (%s) names one of the indicator's emitted column names;"
       % ", ".join("`docs/%s`" % d for d in sorted(CAMPAIGN_DOCS)))
@@ -1096,7 +1123,7 @@ def render_index(names, meta_all, recs, facts, registered, accessor, module_only
     A("")
     A("| | pages |")
     A("|---|---|")
-    A("| measured — dedicated harness, campaign-doc match, or hand-written | %d |" % len(measured))
+    A("| measured — Gate E run, campaign-doc match, or hand-written | %d |" % len(measured))
     A("| §6–§9 stubbed | %d |" % (len(names) - len(measured)))
     A("")
     A("That is **%.1f %%** of the pages carrying the stub token in §6–§9 — the number is derived here"
@@ -1106,12 +1133,12 @@ def render_index(names, meta_all, recs, facts, registered, accessor, module_only
     A("Pages in the measured column: %s."
       % ", ".join("[`%s`](%s.md)" % (n, n) for n in sorted(measured)))
     A("")
-    nh = len(sorted(ANALYSIS.glob("measure_*overlap*.py"))) if ANALYSIS.is_dir() else 0
+    nh = len(GATE_E_RUNS)
     A("**Every page's Gate A, C and E rows are stubs unless that page says otherwise.**")
-    A("`ls ../Backtesting/scripts/analysis/measure_*overlap*.py` returns **%d** harnesses (counted by" % nh)
-    A("this generator on %s) against %d pages, and most of those harnesses are batch harnesses"
+    A("**%d** indicators have a Gate E run (`backtest_results/gatee/*/meta.json`, mode `run`;" % nh)
+    A("counted by this generator; fact cache %s) against %d pages."
       % (facts["date"], len(names)))
-    A("covering a single recent port campaign. The gates were run for recent ports, not for the")
+    A("The gates were run for recent ports, not for the")
     A("upstream body of the package, and the pages say so rather than leaving an inviting blank.")
     A("")
     A("## 3. What is machine-filled")
@@ -1196,9 +1223,9 @@ def main():
     # batch campaigns (TALIB-1, ALTPORT, CANDLE-1, PINEBI-1c) gated ~30
     # indicators without ever creating a `measure_<name>_overlap_full.py`;
     # counting only the filename understated the measured set by an order of
-    # magnitude and branded fully-gated indicators as stubs.
-    own_harness = {n for n in names
-                   if (ANALYSIS / ("measure_%s_overlap_full.py" % n)).is_file()}
+    # magnitude and branded fully-gated indicators as stubs. Since #107 the
+    # per-indicator test is a recorded Gate E run, the same source the banner uses.
+    own_harness = {n for n in names if n in GATE_E_RUNS}
     by_campaign = {n for n in names
                    if CAMPAIGN_FOR(n, [c.get("name")
                                        for c in (recs[n].get("cols") or [])])}

@@ -21,6 +21,10 @@ files use it WITH and WITHOUT the library import; a name used only in importing
 files is tier 2, not core.
 
 Usage:  python docs/gen_pine_builtin_coverage.py [out.csv]
+
+Needs the FULL untracked corpus in docs/pine/. Only TradingView's `ta` library
+(`TRACKED_PINE`) is tracked (#8), so on a plain clone this refuses to run rather
+than overwrite the committed CSV from a one-file corpus.
 """
 import collections
 import csv
@@ -39,6 +43,9 @@ import pandas_ta as ta  # noqa: E402
 
 CORPUS = os.path.join(HERE, "pine")
 LIB = os.path.join(CORPUS, "RA2vGpkA-ta.pine")
+# Corpus files committed to the repo (#8; see NOTICE). Everything else in
+# docs/pine/ is untracked. tests/test_pine_coverage_csv.py reads this set.
+TRACKED_PINE = frozenset({"RA2vGpkA-ta.pine"})
 OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     HERE, "pine_builtin_coverage.csv")
 
@@ -523,6 +530,9 @@ def classify(name, clean_files, lib_files, exports):
 
 def main():
     usage, files = scan_corpus()
+    if files <= len(TRACKED_PINE):
+        sys.exit("full docs/pine corpus not present (only the tracked ta library, "
+                 "%d file(s)); refusing to overwrite the CSV" % files)
     exports = library_exports()
     print("corpus files scanned: %d" % files)
     print("library exports found in %s: %d" % (os.path.basename(LIB),

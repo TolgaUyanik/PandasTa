@@ -1,5 +1,10 @@
 # ALTPORT-1 — Gate E screen of the seven ALTPORT-0 BUILDs, before anything is written
 
+> **Note (2026-10-24, Backtesting #107):** the `measure_*` scripts this record cites were never
+> committed. The rebuilt Gate E harness is `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py`,
+> and its comparator set differs: 329 + 358 columns today vs the 485/492-column engine of 2026-09,
+> which no longer exists. The text below is left as it was run.
+
 **Under the Gate E band: 1 STRUCK · 4 ship-with-disclosure · 4 ship.**
 **Under ALTPORT-0's own applied standard, which this batch is bound by: 3 clear, 2
 conditional, 3 skipped, 1 struck.** The two standards disagree, the disagreement is the

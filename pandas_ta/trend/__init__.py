@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from .adx import adx
+from .adxr import adxr
 from .amat import amat
 from .aroon import aroon
 from .atr_push import atr_push
@@ -13,10 +14,13 @@ from .decay import decay
 from .decreasing import decreasing
 from .dpo import dpo
 from .dtdb import dtdb
+from .dx import dx
 from .equal_highs_lows import equal_highs_lows
 from .flag_breakout import flag_breakout
 from .fvg import fvg
 from .fvg_sweep_magnet import fvg_sweep_magnet
+from .g191_069 import g191_069
+from .g191_098 import g191_098
 from .halftrend import halftrend
 from .head_shoulders import head_shoulders
 from .increasing import increasing

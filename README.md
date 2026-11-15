@@ -4,10 +4,11 @@ Technical analysis indicators as a pandas extension. Fork of
 [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, extended with
 price-action / SMC indicators and oriented toward **machine-learning feature generation**.
 
-**234 indicators** registered in `Category`, across 9 categories — that is the number
+**352 indicators** registered in `Category`, across 9 categories — that is the number
 that matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two other
-counts are true of the same package and are easy to confuse with it: **242** are callable
-as `df.ta.<name>()` (`Category` plus `beta`, `hwma` and `vp`), and `drawdown` and `ma` are
+counts are true of the same package and are easy to confuse with it: **360** are callable
+as `df.ta.<name>()` (`Category` plus `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`,
+`up_and_down_volume`, `volume_delta` and `vp`), and `drawdown` and `ma` are
 importable as `ta.<name>()` without being either. All of them are in the dictionary; the
 three counts are emitted by its generator, and `tests/test_readme_counts.py` fails if this
 section drifts from the package. Every indicator returns a `Series` or `DataFrame`
@@ -73,13 +74,14 @@ Fork rules. Read before feeding any column to a model.
 ### 1. Causality is the contract
 
 Indicators added in this fork are **causal**: the value at bar `T` uses only data at `<= T`.
-Two upstream columns are not, and they are the whole exception list —
-[docs/IndicatorDictionary.md](docs/IndicatorDictionary.md#leak-watchlist) tracks them:
+One upstream column is not at default parameters —
+[docs/IndicatorDictionary.md](docs/IndicatorDictionary.md#leak-watchlist) tracks it — and one
+upstream option reads the future when you turn it on:
 
 | Column | Problem | What to do |
 |---|---|---|
 | `ichimoku` → `ICS_26` | Chikou span is `close.shift(-kijun)` — the future | drop the column, or use `ichimoku_ml` |
-| `dpo` → `DPO_20` | `centered=True` by default | pass `centered=False` |
+| `dpo` → `DPO_20` | `centered=True` reads `length // 2 + 1` bars ahead. The default here is `False` (upstream's is `True`) | leave `centered` at its default |
 
 Non-repainting is enforced elsewhere: `nadaraya_watson_envelope`, for example, weights a
 trailing window only. Ported price-action indicators state causality in their module
@@ -140,26 +142,26 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 
 **candles (5)** — `cdl_doji` `cdl_inside` `cdl_pattern` `cdl_z` `ha`
 
-**cycles (8)** — `dsp` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode`
+**cycles (9)** — `correlation_cycle` `dsp` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode`
 
-**momentum (57)** — `ao` `apo` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `cti` `dm` `er` `eri` `fisher` `imi` `inertia` `kalman_rsi` `kdj` `kst` `lrsi` `macd` `macd_area_divergence` `mom` `pfe` `pgo` `po` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsi_divergence` `rsx` `rvgi` `slope` `smi` `squeeze` `squeeze_pro` `stc` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `vwmacd` `wavetrend` `willr` `wpo`
+**momentum (87)** — `a101_007` `a101_021` `a101_023` `a101_043` `a101_046` `a101_048` `a101_053` `ao` `apo` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `dm` `er` `eri` `ewmac` `fisher` `g191_002` `g191_003` `g191_022` `g191_093` `g191_110` `g191_129` `g191_146` `g191_152` `g191_167` `g191_169` `g191_187` `gapm` `imi` `inertia` `j_acosc` `j_gator` `kalman_rsi` `kdj` `kst` `lean_momersion_20` `lrsi` `macd` `macd_area_divergence` `mom` `osap_intmom` `osap_lrrev` `osap_mrrev` `ovn_split` `pfe` `pgo` `po` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsi_divergence` `rsx` `rvgi` `sk_fcb_pos` `sk_rocwb_ratio` `slope` `smi` `squeeze` `squeeze_pro` `stc` `stc_tv` `stoch` `stochrsi` `szo` `td_seq` `trix` `trixh` `tsi` `uo` `vwmacd` `wavetrend` `willr` `wpo`
 
-**overlap (49)** — `alma` `bpress` `dema` `dema2` `ema` `ema2` `ema_align` `frama` `fwma` `hilo` `hl2` `hlc3` `hma` `iama` `ichimoku` `ichimoku_ml` `jma` `kama` `linreg` `linreg_channel` `ma_disparity` `mcgd` `midpoint` `midprice` `mmar` `nadaraya_watson_envelope` `ohlc4` `pwma` `rainbow` `rma` `rma2` `sinwma` `sma` `ssf` `supertrend` `supertrend2` `swma` `t3` `t3_tv` `tema` `tema2` `trima` `vidya` `vwap` `vwma` `wcp` `wilder_rma` `wma` `zlma`
+**overlap (50)** — `alma` `bpress` `dema` `dema2` `ema` `ema2` `ema_align` `frama` `fwma` `hilo` `hl2` `hlc3` `hma` `iama` `ichimoku` `ichimoku_ml` `jma` `kalman_trend` `kama` `linreg` `linreg_channel` `ma_disparity` `mcgd` `midpoint` `midprice` `mmar` `nadaraya_watson_envelope` `ohlc4` `pwma` `rainbow` `rma` `rma2` `sinwma` `sma` `ssf` `supertrend` `supertrend2` `swma` `t3` `t3_tv` `tema` `tema2` `trima` `vidya` `vwap` `vwma` `wcp` `wilder_rma` `wma` `zlma`
 
-**performance (3)** — `log_return` `percent_return` `trend_return` (`cumulative=True` for cumulative)
+**performance (6)** — `log_return` `max_return` `mtd_ret` `percent_return` `seas` `trend_return` (`cumulative=True` for cumulative)
 
-**statistics (12)** — `covariance` `entropy` `kurtosis` `mad` `median` `normalize` `quantile` `rolling_sum` `skew` `stdev` `variance` `zscore`
+**statistics (54)** — `arch_lm` `covariance` `cusum` `diff2_acf1` `entlz` `entropy` `ffd` `firstzero_ac` `g191_026` `g191_044` `g191_165` `g191_189` `g191_190` `halflife` `ie_asym` `kpss` `kurtosis` `lean_hurst_100` `lean_tdd_20` `lot_zeroret_60` `lumpiness` `mad` `median` `median_ad_hl2` `normalize` `osap_retskew_21` `quantile` `rank` `rolling_sum` `skew` `stdev` `tf_centroid_20` `tf_dfa_100` `tf_spec_entropy_64` `tf_zero_cross_20` `trend_scan` `ts_above_mean_20` `ts_ac1_60` `ts_aggac_60` `ts_binent_20` `ts_c3_20` `ts_cid_ce_20` `ts_cross_mean_20` `ts_energy_last_20` `ts_imq_20` `ts_kurt_60` `ts_medskew_20` `ts_peaks_20` `ts_perment_20` `ts_q05_60` `ts_reoccur_20` `ts_strike_20` `variance` `zscore`
 
-**trend (58)** — `adx` `amat` `aroon` `atr_push` `band_cross_retest` `bdi4kewl` `bos` `choch` `chop` `cksp` `decay` `decreasing` `dpo` `dtdb` `equal_highs_lows` `flag_breakout` `fvg` `fvg_sweep_magnet` `halftrend` `head_shoulders` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `pmax` `priorday_fib` `priormonth_range` `psar` `qstick` `rejection_blocks` `renko_trend` `ribbon_concordance` `rounding_cup` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `triple_top_bottom` `tsignals` `ttm_trend` `tvstop` `vhf` `volume_sr_zones` `vortex` `vstop` `vstop2` `xsignals` `zigzag` `zigzag_fib`
+**trend (62)** — `adx` `adxr` `amat` `aroon` `atr_push` `band_cross_retest` `bdi4kewl` `bos` `choch` `chop` `cksp` `decay` `decreasing` `dpo` `dtdb` `dx` `equal_highs_lows` `flag_breakout` `fvg` `fvg_sweep_magnet` `g191_069` `g191_098` `halftrend` `head_shoulders` `increasing` `inverse_fvg` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `pmax` `priorday_fib` `priormonth_range` `psar` `qstick` `rejection_blocks` `renko_trend` `ribbon_concordance` `rounding_cup` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `swing_equilibrium` `triangle_wedge` `triple_top_bottom` `tsignals` `ttm_trend` `tvstop` `vhf` `volume_sr_zones` `vortex` `vstop` `vstop2` `xsignals` `zigzag` `zigzag_fib`
 
-**volatility (19)** — `aberration` `accbands` `atr` `atr2` `atr_ma_multiple` `bbands` `cvi` `donchian` `har_park` `hwc` `kc` `massi` `natr` `pdist` `range_profile` `rvi` `thermo` `true_range` `ui`
+**volatility (37)** — `aberration` `accbands` `atr` `atr2` `atr_ma_multiple` `bbands` `corwin_schultz` `cvi` `donchian` `edge` `g191_023` `g191_109` `g191_158` `g191_160` `g191_174` `g191_188` `garman_klass` `har_park` `hwc` `j_damiani` `kc` `massi` `natr` `pdist` `range_compress_run` `range_profile` `rogers_satchell` `roll_spread` `rvi` `sk_fcb_width` `tf_median_absdiff_20` `thermo` `true_range` `ui` `volvol` `wvma` `yang_zhang`
 
-**volume (23)** — `ad` `adosc` `aobv` `avwap_z` `bw_mfi` `cmf` `efi` `eom` `kvo` `mfi` `nvi` `obv` `pocket_pivot` `pvi` `pvol` `pvr` `pvt` `tod_profile` `tri_dir_pressure` `vfi` `vol_delta` `vzo` `weis_wave`
+**volume (42)** — `a101_026` `a101_035` `a101_058` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `demand` `efi` `eom` `g191_040` `g191_043` `g191_076` `g191_080` `g191_111` `g191_144` `g191_145` `g191_191` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `osap_voltrend_60` `pocket_pivot` `pvcorr` `pvi` `pvol` `pvr` `pvt` `tod_profile` `tri_dir_pressure` `vfi` `vol_delta` `vol_sign_rev` `volcv` `vsumd` `vzo` `weis_wave`
 
 Present but outside `Category`, so skipped by `df.ta.strategy()`: `beta`, `drawdown`,
 `hwma`, `vp`, `ma` (moving-average selector — `help(ta.ma)`), and the two lower-timeframe
-functions `up_and_down_volume` / `volume_delta`, and the four TA-Lib ports
-`beta`, `ht_trendline`, `mama` and `sarext`. `beta`, `hwma`, `vp`,
+functions `up_and_down_volume` / `volume_delta`, and the three TA-Lib ports
+`ht_trendline`, `mama` and `sarext`. `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `vp`,
 `up_and_down_volume` and `volume_delta` are reachable as `df.ta.<name>()`; `drawdown` and
 `ma` only as `ta.drawdown()` / `ta.ma()`. `beta` is a TALIB-1 port and needs a BENCHMARK
 series a single-frame sweep cannot supply, which is the same reason as the two volume
@@ -224,7 +226,7 @@ had been driven by tick rounding: a zone was evicted on the bar that created it,
 survived only when the close tied the bar's extreme. They now fire at **22.17% / 19.85%**
 over 89 BIST_100 frames and 408,253 daily bars, with Gates C/D/E cleared (max |ρ| 0.6390 /
 0.5962, under the 0.76 ship line). Evidence:
-`../Backtesting/scripts/analysis/measure_fvg_overlap_full.py` and its four CSVs.
+`../Backtesting/scripts/analysis/measure_fvg_overlap_full.py` (never committed, Backtesting #107; rebuilt harness: `gate_e_overlap.py`) and its four CSVs.
 
 ⚠ The **live trading container** still runs an unrepaired private copy of the same loop
 (`FVGENG-2`, tracked in the Backtesting repo), so research and live currently compute different `IN_FVG_*`

@@ -155,12 +155,12 @@ known-leak flag, and the pytest pass count in the §12 ledger's Gate F row.
 
 | section | source of truth | how |
 |---|---|---|
-| §2 register verdict column | `../Backtesting/docs/knowledgebase/IndicatorMLRegister.md` | join on column name; copy the verdict **verbatim** |
+| §2 register verdict column | `../Backtesting/Backtesting/docs/IndicatorMLRegister.md` | join on column name; copy the verdict **verbatim** |
 | §3 provenance (file, line count, licence, Pine version) | `docs/pine/<id>-*.pine` + the module docstring | `wc -l` and `grep -c ''` the file, `grep '@version'`, `grep -i 'license\|©'` |
-| §7 overlap ρ / n | `../Backtesting/scripts/analysis/measure_<name>_overlap_full.py` output CSVs | parse `<name>_overlap_*.csv`; if absent, quote the family doc / register and say so |
-| §8 reachability counts | `<name>_reachability_*.csv` from the same harness | same |
-| §9 BIST contamination | `<name>_contamination_*.csv` (`--stage 3`) | same |
-| §10 mining track record | `../Backtesting/datastore/source/StrategyMaster.csv` + `backtest_results/` | `grep -c '<PREFIX>_' …StrategyMaster.csv` and `grep -rl --no-ignore-files '<PREFIX>_' …/backtest_results/` — **`--no-ignore-files` is mandatory**, the default `grep` there honours `.gitignore` |
+| §7 overlap ρ / n | `../Backtesting/backtest_results/gatee/<name>/overlap_max.csv` + `top25.csv` (written by `gate_e_overlap.py run`) | parse them; if absent, quote the family doc / register and say so |
+| §8 reachability counts | no harness yet: the Gate E harness does not write reachability counts | say so |
+| §9 BIST contamination | no harness yet: the Gate E harness does not write contamination checks | say so |
+| §10 mining track record | `../Backtesting/Backtesting/datastore/source/StrategyMaster.csv` + `backtest_results/` | `grep -c '<PREFIX>_' …StrategyMaster.csv` and `grep -rl --no-ignore-files '<PREFIX>_' …/backtest_results/` — **`--no-ignore-files` is mandatory**, the default `grep` there honours `.gitignore` |
 | §12 ledger, Gate F | `python -m pytest tests/test_<name>.py -q` | run it, quote the pass count and date |
 
 **Needs a human paragraph — do not attempt to generate:**
@@ -179,11 +179,9 @@ known-leak flag, and the pytest pass count in the §12 ledger's Gate F row.
   screen separates tainted frames from clean ones.
 - **§11 Improvement ideas.**
 
-**A page for an indicator with no measurement campaign** — the large majority: `ls
-../Backtesting/scripts/analysis/measure_*overlap*.py | wc -l` returns **16** harnesses (re-counted
-2026-09-10 by `docs/gen_indicator_pages.py`; it was 12 on 2026-09-07) against 233 generated pages,
-and most harnesses cover a batch rather than one indicator — only `dtdb`, `fvg` and `tvstop` have a
-harness named for them —
+**A page for an indicator with no measurement campaign** — the large majority: the generator counts
+the Gate E runs (`../Backtesting/backtest_results/{gatee,issue-107-gatee}/*/meta.json`, mode `run`)
+and prints the number in `README.md`; it is far below the page count —
 is still worth generating: header + §2 + §3 + §10 are all
 machine-fillable, and §5–§9 become explicit stubs naming the script that would fill them. Say so at
 the top of the page rather than letting the reader assume the gates were run.
@@ -288,7 +286,7 @@ distribution proving it is not a pooling artifact, and a MECHANISM paragraph.>
 |---|---|---|---|
 | `<COL>` | <±0.xxxxxx> | `<comparator>` | <n> |
 
-Ship line: ρ ≈ 0.9 → revert · 0.76–0.80 → ship with disclosure · below 0.76 → ship.
+Bands (`r3-perframe-0.90`): STRUCK if pooled |ρ| ≥ 0.90 or the per-frame median of any top-5 comparator ≥ 0.90 · DISCLOSE_GAP 0.80–0.90 · DISCLOSE 0.76–0.80 · SHIP below 0.76.
 
 ### 7.x ⚠ Artifact availability — checked <date>
 
@@ -296,27 +294,26 @@ Ship line: ρ ≈ 0.9 → revert · 0.76–0.80 → ship with disclosure · belo
 are quoting and give the re-run stages. Do NOT silently re-quote a number whose artifact you did not
 open.>
 
-Stub form: `STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_<name>_overlap_full.py`
-(no overlap campaign has been run for this indicator; to start one, copy any existing
-`measure_*_overlap_full.py` and grid against `IndicatorEngine(include_advanced=True).compute_all()`).
+Stub form: `STUB: not measured — fill from ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.<category>.<name> --name <name>`
+(no Gate E run exists for this indicator; that command is the run).
 
 ## 8. Reachability (Gate C)
 
 <Per-frame counts against `BeamMiner(min_support=30)`
-(`../Backtesting/backtesting_engine/contract_miner.py`). Report populated, non-zero pooled, per-frame
+(`../Backtesting/Backtesting/backtesting_engine/contract_miner.py`). Report populated, non-zero pooled, per-frame
 min/median/max, frames below min_support, frames with none. A pooled pass with most frames below
 min_support is a PARTIAL, not a PASS — say which.>
 
 | Column | populated | non-zero (pooled) | per-frame min / median / max | frames < 30 | frames with none |
 |---|---|---|---|---|---|
 
-Stub: `STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_<name>_overlap_full.py` (`--stage 1/2` writes `<name>_reachability_*.csv`).
+Stub: `STUB: not measured — no harness yet (the Gate E harness measures Gate E only)`. Gate C reachability has no harness today.
 
 ## 9. BIST specifics
 
 <Behaviour on the DI-5 / DI-5b contaminated frames (MGROS.IS, ARCLK.IS) against clean controls.
 Name the SHAPE of the failure — suppression, fabrication, or a pinned value — and whether any screen
-separates tainted from clean. Stub: `STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_<name>_overlap_full.py` (`--stage 3`).>
+separates tainted from clean. Stub: `STUB: not measured — no harness yet (the Gate E harness measures Gate E only)`; the DI-5 contamination check has no harness today.>
 
 ## 10. Mining track record
 

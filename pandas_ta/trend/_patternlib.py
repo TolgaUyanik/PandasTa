@@ -17,7 +17,7 @@ What lives here:
       discipline used verbatim by `atr_push`, `sd_zone_pro` and `dtdb`.
   `_pivot_stream`  -- the alternating confirmed-pivot list. This is the same
       code CANDLE-0's throwaway probe ran
-      (`../Backtesting/scripts/analysis/measure_chart_patterns_overlap_full.py`,
+      (`../Backtesting/scripts/analysis/measure_chart_patterns_overlap_full.py` (never committed, Backtesting #107; rebuilt harness: `gate_e_overlap.py`),
       `_pivot_stream`), so the shipped modules and the document that decided
       to build them share one definition of a pivot.
   `_line_at`  -- linear interpolation of a two-point boundary.

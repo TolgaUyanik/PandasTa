@@ -150,7 +150,7 @@ nowhere else. Nothing is emitted at the pattern's own pivots.
 
 Not a port. The template, tolerances and defaults are the ones CANDLE-0
 measured -- `docs/CandlePatternShortlist.md` §3 and its harness
-`../Backtesting/scripts/analysis/measure_chart_patterns_overlap_full.py`
+`../Backtesting/scripts/analysis/measure_chart_patterns_overlap_full.py` (never committed, Backtesting #107; rebuilt harness: `gate_e_overlap.py`)
 (`proto_pivot_patterns`) -- reproduced here rather than re-derived, so the
 shipped module fires where the document that authorised it said it would.
 
@@ -189,7 +189,7 @@ Gate E, and then DELETED on the INTERNAL overlap:
     HS_SYM     x HS_HEAD_EXC   spearman rho = 0.9902   n = 90,497
 
 measured on 50 BIST tickers / 91,197 daily bars
-(`../Backtesting/scripts/analysis/measure_candle1_overlap_full.py`). All three
+(`../Backtesting/scripts/analysis/measure_candle1_overlap_full.py` (never committed, Backtesting #107; rebuilt harness: `gate_e_overlap.py`)). All three
 are above this repo's 0.9 revert line, and 1.0000 is not a near-miss.
 
 THE MECHANISM, because it generalises to every module in this family and is

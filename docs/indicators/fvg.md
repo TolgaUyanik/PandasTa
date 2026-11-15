@@ -11,7 +11,7 @@
 > a run recorded in `_facts.json`. **Nothing here was hand-asserted.** Fields no measurement
 > covers carry the literal stub token instead of a plausible value.
 >
-> **Gate coverage:** a dedicated overlap harness exists (`../Backtesting/scripts/analysis/measure_fvg_overlap_full.py`) but its CSVs were not opened by this generator: §7–§9 are stubs naming it.
+> **Gate coverage:** a Gate E run exists (`../Backtesting/backtest_results/issue-107-gatee/g3_fvg/overlap_max.csv`, `../Backtesting/backtest_results/issue-107-gatee/g3_fvg_in/overlap_max.csv`) but its CSVs were not opened by this generator: §7–§9 are stubs.
 >
 > **Owed by a human, and marked as such below:** §1 (what it measures), §3 (which source this
 > was ported from), §4 (formula as computed here), §6, §11, and the *effective defaults* row.
@@ -27,7 +27,7 @@
 | Params (**declared signature**) | `max_zones=None` |
 | Params (**effective defaults**) | STUB: not measured — fill from pandas_ta/trend/fvg.py |
 | Warm-up (dictionary probe) | 0 |
-| Engine wiring | **called by the parent engine** — literal call site (`IE:` 1, `SI:` 1 literal `ta.fvg(` site(s)) |
+| Engine wiring | `IE:` 1 call site(s), `SI:` 1 — grep `ta.fvg(` |
 | Provenance | STUB: not measured — fill from pandas_ta/trend/fvg.py |
 | Status | module first appears in this repo's history 2026-03-16 (`git log --diff-filter=A -- pandas_ta/trend/fvg.py`) |
 
@@ -49,7 +49,7 @@ Detects 3-bar Fair Value Gaps (imbalances) and tracks whether the current bar is
 
 Machine-filled from the live probe in `docs/gen_indicator_dictionary.py` (synthetic 600-bar
 OHLCV frame, computed twice with price ×137). The register verdict is joined on column name
-from `../Backtesting/docs/knowledgebase/IndicatorMLRegister.md` and copied verbatim; "no row"
+from `../Backtesting/Backtesting/docs/IndicatorMLRegister.md` and copied verbatim; "no row"
 means the engine's production config does not emit a column of that name, which is a fact
 about the engine, not about this indicator.
 
@@ -74,7 +74,7 @@ and were alive on real prices (`CLAUDE.md`, FVGDEAD).
 | | |
 |---|---|
 | Source | STUB: not measured — fill from pandas_ta/trend/fvg.py |
-| Module length | 175 newline-terminated lines, 7642 bytes (`grep -c '' pandas_ta/trend/fvg.py`) |
+| Module length | 175 newline-terminated lines, 7839 bytes (`grep -c '' pandas_ta/trend/fvg.py`) |
 | Version / licence | STUB: not measured — fill from pandas_ta/trend/fvg.py |
 | TA-Lib equivalent | STUB: not measured — fill from docs/TalibPortsMeasured.md |
 | Gate A anchor | STUB: not measured — fill from pandas_ta/trend/fvg.py |
@@ -112,41 +112,41 @@ STUB: not measured — fill from tests/test_fvg.py
 
 ## 7. Overlap (Gate E)
 
-A harness exists at `../Backtesting/scripts/analysis/measure_fvg_overlap_full.py`. Its CSVs live under the parent repo's gitignored
+A Gate E run exists: `../Backtesting/backtest_results/issue-107-gatee/g3_fvg/overlap_max.csv`, `../Backtesting/backtest_results/issue-107-gatee/g3_fvg_in/overlap_max.csv`. Its CSVs live under the parent repo's gitignored
 `backtest_results/`, were not opened by this generator, and are not quoted here — quoting a
 ρ whose artifact you did not open is the exact defect these pages exist to prevent.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_fvg_overlap_full.py
+STUB: not measured — fill from ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.trend.fvg --name fvg
 
-Ship line: ρ ≈ 0.9 → revert · 0.76–0.80 → ship with disclosure · below 0.76 → ship.
+Bands (`r3-perframe-0.90`): STRUCK if pooled |ρ| ≥ 0.90 or the per-frame median of any top-5 comparator ≥ 0.90 · DISCLOSE_GAP 0.80–0.90 · DISCLOSE 0.76–0.80 · SHIP below 0.76.
 
 ## 8. Reachability (Gate C)
 
 Per-frame firing counts against `BeamMiner(min_support=30)`
-(`../Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below
+(`../Backtesting/Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below
 `min_support` is a PARTIAL, not a PASS.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_fvg_overlap_full.py
+STUB: not measured — no harness yet (the Gate E harness measures Gate E only)
 
 ## 9. BIST specifics
 
 Behaviour on the DI-5 / DI-5b contaminated frames (`MGROS.IS`, `ARCLK.IS`) against clean
 controls, and the SHAPE of any failure — suppression, fabrication, or a pinned value.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_fvg_overlap_full.py
+STUB: not measured — no harness yet (the Gate E harness measures Gate E only)
 
 ## 10. Mining track record
 
 Column-name stems (the parameter tail is what a mined rule varies, so the grep drops it):
 
 ```sh
-grep -c 'FVG_BEAR' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'FVG_BEAR' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'FVG_BEAR' ../Backtesting/backtest_results/
-grep -c 'FVG_BULL' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'FVG_BULL' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'FVG_BULL' ../Backtesting/backtest_results/
-grep -c 'IN_FVG_BEAR' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'IN_FVG_BEAR' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'IN_FVG_BEAR' ../Backtesting/backtest_results/
-grep -c 'IN_FVG_BULL' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'IN_FVG_BULL' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'IN_FVG_BULL' ../Backtesting/backtest_results/
 ```
 
@@ -177,9 +177,9 @@ STUB: not measured — fill from pandas_ta/trend/fvg.py
 |---|---|---|
 | A Correctness | STUB: not measured — fill from pandas_ta/trend/fvg.py | source not identified yet — see §3 |
 | B Causality | no recorded exception | §5: `LEAK_RULES` does not list this indicator; no mutant test recorded |
-| C Reachability | STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_fvg_overlap_full.py | §8 |
+| C Reachability | STUB: not measured — no harness yet (the Gate E harness measures Gate E only) | §8 |
 | D Scale-free | probe tag only, see §2 | `docs/gen_indicator_dictionary.py` ×137 ratio |
-| E Attribution | STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_fvg_overlap_full.py | §7 |
+| E Attribution | STUB: not measured — fill from ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.trend.fvg --name fvg | §7 |
 | F Suites | 16 passed / 0 skipped in `tests/test_fvg.py`, recorded full-suite run 2026-09-10 | §12 row above, `docs/indicators/_facts.json` |
 
 ---
@@ -196,7 +196,7 @@ changes, or deletes a number here without saying where it came from.
 | metric | n | @ artifact / provenance class |
 |---|---|---|
 | §6#P — the probe's scale ratio | n=1 | @ docs/gen_indicator_dictionary.py — ×137 probe ratio, live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 |
-| §7#P — overlap ship line | n=4 | @ ../Backtesting/scripts/analysis/measure_fvg_overlap_full.py |
+| §7#P — overlap ship line | n=8 | @ ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.trend.fvg --name fvg |
 
 ⚠ Parsed by `tests/test_indref_pages.py`. Every group holding a number appears above with a
 matching `n=`; adding a table, adding a row, or adding a number to a paragraph without

@@ -11,12 +11,13 @@ that is CANDLE-1.
 > measurement.
 
 Every number below comes from one script,
-`../Backtesting/scripts/analysis/measure_chart_patterns_overlap_full.py`, whose CSV outputs are in
-`../Backtesting/scripts/analysis/candle0_out/`. §6 gives the command.
+`../Backtesting/scripts/analysis/measure_chart_patterns_overlap_full.py` (never committed, Backtesting
+#107), whose CSV outputs survive in `../Backtesting/candle0_out/` (the live repo root, not
+`scripts/analysis/`). §6 gives the command.
 
-**Status of that script: written to disk, `untracked` pending the owner's commit decision.** All
-thirteen sibling `measure_*_overlap_full.py` harnesses in that directory are tracked and this one
-should join them; committing was outside this session's authority, so nothing has been staged.
+**Status of that script: written to disk, `untracked` pending the owner's commit decision.** ⚠ **Corrected 2026-10-24:** the claim that thirteen sibling `measure_*_overlap_full.py`
+harnesses were tracked was false: none was ever committed (Backtesting #107). The rebuilt Gate E
+harness is `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py`.
 
 **Round-2 correction, stated up front.** Round 1 of that harness called
 `ta.liquidity_compression_box` **positionally as `(open, high, low, close)`**. Its real signature is
@@ -390,7 +391,7 @@ any raw bar index; any signed target beside a signed flag.
 3. **Overlap against the entire shipped column set.** Gate E requires all ~204 registered indicators
    of the engine's production config. This sweep is 112 columns from 16 modules chosen for collision
    risk; the oscillator, volume and overlap families were not swept. **CANDLE-1 must run the full
-   Gate E** via a `measure_<name>_overlap_full.py` per pattern.
+   Gate E** via `gate_e_overlap.py run` per module.
 4. **The probes' parameter sensitivity.** Every fire rate is at one setting (`left=right=5`,
    `tol=0.03`, `max_wait=60`; cup `N=40`, handle 10, R² > 0.6). No sweep was run, so the *counts* are
    indicative; the *overlap verdicts*, which sit an order of magnitude below the ship line, are what
@@ -430,6 +431,8 @@ failure and not filed as a defect.**
 cd ../Backtesting
 python scripts/analysis/measure_chart_patterns_overlap_full.py --tickers 50 --out candle0_out
 ```
+
+(Historical: that script was never committed, Backtesting #107; this command cannot be re-run.)
 
 Prints every measured figure in this document. The only things it does not produce are file reads
 rather than measurements: the `TODO.md` / `IndicatorDictionary.md` / `setup.py` line references in

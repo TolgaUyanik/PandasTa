@@ -241,8 +241,8 @@ LEAK_RULES = {
     "ichimoku": (lambda c: c.startswith("ICS_"),
                  "Chikou span = `close.shift(-kijun)`: it reports the future. Drop this column, "
                  "or use `ichimoku_ml`, which reconstructs the same idea causally."),
-    "dpo": (lambda c: True,
-            "Default `centered=True` shifts the future into the present. Pass `centered=False`."),
+    # `dpo` left this list on 2026-10-26 (issue #5): `centered` now defaults to False.
+    # `centered=True` still reads the future, but it is no longer the default.
 }
 
 

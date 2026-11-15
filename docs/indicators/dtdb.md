@@ -11,7 +11,7 @@
 > a run recorded in `_facts.json`. **Nothing here was hand-asserted.** Fields no measurement
 > covers carry the literal stub token instead of a plausible value.
 >
-> **Gate coverage:** a dedicated overlap harness exists (`../Backtesting/scripts/analysis/measure_dtdb_overlap_full.py`) but its CSVs were not opened by this generator: §7–§9 are stubs naming it.
+> **Gate coverage:** measurements naming this indicator's columns are recorded in `docs/CandlePatternsMeasured.md` (§7) — that match does not distinguish a ported column from a Gate E comparator, so read the campaign doc.
 >
 > **Owed by a human, and marked as such below:** §1 (what it measures), §3 (which source this
 > was ported from), §4 (formula as computed here), §6, §11, and the *effective defaults* row.
@@ -27,7 +27,7 @@
 | Params (**declared signature**) | `pivots=None`, `tol_atr=None`, `buf_atr=None`, `void_atr=None`, `max_wait=None`, `track_bars=None`, `max_keep=None`, `atr_length=None`, `mode=None`, `dbl_mode=None` |
 | Params (**effective defaults**) | STUB: not measured — fill from pandas_ta/trend/dtdb.py |
 | Warm-up (dictionary probe) | 16 |
-| Engine wiring | **called by the parent engine** — imported alias |
+| Engine wiring | no literal `ta.dtdb(` call site; a `getattr`/alias dispatch is not visible to this scan |
 | Provenance | STUB: not measured — fill from pandas_ta/trend/dtdb.py |
 | Status | module first appears in this repo's history 2026-08-24 (`git log --diff-filter=A -- pandas_ta/trend/dtdb.py`) |
 
@@ -49,17 +49,17 @@ The first CHART-PATTERN SHAPE MATCHER in this fork. A confirmed pivot zigzag is 
 
 Machine-filled from the live probe in `docs/gen_indicator_dictionary.py` (synthetic 600-bar
 OHLCV frame, computed twice with price ×137). The register verdict is joined on column name
-from `../Backtesting/docs/knowledgebase/IndicatorMLRegister.md` and copied verbatim; "no row"
+from `../Backtesting/Backtesting/docs/IndicatorMLRegister.md` and copied verbatim; "no row"
 means the engine's production config does not emit a column of that name, which is a fact
 about the engine, not about this indicator.
 
 | Column | Dictionary ML form | warm-up | observed range on the probe fixture | Register verdict |
 |---|---|---|---|---|
-| `DTDB_CONF_BEAR_8_0.5_0.15` | `BIN` | 16 | 0 … 1 | OK (as `DTDB_CONF_BEAR_8_0.5_0.15`) |
-| `DTDB_CONF_BULL_8_0.5_0.15` | `BIN` | 16 | 0 … 1 | OK (as `DTDB_CONF_BULL_8_0.5_0.15`) |
-| `DTDB_TGT_PCT_8_0.5_0.15` | `??` | 16 | 0 … 0.0734878 | OK (as `DTDB_TGT_PCT_8_0.5_0.15`) |
-| `DTDB_PEND_8_0.5_0.15` | `ORD` | 16 | -1 … 1 | OK (as `DTDB_PEND_8_0.5_0.15`) |
-| `DTDB_RES_8_0.5_0.15` | `BIN` | 16 | 0 … 1 | OK (as `DTDB_RES_8_0.5_0.15`) |
+| `DTDB_CONF_BEAR_8_0.5_0.15` | `BIN` | 16 | 0 … 1 | no row |
+| `DTDB_CONF_BULL_8_0.5_0.15` | `BIN` | 16 | 0 … 1 | no row |
+| `DTDB_TGT_PCT_8_0.5_0.15` | `??` | 16 | 0 … 0.0734878 | no row |
+| `DTDB_PEND_8_0.5_0.15` | `ORD` | 16 | -1 … 1 | no row |
+| `DTDB_RES_8_0.5_0.15` | `BIN` | 16 | 0 … 1 | no row |
 
 Per-column one-line descriptions are owed with §1: STUB: not measured — fill from pandas_ta/trend/dtdb.py
 
@@ -113,43 +113,50 @@ STUB: not measured — fill from tests/test_dtdb.py
 
 ## 7. Overlap (Gate E)
 
-A harness exists at `../Backtesting/scripts/analysis/measure_dtdb_overlap_full.py`. Its CSVs live under the parent repo's gitignored
-`backtest_results/`, were not opened by this generator, and are not quoted here — quoting a
-ρ whose artifact you did not open is the exact defect these pages exist to prevent.
+**A batch campaign document carries measurements naming this indicator's columns.**
+No Gate E run (`gate_e_overlap.py run`) exists for this indicator, because the
+campaigns gated many indicators in one run rather than one harness each:
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_dtdb_overlap_full.py
+- **CANDLE-1** — per-column Gate A/C/D/E record in [`docs/CandlePatternsMeasured.md`](../CandlePatternsMeasured.md).
 
-Ship line: ρ ≈ 0.9 → revert · 0.76–0.80 → ship with disclosure · below 0.76 → ship.
+⚠ **This match is by column name, and it does not distinguish a column the campaign
+*ported* from one it used as a Gate E *comparator*.** Both appear in the document.
+Open it to see which this indicator is — that is a two-line read and this generator
+will not guess it for you. The ρ values, sample sizes and ship/revert verdicts are
+there; they are deliberately not re-quoted here, because quoting a ρ whose artifact
+you did not open is the exact defect these pages exist to prevent.
+
+Bands (`r3-perframe-0.90`): STRUCK if pooled |ρ| ≥ 0.90 or the per-frame median of any top-5 comparator ≥ 0.90 · DISCLOSE_GAP 0.80–0.90 · DISCLOSE 0.76–0.80 · SHIP below 0.76.
 
 ## 8. Reachability (Gate C)
 
 Per-frame firing counts against `BeamMiner(min_support=30)`
-(`../Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below
+(`../Backtesting/Backtesting/backtesting_engine/contract_miner.py`). A pooled pass with most frames below
 `min_support` is a PARTIAL, not a PASS.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_dtdb_overlap_full.py
+STUB: not measured — no harness yet (the Gate E harness measures Gate E only)
 
 ## 9. BIST specifics
 
 Behaviour on the DI-5 / DI-5b contaminated frames (`MGROS.IS`, `ARCLK.IS`) against clean
 controls, and the SHAPE of any failure — suppression, fabrication, or a pinned value.
 
-STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_dtdb_overlap_full.py
+STUB: not measured — no harness yet (the Gate E harness measures Gate E only)
 
 ## 10. Mining track record
 
 Column-name stems (the parameter tail is what a mined rule varies, so the grep drops it):
 
 ```sh
-grep -c 'DTDB_CONF_BEAR' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'DTDB_CONF_BEAR' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'DTDB_CONF_BEAR' ../Backtesting/backtest_results/
-grep -c 'DTDB_CONF_BULL' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'DTDB_CONF_BULL' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'DTDB_CONF_BULL' ../Backtesting/backtest_results/
-grep -c 'DTDB_PEND' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'DTDB_PEND' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'DTDB_PEND' ../Backtesting/backtest_results/
-grep -c 'DTDB_RES' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'DTDB_RES' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'DTDB_RES' ../Backtesting/backtest_results/
-grep -c 'DTDB_TGT_PCT' ../Backtesting/datastore/source/StrategyMaster.csv
+grep -c 'DTDB_TGT_PCT' ../Backtesting/Backtesting/datastore/source/StrategyMaster.csv
 grep -rl --no-ignore-files 'DTDB_TGT_PCT' ../Backtesting/backtest_results/
 ```
 
@@ -181,9 +188,9 @@ STUB: not measured — fill from pandas_ta/trend/dtdb.py
 |---|---|---|
 | A Correctness | STUB: not measured — fill from pandas_ta/trend/dtdb.py | source not identified yet — see §3 |
 | B Causality | no recorded exception | §5: `LEAK_RULES` does not list this indicator; no mutant test recorded |
-| C Reachability | STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_dtdb_overlap_full.py | §8 |
+| C Reachability | STUB: not measured — no harness yet (the Gate E harness measures Gate E only) | §8 |
 | D Scale-free | probe tag only, see §2 | `docs/gen_indicator_dictionary.py` ×137 ratio |
-| E Attribution | STUB: not measured — fill from ../Backtesting/scripts/analysis/measure_dtdb_overlap_full.py | §7 |
+| E Attribution | STUB: not measured — fill from ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.trend.dtdb --name dtdb | §7 |
 | F Suites | 51 passed / 0 skipped in `tests/test_dtdb.py`, recorded full-suite run 2026-09-10 | §12 row above, `docs/indicators/_facts.json` |
 
 ---
@@ -199,9 +206,9 @@ changes, or deletes a number here without saying where it came from.
 
 | metric | n | @ artifact / provenance class |
 |---|---|---|
-| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=1 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/docs/knowledgebase/IndicatorMLRegister.md |
+| §2#T1 — probed columns, ML form, warm-up, fixture range, register verdict | n=1 | @ docs/gen_indicator_dictionary.py — live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 — joined to ../Backtesting/Backtesting/docs/IndicatorMLRegister.md |
 | §6#P — the probe's scale ratio | n=1 | @ docs/gen_indicator_dictionary.py — ×137 probe ratio, live probe, re-run at generation time against the installed package; cache last refreshed 2026-09-10 |
-| §7#P — overlap ship line | n=4 | @ ../Backtesting/scripts/analysis/measure_dtdb_overlap_full.py |
+| §7#P — overlap ship line | n=8 | @ ../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.trend.dtdb --name dtdb |
 
 ⚠ Parsed by `tests/test_indref_pages.py`. Every group holding a number appears above with a
 matching `n=`; adding a table, adding a row, or adding a number to a paragraph without
