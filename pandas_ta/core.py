@@ -1379,6 +1379,14 @@ class AnalysisIndicators(BasePandasObject):
         result = rvgi(open_=open_, high=high, low=low, close=close, length=length, swma_length=swma_length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def sk_fcb_pos(self, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = sk_fcb_pos(high=high, low=low, close=close, offset=offset,
+                            **kwargs)
+        return self._post_process(result, **kwargs)
+
     def slope(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = slope(close=close, length=length, offset=offset, **kwargs)
