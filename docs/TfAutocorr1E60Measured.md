@@ -30,12 +30,10 @@ imported, which is what a GitHub runner without AVX-512 gives numpy's kernels.
 It is spelled as a flag because the shell this ran under cannot put a variable
 in front of a command.
 
-**Verdict: SHIP, pending Gate E.** Gates A, B, C (synthetic), D and F are met
-below. Gate E is owed — the launcher runs
-`gate_e_overlap.py run --module pandas_ta.statistics.tf_autocorr_1e_60` after
-this session and a later session records the `docs/gate_e_ledger.csv` row, so
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails here until then.
+**Verdict: SHIP.** Gates A, B, C, D, E and F are met below. Gate E was
+measured 2026-11-15 (run `is114-tf_autocorr_1e_60-c99fc704`): max |ρ|
+**0.4279** vs `ADX` over 393,598 bars, per-frame max median 0.4378, 0 of 89
+frames at or above 0.90 → **SHIP**, recorded in `docs/gate_e_ledger.csv`.
 
 ---
 
@@ -326,7 +324,9 @@ bar whose neighbour sits on the other side of the floor.
 
 ## C. Gate C — reachability
 
-Synthetic only. **Real-data counts are owed with Gate E.**
+Synthetic below; the real-data counts arrived with Gate E — 393,598 of 398,849
+pooled BIST bars non-NaN and non-zero, the 5,251 empties being the 59-bar
+warm-up of each of the 89 frames (§E).
 
 | frame | fired | first bar | distinct | min | max | median | mean |
 |---|---|---|---|---|---|---|---|
@@ -420,15 +420,44 @@ moves almost everything:
 
 ---
 
-## E. Gate E — **pending, run by issue-solver after this session**
+## E. Gate E — **SHIP** (measured 2026-11-15)
 
-The launcher runs
-`../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module
-pandas_ta.statistics.tf_autocorr_1e_60` after this session; a later session
-records the `docs/gate_e_ledger.csv` row and fills in the measured numbers
-here. Until then
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails locally and is a "Gate E owed" skip in CI.
+Run `is114-tf_autocorr_1e_60-c99fc704`, measured 2026-11-15 by issue-solver
+with `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run
+--module pandas_ta.statistics.tf_autocorr_1e_60`, default parameters (`kwargs`
+empty in the run's `meta.json`). Recorded in `docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-15`.
+
+| column | max \|ρ\| | against | set | n | per-frame max median | its comparator | frames ≥ 0.90 | verdict |
+|---|---|---|---|---|---|---|---|---|
+| `TFAUTOCORR1E_60` | **0.4279** | `ADX` | `compute_all` | 393,598 | **0.4378** | `ADX` | 0 of 89 (0.0%) | **SHIP** |
+
+0.4279 and 0.4378 are both below the 0.76 SHIP line of the
+`r3-perframe-0.90` bands (CLAUDE.md, Gate E), and the pooled-only verdict is
+SHIP as well, so nothing is DISCLOSE, DISCLOSE_GAP or STRUCK and the column
+ships as built. Against the `ml_features` manifest alone the maximum is
+0.3494 vs `ADX_Pctl` (n = 391,195).
+
+Next comparators (`top25.csv`): `ICHI_TK_CROSS_AGE` 0.3542 (`compute_all`),
+`ADX_Pctl` 0.3494 (manifest), `TK_Cross_Age` 0.3486, `ADX_State` 0.3327,
+`Supertrend_Flip_Age` 0.2800.
+
+Run facts from `meta.json`: 89 frozen ALTPORT-1 BIST frames, 398,849 pooled
+bars, 687 comparators (329 `compute_all` + 358 manifest), 1 comparator
+degenerate (`squeeze_SQZ_NO`, constant), canary bit-equal on AKBNK.IS,
+BIENY.IS, AGHOL.IS and SASA.IS, data stamp `1be6495e`, pandas 2.3.3 / numpy
+1.26.4. Module sha1 `eac6849a`, tree sha1 `2d5fd0da`.
+
+The row's output fingerprint on the ledger's fixed synthetic frame is
+`541;4085.0;35561.0;1266703.0` — all four fields are exact integers (the
+column is a whole number, so the sums carry no rounding at these magnitudes),
+and `docs/gate_e_ledger.py` compares them at rel 1e-9, so
+`tests/test_gate_e_ledger.py` reads the same row on a CI CPU as here.
+
+**Real-data reachability (Gate C's owed counts), from this run:** the column
+is non-NaN on **393,598** of the 398,849 pooled bars and non-zero on all
+393,598 — the 5,251 empty bars are the `length - 1 = 59` warm-up bars of the
+89 frames (89 × 59 = 5,251).
 
 **What the screen measured on the PROTOTYPE** (2026-10-24, run
 `screen_r2_20261024`; a prototype is not a port): max |ρ| **0.4279** vs `ADX`
@@ -439,8 +468,11 @@ so the port and the screened quantity are the same column **on every window
 whose closes are finite, normal and positive** — §A6b measures where they part
 company (a bad close reads 21 in the prototype and NaN here; the prototype has
 no noise floor), which matters because the screen ran on 89 real BIST frames
-and this port did not. And the screen's figure is **not** this port's Gate E
-result and does not stand in for it.
+and this port did not. The screen's figure was **not** this port's Gate E
+result and did not stand in for it; the port's own run above came out at the
+same four figures (0.4279 vs `ADX`, n 393,598, per-frame max median 0.4378,
+`ICHI_TK_CROSS_AGE` 0.3542 and `ADX_Pctl` 0.3494 next), which is what the
+synthetic bit-equality predicted but is only now measured on the 89 frames.
 
 ### E1. In-fork overlap, which Gate E's 687 comparators cannot see
 
@@ -484,8 +516,8 @@ figures and not the Gate E number): walk +0.3148, tick-rounded +0.5030, ar1
 
 ## F. Gate F — suites
 
-`python -m pytest -q` in this worktree, after the last of the four review
-rounds' fixes: **2 failed, 10,971 passed, 85 skipped**. Both failures are
+`python -m pytest -q` in this worktree, after the Gate E row was recorded
+(2026-11-15): **2 failed, 10,978 passed, 85 skipped**. Both failures are
 expected:
 
 1. `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
@@ -494,11 +526,12 @@ expected:
    touches nothing this port changed, and CI deselects it by name (CLAUDE.md,
    *CI*).
 2. `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-   — owed Gate E rows. The failure names eight indicators,
-   `['arch_lm', 'diff2_acf1', 'edge', 'firstzero_ac', 'halflife', 'lumpiness',
-   'mtd_ret', 'tf_autocorr_1e_60']`: seven were already owed on this branch
-   point and `tf_autocorr_1e_60` is this port's. Expected; CI into `dev` runs
-   with `GATE_E_PENDING_OK=1`, where it is a "Gate E owed" skip.
+   — owed Gate E rows. Before this port's row was recorded the failure named
+   eight indicators; it now names **seven**, `['arch_lm', 'diff2_acf1',
+   'edge', 'firstzero_ac', 'halflife', 'lumpiness', 'mtd_ret']` —
+   `tf_autocorr_1e_60` dropped out of the list, and the seven that remain were
+   already owed on this branch point. Expected; CI into `dev` runs with
+   `GATE_E_PENDING_OK=1`, where it is a "Gate E owed" skip.
 
 An intermediate run before the README counts were updated had three more
 failures, all in `tests/test_readme_counts.py`; they are fixed, not waived.
