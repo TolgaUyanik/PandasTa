@@ -27,6 +27,7 @@ from .stdev import stdev
 from .tf_centroid_20 import tf_centroid_20
 from .tf_dfa_100 import tf_dfa_100
 from .tf_spec_entropy_64 import tf_spec_entropy_64
+from .tf_zero_cross_20 import tf_zero_cross_20
 from .ts_above_mean_20 import ts_above_mean_20
 from .ts_ac1_60 import ts_ac1_60
 from .ts_aggac_60 import ts_aggac_60
