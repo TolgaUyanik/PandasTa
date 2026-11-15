@@ -26,10 +26,12 @@ with **four** exceptions, each flagged again where it appears:
 
 1. **§F1's three pytest counts**, which `python -m pytest` prints and no
    section of either script does — §F1's own ⚠ says so.
-2. **The Gate E block** (0.5231 vs `mad_pct_Pctl`, 0.5298 per frame, 0.5207,
-   0.5015, 398,849 bars, 687 comparators), quoted from issue #115 and
-   measured by the 2026-10-24 screen on the PROTOTYPE, not here. The launcher
-   runs Gate E after this session — see **Gate E**.
+2. **The Gate E block and §C1's real-data limb** (0.5231 vs `mad_pct_Pctl`,
+   0.5298 per frame, 396,268 of 398,849 bars, 687 comparators), measured by
+   issue-solver's Gate E run `is115-tf_higuchi_30-44be066e` on 2026-11-16 and
+   read off its output folder, not computed by either script here. The
+   identical screen figures quoted beside them were measured on the
+   PROTOTYPE — see **Gate E**.
 3. **§F2's list of dispatchable features still enabled**, which
    `docs/measure_tf_higuchi_30_cpu.py` prints as its banner.
 4. **Three `tf_dfa_100` figures quoted for contrast**, which come from
@@ -40,7 +42,10 @@ with **four** exceptions, each flagged again where it appears:
    blanks in it (§G here; `TfDfa100Measured.md` §G, "101 for a NaN and 100
    for the rest").
 
-**Verdict: SHIP, with one disclosure and one owed measurement.** The column
+**Verdict: SHIP — Gate E measured, with one disclosure and one owed
+measurement.** Gate E read max |rho| **0.5231** vs `mad_pct_Pctl`
+(n = 391,017) and a 0.5298 per-frame max median over 89 frames, **SHIP** on
+`r3-perframe-0.90`; the row is in `docs/gate_e_ledger.csv`. The column
 is correct against three independent spellings of Higuchi (1988), causal
 under five mutants, bit-identical under an exact binary rescale of the price,
 and it reads 1.0000000000000002, 1.5137 and 1.9978 against the textbook 1,
@@ -271,8 +276,8 @@ still holds two points, and at 9 it holds one and has no interval at all.
    scale-free form says `k = 1..5` and that is what the screen measured, so
    that is what ships. What the wider ladder would buy is measured in §A4
    (less variance, little bias) rather than assumed.
-3. **Real prices.** None are in this worktree. Gate C's real limb and Gate E
-   come from the launcher's run.
+3. **Real prices.** None are in this worktree. Gate C's real limb (§C1) and
+   Gate E are read off the launcher's run, not taken here.
 4. **A `kmax` parameter.** `KMAX` is a module constant, like `tf_dfa_100`'s
    `BOXES`. Exposing it would make the column name ambiguous (`TFHIGUCHI_30`
    encodes the length only), and the issue names one ladder.
@@ -331,10 +336,20 @@ every offset.
 
 ### §C1 — real data
 
-⚠ **Owed.** No real prices are in this worktree, and `docs/issues/` carries
-no frame. The real limb comes from the launcher's Gate E run, whose ledger
-row records `pooled_bars`, `non_nan` and `non_zero` over the 89 ALTPORT-1
-frames. The receipt session reads it off that row.
+**Measured**, off the Gate E run `is115-tf_higuchi_30-44be066e` (2026-11-16),
+whose ledger row carries the real-data limb no synthetic frame can give:
+
+| limb | value |
+|---|---|
+| pooled bars, 89 ALTPORT-1 frames | 398,849 |
+| `non_nan` (fires) | 396,268 |
+| `non_zero` | 396,268 |
+| blank | 2,581 — the warm-up, 29 bars per frame |
+
+`0 < 396,268 < 398,849`, so Gate D's anti-constant limb holds on real prices
+as well as on §D's synthetic ones, and the blank count is the warm-up exactly:
+89 × 29 = 2,581. No real price is in this worktree, so the figures above are
+read off that run's `overlap_max.csv` and `meta.json`, not computed here.
 
 ### §C2 — synthetic frames
 
@@ -431,33 +446,47 @@ iid noise give three columns that differ on more than 300 bars each way.
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
+**Gate E: measured on this port. `TFHIGUCHI_30` is SHIP.** Run
+`is115-tf_higuchi_30-44be066e`, 2026-11-16, by issue-solver after the
+implementation session; recorded in `docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record`. Nothing else in this document is a
+Gate E measurement, and this session read only the run's output folder —
+not `../Backtesting`.
 
-Nothing in this document is a Gate E measurement. The harness
-(`../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module
-pandas_ta.statistics.tf_higuchi_30`) is outside this worktree and this
-session did not run it, read it, or write anything under `../Backtesting`.
-`docs/gate_e_ledger.csv` therefore has **no row** for `tf_higuchi_30`, which
-`tests/test_tf_higuchi_30.py::test_the_gate_e_row_is_owed_and_not_yet_recorded`
-asserts; `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails locally until the receipt session records it, and CI skips it under
-`GATE_E_PENDING_OK=1`.
+| column | max abs rho | against | n | per-frame max median | verdict |
+|---|---|---|---|---|---|
+| **`TFHIGUCHI_30`** | **0.5231** (−0.5231) | `mad_pct_Pctl` (manifest) | 391,017 | **0.5298** (`mad_pct_Pctl`, 89 frames, 0.0% ≥ 0.90) | **SHIP** |
 
-For reference, and **measured on the prototype rather than on this port**,
-the 2026-10-24 catalog screen (run `screen_r2_20261024`, 89 ALTPORT-1 frames,
-398,849 bars, 329 + 358 comparators, canary bit-equal) read:
+Band `r3-perframe-0.90`: SHIP is `< 0.76` pooled with no top-5 comparator's
+per-frame median at 0.90, and both limbs read 0.52–0.53 — 0.24 clear of the
+disclosure line at 0.76 and 0.37 clear of the strike line.
 
-| limb | value |
+Next comparators, from `top25.csv` of the same run: `mad_pct` 0.5207
+(n = 396,268), `mad_pct_State` 0.5015, `BB_BWidth` 0.4730 (the `compute_all`
+leader, n = 396,268), `BB_BWidth_Pctl` 0.4617. The reading is a volatility /
+path-roughness one, which is what §L4's structure predicts; `chop` at
++0.3871 and `ADX` at −0.3515 are the next-nearest shipped meanings.
+
+Run facts, read from `meta.json` and `overlap_max.csv`:
+
+| fact | value |
 |---|---|
-| pooled max abs rho | **0.5231** vs `mad_pct_Pctl` (manifest), n = 391,017 |
-| top-5 per-frame max median | **0.5298** |
-| next comparators | `mad_pct` 0.5207, `mad_pct_State` 0.5015 |
-| verdict | SHIP (`r3-perframe-0.90`, `< 0.76`) |
+| module | `pandas_ta.statistics.tf_higuchi_30`, `kwargs {}` (defaults) |
+| universe | 89 ALTPORT-1 frames, 398,849 pooled bars |
+| comparators | 687 (329 `compute_all` + 358 manifest `1d`), 1 degenerate |
+| degenerate | `squeeze_SQZ_NO` — constant over 396,268 bars, dropped by the harness |
+| canary | AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal |
+| module sha1 | `2bed513cc61fac1aa2f61bdbcbd72a5064b1fe1e` |
+| `pandas_ta` tree sha1 | `e166359d0a10260e2edb4f7552fe9ceb159e0a7f` |
+| versions | pandas 2.3.3, numpy 1.26.4 |
 
-§A1 asserts this module equal to that prototype to 4.219e-15 with an
-identical NaN mask, so the run on the port is expected to land on the same
-figures — which is exactly why the receipt session must pin the row's
-IDENTITY (its `run` field) and not only its arithmetic.
+The 2026-10-24 catalog screen measured the PROTOTYPE at 0.5231 vs
+`mad_pct_Pctl` on n = 391,017, with a 0.5298 per-frame max median and
+`mad_pct` 0.5207 / `mad_pct_State` 0.5015 behind it. The port's run lands on
+the same comparators and the same figures to the digits quoted — as §A1
+predicted by holding this module equal to the prototype to 4.219e-15 with an
+identical NaN mask. The row's IDENTITY (`run = is115-tf_higuchi_30-44be066e`,
+module sha1 above) is what distinguishes this measurement from the screen's.
 
 ---
 
@@ -479,7 +508,7 @@ The Backtesting suite is the launcher's, in a clean worktree.
 |---|---|
 | `python -m pytest tests/test_tf_higuchi_30.py -q` | **326 passed** |
 | `python docs/measure_tf_higuchi_30_cpu.py` (same module, AVX-512/AVX2/FMA3 off) | **326 passed** |
-| `python -m pytest -q` | **2 failed, 11,147 passed, 85 skipped** |
+| `python -m pytest -q` | **1 failed, 11,155 passed, 85 skipped** (receipt session, 2026-11-16) |
 
 ⚠ These three cells are the one part of this document that no section of
 `docs/measure_tf_higuchi_30.py` prints, so they go stale the moment a test is
@@ -496,15 +525,21 @@ fixed with that guard's own `<!--stale-by-design-->` marker).
 **So: write the review folder and every doc FIRST, then run the three
 commands above, then transcribe this table — last.**
 
-The two failures are both expected and neither is this port's arithmetic:
+The one failure is expected and is not this port's arithmetic:
 
 * `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
-  needs the sibling `../AlternativeRepos` checkout, which is not here; CI
-  deselects it by name (`ci.yml`).
-* `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-  reports exactly `no Gate E ledger row for ['tf_higuchi_30']` — the owed
-  row, which CI skips under `GATE_E_PENDING_OK=1` and the receipt session
-  records.
+  needs the sibling `../AlternativeRepos` checkout, which is not here
+  (`pandas-ta-classic not found at .../AlternativeRepos/pandas-ta-classic`);
+  CI deselects it by name (`ci.yml`).
+
+The implementation session read **2 failed, 11,147 passed** here: the second
+failure was `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+reporting `no Gate E ledger row for ['tf_higuchi_30']`, the owed row CI skips
+under `GATE_E_PENDING_OK=1`. Recording the row on 2026-11-16 cleared it and
+grew the suite by **7** collected tests: `tests/test_gate_e_ledger.py`
+parametrises seven checks per ledger row (four over `LIVE`, two over `ROWS`,
+one per indicator), so 11,149 collected became 11,156. This module itself
+reads 326 in both sessions.
 
 The 85 skips were not itemised in this session; `CLAUDE.md` attributes 21 of
 them to the upstream correlation suite, which `tests/config.py` skips at
@@ -760,21 +795,38 @@ document, the test module's header and three tests
 
 #### OWED from the Gate E run
 
-The receipt session must, before recording a verdict:
+What the receipt session (2026-11-16) could and could not settle:
 
-1. Check whether `vhf` is among the run's 687 comparators. The screen treated
-   the fork overlap as a SEPARATE stage from Gate E, which says it is not —
-   but that is the screen's arrangement, not a fact this worktree can read.
-2. If it is not, measure Spearman rho of `TFHIGUCHI_30` against `VHF_28` over
-   the same 89 ALTPORT-1 frames, pooled and per frame.
-3. Read the result against the same **`r3-perframe-0.90`** band the ledger
-   uses: STRUCK at pooled |rho| ≥ 0.90 or a per-frame median ≥ 0.90.
+1. **Is `vhf` among the run's 687 comparators? Not answerable from the run's
+   output folder.** It holds `overlap_max.csv`, `top25.csv`, `perframe.csv`
+   (the top 5), `degenerate.csv` and `meta.json` — no comparator list. What it
+   does show: `VHF_28` / `vhf` appears NOWHERE in the top 25, whose floor is
+   `massi` at 0.2507, while the 2026-10-24 screen measured 0.6496 against
+   `vhf:VHF_28` on 12 real frames. A comparator at 0.65 cannot sit below a
+   0.2507 floor, so `vhf` is almost certainly absent from the 687 — an
+   inference from two readings, not a list this session read.
+2. **The 89-frame measurement against `VHF_28` stays OWED**, to the owner:
+   it needs the real frames and the harness, both outside this worktree.
+3. The band to read it against is the ledger's own
+   **`r3-perframe-0.90`**: STRUCK at pooled |rho| ≥ 0.90 or a per-frame
+   median ≥ 0.90.
 4. **revert `tf_higuchi_30` if it is** STRUCK on that comparison, exactly as
    a STRUCK Gate E row would be reverted; `docs/TfHiguchi30Measured.md` stays
-   as the receipt either way.
+   as the receipt either way. The Gate E row being SHIP does not settle it.
+
+Every reading that exists today is below that line, but one of them only just:
+0.6496 pooled against `VHF_28` on 12 real frames (the screen, on the
+prototype), and on this port's eight synthetic frames (§L4) −0.8901 pooled —
+**0.0099** under the strike line — with a 0.7151 per-frame median and 0.8284
+worst frame. §L4's own reading of that gap is that pooling across eight
+different processes inflates it and the per-frame limb is the honest one; the
+real-frame pooled figure of 0.6496 is the closest thing to a check on that,
+and it agrees. So nothing measured so far calls for a revert, and the figure
+still missing — pooled and per frame on the 89 real frames — is the one that
+could change it.
 
 `test_the_vhf_overlap_measurement_is_still_owed_from_the_gate_e_run` fails if
-this block is dropped, so a green Gate E row cannot quietly settle it.
+this block is dropped, so the recorded Gate E row cannot quietly settle it.
 
 ---
 

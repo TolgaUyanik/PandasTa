@@ -99,8 +99,12 @@ What this file pins, in order of how much it would hurt to lose:
    floors. It is blind to the size and the sign of the window
    (bit-identical at x-1, x0.5, x2, x2**60).
 
-8. **⚠ The overlap with `vhf`, which Gate E's comparator set cannot
-   see.** `VHF_28` is `(max - min) / sum|close diff|` over 28 bars,
+8. **⚠ The overlap with `vhf`, which Gate E's comparator set almost
+   certainly does not carry** -- `vhf` is nowhere in the 2026-11-16
+   run's top 25, whose floor is 0.2507, while the screen read 0.6496
+   against it on 12 real frames (the OWED block of §L4 states that as
+   an inference, since the run's outputs hold no comparator list).
+   `VHF_28` is `(max - min) / sum|close diff|` over 28 bars,
    and `sum|close diff|` over the window IS this column's `L(1)`.
    Measured on eight 1,500-bar synthetic frames: pooled Spearman
    -0.8901, per-frame |rho| 0.4721 .. 0.8284, median 0.7151 (§L4).
@@ -111,19 +115,22 @@ What this file pins, in order of how much it would hurt to lose:
    the ENGINE's 687 comparators, so a green row there would not
    settle a fork overlap.
 
-9. **Gate E is owed.** `test_the_gate_e_row_is_owed_and_not_yet_recorded`
-   asserts the ledger has no row for `tf_higuchi_30`: issue-solver
-   runs Gate E after this session and the receipt session records the
-   row, replacing that test. Gate C's real-data limb is owed from the
-   same run; everything in this file is synthetic.
+9. **Gate E is measured and recorded.**
+   `test_the_gate_e_row_is_recorded_and_ships` pins the ledger row's
+   IDENTITY -- run `is115-tf_higuchi_30-44be066e`, column
+   `TFHIGUCHI_30`, verdict SHIP, band `r3-perframe-0.90`, 89 frames,
+   687 comparators -- and that its pooled and per-frame figures are
+   both under the 0.76 disclosure line. Gate C's real-data limb comes
+   off the same row (396,268 of 398,849 bars fire); everything this
+   file itself computes is synthetic.
 
 Every number above is printed by `python docs/measure_tf_higuchi_30.py`,
 and by `python docs/measure_tf_higuchi_30_cpu.py <section>` for the
 AVX-disabled dispatch, EXCEPT item 2's Gate E figure of 0.5231, which is
-quoted from issue #115 and was measured on the PROTOTYPE by the
-2026-10-24 screen -- that script's own docstring names it as one of the
-three things it does not print. `docs/TfHiguchi30Measured.md` carries the
-tables.
+read off the 2026-11-16 run's output folder (and was measured at the same
+value on the PROTOTYPE by the 2026-10-24 screen) -- that script's own
+docstring names it as one of the three things it does not print.
+`docs/TfHiguchi30Measured.md` carries the tables.
 """
 import csv
 import importlib
@@ -1098,13 +1105,14 @@ def test_the_vhf_warning_survives_the_dictionary_cut():
 
 
 def test_the_vhf_overlap_measurement_is_still_owed_from_the_gate_e_run():
-    """The `vhf` overlap is the one thing Gate E's comparator set cannot see,
-    so "the owner's call" needs a trigger or it is never made: the receipt
-    session has to check whether `vhf` is among the run's 687 comparators and,
-    if it is not, measure rho against `VHF_28` on the same 89 frames and apply
-    the same band. This asserts the owed item and its revert rule are still in
-    the receipt, so a green Gate E row cannot be recorded without meeting
-    them."""
+    """The `vhf` overlap is the one thing Gate E's comparator set does not
+    appear to carry, so "the owner's call" needs a trigger or it is never
+    made. The 2026-11-16 receipt session settled only half of it: `vhf` is
+    absent from the run's top 25 (floor 0.2507) against the screen's 0.6496 on
+    12 real frames, so it is almost certainly not among the 687 -- and the
+    89-frame measurement against `VHF_28` is still owed to the owner, with the
+    revert rule attached. This asserts that owed item and its rule are still
+    in the receipt, so the recorded SHIP row cannot quietly settle them."""
     doc = (ROOT / "docs" / "TfHiguchi30Measured.md").read_text(
         encoding="utf-8")
     # Each string is unique to the OWED block: "VHF_28" and "revert" on their
@@ -1241,11 +1249,35 @@ def test_the_five_wiring_touch_points():
     assert df.ta.tf_higuchi_30(length=20).name == "TFHIGUCHI_20"
 
 
-def test_the_gate_e_row_is_owed_and_not_yet_recorded():
-    """Gate E is run by issue-solver after this session; the receipt session
-    records the row and replaces this test."""
+def test_the_gate_e_row_is_recorded_and_ships():
+    """The Gate E row for this port, recorded 2026-11-16 from run
+    `is115-tf_higuchi_30-44be066e` (89 ALTPORT-1 frames, 687 comparators,
+    canary bit-equal). This pins the row's IDENTITY and its BAND, not its
+    digits to the last place: a rho is asserted as an inequality against the
+    0.76 disclosure line, because a re-run on other CPUs moves the last bits.
+    Measured here: pooled 0.5231 vs `mad_pct_Pctl`, per-frame max median
+    0.5298."""
     path = ROOT / "docs" / "gate_e_ledger.csv"
     with path.open(newline="", encoding="utf-8") as handle:
         rows = [r for r in csv.DictReader(handle)
                 if r["indicator"] == "tf_higuchi_30"]
-    assert rows == []
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["module"] == "pandas_ta.statistics.tf_higuchi_30"
+    assert row["column"] == "TFHIGUCHI_30"
+    assert row["run"] == "is115-tf_higuchi_30-44be066e"
+    assert row["measured"] == "2026-11-16"
+    assert row["verdict"] == "SHIP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert int(row["n_frames"]) == 89
+    assert int(row["n_comparators"]) == 687
+    # SHIP is `< 0.76` on both limbs of `r3-perframe-0.90`; the measured pair
+    # is 0.5231 / 0.5298, so 0.60 is a margin wide enough to survive a CPU.
+    assert float(row["max_abs_rho"]) < 0.60
+    assert float(row["perframe_max_median_abs_rho"]) < 0.60
+    # Gate C's real limb and Gate D's anti-constant limb, on real prices.
+    non_nan, pooled = int(row["non_nan"]), int(row["pooled_bars"])
+    assert 0 < non_nan < pooled
+    assert int(row["non_zero"]) == non_nan
+    assert pooled - non_nan == 89 * (LENGTH - 1)   # the warm-up, every frame
