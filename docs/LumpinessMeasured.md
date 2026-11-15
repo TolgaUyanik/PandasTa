@@ -14,8 +14,9 @@ return np.var(v)
 **Status:**
 - Gates A, B and D are cleared, and this repo's suite is green, which is the half of
   Gate F that runs here.
-- Gate C has synthetic counts only, and Gate E is owed. Both need the BIST frames and the
-  private Backtesting repo, which the contributor's machine does not have.
+- Gate E is measured: **SHIP**, 0.2122 vs `ZIGZAG` (run `gatee7-20261115-lumpiness`,
+  2026-11-15, recorded in `docs/gate_e_ledger.csv`; see "Gate E"). Gate C's real-data
+  counts come from the same run.
 
 **Review round 1** (2026-11-10, verdict REVISE: 2 MAJOR, 4 MINOR, 2 NIT) is fixed here:
 - The rounding guard was scaled to the size of the returns, so small drifts and one-ulp
@@ -128,7 +129,10 @@ measured in Decision 4.
 ## Gate C — reachability
 
 - **Synthetic:** 500 of 600 bars fire (100 warm-up), and all 500 values are distinct.
-- **Real data: owed.** The counts come with the Gate E run on BIST.
+- **Real data** (Gate E run `gatee7-20261115-lumpiness`, 89 BIST daily frames, flat
+  zero-volume bars dropped by the harness): 389,949 of 398,849 pooled bars fire (97.77%),
+  all 389,949 non-zero. The 8,900 empty bars are exactly 89 × 100, one warm-up per frame,
+  so on these frames neither rule below blanked a bar.
 - What blanks a bar:
   - a bad or overflowing close blanks the `length` bars whose window holds its returns;
   - a window whose returns vary only at rounding level is NaN (Decision 4).
@@ -190,17 +194,25 @@ from a separate run with tracemalloc on:
 An earlier run on the same machine measured 3–5× slower times. Machine load moves these
 numbers, so they are an order of magnitude.
 
-## Gate E — owed
+## Gate E — measured: SHIP
 
-From `../Backtesting/Backtesting` on the owner's machine:
+Run `gatee7-20261115-lumpiness`, 2026-11-15, on this module as it stands on `dev` at
+`8000158`, default parameters (`LUMPINESS_100`). Recorded with
+`python docs/gate_e_ledger.py record ... --measured 2026-11-15`.
 
-```sh
-python scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.lumpiness --name lumpiness
-python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD   # from this repo
-```
+- Pooled max |ρ| **0.2122** vs `ZIGZAG` (compute_all), n = **32,790**. `ZIGZAG` is sparse:
+  it shares 32,790 bars with this column, against 389,949 for the dense comparators, and
+  the per-frame leg counts 82 of the 89 frames for it. The manifest's max is 0.1489, vs `Pct_Up_Days_63`
+  (n = 389,949).
+- Top-5 per-frame max median |ρ| **0.1976** vs `ZIGZAG`, over 82 frames; 0 frames at or
+  above 0.90.
+- 687 comparators (329 compute_all + 358 manifest); 1 dropped as degenerate
+  (`squeeze_SQZ_NO`, constant). Canary bit-equal on AKBNK, BIENY, AGHOL and SASA.
+- Under `r3-perframe-0.90` that is the < 0.76 band: SHIP, nothing removed, no waiver.
+- Next comparators, all dense (n = 389,949): `ROLLING_LOW_50` 0.1989, `BB_Lower` 0.1984,
+  `LINREG_LOWER_2` 0.1982.
 
-The prototype's numbers in the issue (max |ρ| 0.2122 vs `ZIGZAG`, SHIP) are not a
-measurement of this port.
+The prototype's figure in the issue (0.2122 vs `ZIGZAG`) carried over to four decimals.
 
 ## Gate F — suites
 
@@ -209,7 +221,7 @@ Full suite on this branch (`.venv-pd2`, CI's two deselects, `GATE_E_PENDING_OK=1
 
 Without the variable, `test_every_indicator_that_needs_a_row_has_one` fails on the owed
 rows `lumpiness` and `mtd_ret`; `mtd_ret` is already owed on `dev`. The Backtesting suite
-cannot be run here.
+cannot be run here. Both rows were recorded on 2026-11-15 (see "Gate E").
 
 ## Counters touched
 

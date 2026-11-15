@@ -21,8 +21,9 @@ The call goes to statsmodels 0.15.0, `statsmodels/stats/diagnostic.py`:
 **Status:**
 - Gates A, B and D are cleared, and this repo's suite is green, which is the half of
   Gate F that runs here.
-- Gate C has synthetic counts only, and Gate E is owed. Both need the BIST frames and the
-  private Backtesting repo, which the contributor's machine does not have.
+- Gate E is measured: **SHIP**, 0.1347 vs `natr` (run `gatee7-20261115-arch_lm`,
+  2026-11-15, recorded in `docs/gate_e_ledger.csv`; see "Gate E"). Gate C's real-data
+  counts come from the same run.
 - One choice is the owner's: simple or log returns (see "Open question").
 
 **Review round 1** (2026-11-10, verdict REVISE: 2 MAJOR, 6 MINOR, 2 NIT) is fixed here:
@@ -122,13 +123,17 @@ In the tests:
 ## Gate C — reachability
 
 - **Synthetic:** 500 of 600 bars fire (100 warm-up), and all 500 values are distinct.
-- **Real data: owed.** The counts come with the Gate E run on BIST.
+- **Real data** (Gate E run `gatee7-20261115-arch_lm`, 89 BIST daily frames, flat
+  zero-volume bars dropped by the harness): 389,949 of 398,849 pooled bars fire (97.77%),
+  all 389,949 non-zero. The 8,900 empty bars are exactly 89 × 100, one warm-up per frame,
+  so on these frames nothing beyond the warm-up was blanked.
 - What blanks a bar is in Decision 5:
   - a bad or overflowing close blanks the `length` bars whose window holds its returns;
   - a run of R ≥ length − lags zero returns blanks R − (length − lags) + 1 bars.
 
-  BIST has suspended and illiquid stretches, so the second case will occur on real data.
-  How often is part of Gate C.
+  BIST has suspended and illiquid stretches, so the second case was expected on real data.
+  On the 89 Gate E frames it blanked no bar (the count above). Those frames have their flat
+  zero-volume bars removed, so a feed that keeps suspended sessions can still hit it.
 
 ## Gate D — scale-free
 
@@ -200,17 +205,24 @@ tracemalloc off; peak memory comes from a separate run with tracemalloc on:
 - Switching is a one-line change to `r`, and every test except the semantics pins would
   carry over.
 
-## Gate E — owed
+## Gate E — measured: SHIP
 
-From `../Backtesting/Backtesting` on the owner's machine:
+Run `gatee7-20261115-arch_lm`, 2026-11-15, on this module as it stands on `dev` at
+`8000158`, default parameters (`ARCHLM_100`, simple returns). Recorded with
+`python docs/gate_e_ledger.py record ... --measured 2026-11-15`.
 
-```sh
-python scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.arch_lm --name arch_lm
-python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD   # from this repo
-```
+- Pooled max |ρ| **0.1347** vs `natr` (compute_all), n = 389,949. The manifest's max is
+  the same value, vs `Stop_2ATR_pct`.
+- Top-5 per-frame max median |ρ| **0.1329** vs `natr`, over 89 frames; 0 frames at or
+  above 0.90.
+- 687 comparators (329 compute_all + 358 manifest); 1 dropped as degenerate
+  (`squeeze_SQZ_NO`, constant). Canary bit-equal on AKBNK, BIENY, AGHOL and SASA.
+- Under `r3-perframe-0.90` that is the < 0.76 band: SHIP, nothing removed, no waiver.
+- Next comparators: `Swing_Range_pct` 0.1147, `dist_from_high_60` 0.0976, `mad_pct`
+  0.0933.
 
-The prototype's numbers in the issue (max |ρ| 0.1347 vs `natr`, SHIP) are not a
-measurement of this port.
+The prototype's figure in the issue (0.1347 vs `natr`) carried over to four decimals. The
+log-return form (see "Open question") was not run.
 
 ## Gate F — suites
 
@@ -219,7 +231,7 @@ Full suite on this branch (`.venv-pd2`, CI's two deselects, `GATE_E_PENDING_OK=1
 
 Without the variable, `test_every_indicator_that_needs_a_row_has_one` fails on the owed
 rows `arch_lm` and `mtd_ret`; `mtd_ret` is already owed on `dev`. The Backtesting suite
-cannot be run here.
+cannot be run here. Both rows were recorded on 2026-11-15 (see "Gate E").
 
 ## Counters touched
 

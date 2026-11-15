@@ -10,8 +10,9 @@ reference implementation, `eguidotti/bidask` (MIT), `python/bidask/edge.py` at c
 **Status:**
 - Gates A, B and D are cleared, and this repo's suite is green, which is the half of
   Gate F that runs here.
-- Gate C has synthetic counts only, and Gate E is owed. Both need the BIST frames and the
-  private Backtesting repo, which the contributor's machine does not have.
+- Gate E is measured: **SHIP**, 0.3889 vs `natr` (run `gatee7-20261115-edge`, 2026-11-15,
+  recorded in `docs/gate_e_ledger.csv`; see "Gate E"). Gate C's real-data counts come from
+  the same run.
 - One decision is the owner's: unsigned or signed (see "Open question").
 
 Review round 1 (a review of this branch, 2026-11-09) found these, all fixed here:
@@ -125,7 +126,10 @@ the NaN masks agree by construction. They are not counted as evidence here.
 ## Gate C — reachability
 
 - **Synthetic:** 580 of 600 bars fire (20 warm-up), and all 580 values are distinct.
-- **Real data: owed.** The counts come with the Gate E run on BIST.
+- **Real data** (Gate E run `gatee7-20261115-edge`, 89 BIST daily frames, flat zero-volume
+  bars dropped by the harness): 397,069 of 398,849 pooled bars fire (99.55%), all 397,069
+  non-zero. The 1,780 empty bars are exactly 89 × 20, one warm-up per frame, so on these
+  frames none of the rules below killed a window.
 - From the reference, these kill a window:
   - fewer than two bars that trade at more than one price;
   - no open away from the high or low (`po == 0`);
@@ -177,8 +181,9 @@ Source: `measure_edge.py`.
   - 0.2282 at a 1% spread.
 
   This is synthetic and cannot be set against the prototype's real-data ρ of 0.3889 vs
-  `natr`. Whether the floor lifts the port's real-data ρ is what the owed Gate E run will
-  show.
+  `natr`. The Gate E run measured the shipped unsigned form at 0.3889 vs `natr` too (see
+  "Gate E"). It does not say how much of that the floor contributes: the signed form was
+  not run.
 - **A longer window lowers the floor only slowly:** 0.00457 → 0.00253 from 21 to 252 bars
   at σ = 2%.
 
@@ -190,22 +195,29 @@ Source: `measure_edge.py`.
 - A negative signed value marks a window whose estimate is dominated by noise. A positive
   one does not prove the opposite: at a true 0.2% spread, 45% of windows still estimate
   s2 < 0.
-- The issue measured the prototype at Gate E without stating which form it used.
+- The issue measured the prototype at Gate E without stating which form it used. The
+  unsigned port reproduces its figure to four decimals, which fits an unsigned prototype
+  but does not prove it.
 - Switching the default changes the values but not the name. If both are wanted, the
   signed form could be offered as a parameter (e.g. `signed=True` →
   `EDGE_21_S`).
 
-## Gate E — owed
+## Gate E — measured: SHIP
 
-From `../Backtesting/Backtesting` on the owner's machine:
+Run `gatee7-20261115-edge`, 2026-11-15, on this module as it stands on `dev` at
+`8000158`, default parameters (`EDGE_21`, unsigned). Recorded with
+`python docs/gate_e_ledger.py record ... --measured 2026-11-15`.
 
-```sh
-python scripts/analysis/gate_e_overlap.py run --module pandas_ta.volatility.edge --name edge
-python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD   # from this repo
-```
+- Pooled max |ρ| **0.3889** vs `natr` (compute_all), n = 397,069. The manifest's max is
+  the same value, vs `Stop_2ATR_pct`.
+- Top-5 per-frame max median |ρ| **0.4087** vs `natr`, over 89 frames; 0 frames at or
+  above 0.90.
+- 687 comparators (329 compute_all + 358 manifest); 1 dropped as degenerate
+  (`squeeze_SQZ_NO`, constant). Canary bit-equal on AKBNK, BIENY, AGHOL and SASA.
+- Under `r3-perframe-0.90` that is the < 0.76 band: SHIP, nothing removed, no waiver.
+- Next comparators: `Swing_Range_pct` 0.3591, `pdist_pct` 0.3574, `cdl_doji` 0.3510.
 
-The prototype's numbers in the issue (max |ρ| 0.3889 vs `natr`, SHIP) are not a
-measurement of this port.
+The prototype's figure in the issue (0.3889 vs `natr`) carried over to four decimals.
 
 ## Gate F — suites
 
@@ -214,7 +226,7 @@ Full suite on this branch (`.venv-pd2`, CI's two deselects, `GATE_E_PENDING_OK=1
 
 Without the variable, `test_every_indicator_that_needs_a_row_has_one` fails on the owed
 rows `edge` and `mtd_ret`; `mtd_ret` is already owed on `dev`. The Backtesting suite cannot
-be run here.
+be run here. Both rows were recorded on 2026-11-15 (see "Gate E").
 
 ## Counters touched
 

@@ -44,8 +44,9 @@ port. From 3 points on, `length` (no crossing) cannot be confused with a crossin
 **Status:**
 - Gates A, B and D are cleared, and this repo's suite is green, which is the half of
   Gate F that runs here.
-- Gate C has synthetic counts only, and Gate E is owed. Both need the BIST frames and the
-  private Backtesting repo, which the contributor's machine does not have.
+- Gate E is measured: **SHIP**, 0.0542 vs `Swing_Range_pct` (run
+  `gatee7-20261115-firstzero_ac`, 2026-11-15, recorded in `docs/gate_e_ledger.csv`; see
+  "Gate E"). Gate C's real-data counts come from the same run.
 - **Review round 1** (2026-11-11, REVISE: 1 MAJOR, 5 MINOR, 4 NIT) is fixed here. The MAJOR:
   this text said a single move makes "every autocorrelation negative". That is false for a
   move inside the window; the value is still `length`, for the reason now given under
@@ -259,7 +260,8 @@ two seeds each).
 The pooled values are driven by the mix of paths: a φ = 0.9 path trends, so it reads late
 lags and high trend strength at once. Within a path the largest median is 0.24, and on the
 iid paths 0.15. Nothing approaches the 0.90 line on synthetic data. The prototype's Gate E
-(max |ρ| 0.0540 vs `Swing_Range_pct` on BIST) is not a measurement of this port.
+(max |ρ| 0.0540 vs `Swing_Range_pct` on BIST) is not a measurement of this port; the
+port's own run reads 0.0542 vs the same comparator (see "Gate E").
 
 ## Cost (`cost`)
 
@@ -286,7 +288,29 @@ peak memory is measured in a separate run with tracemalloc on.
    is still scale-free (Gate D).
 3. **Window.** `length` returns (101 closes), as `arch_lm` and `lumpiness`. If the
    prototype meant 100 closes, that is `length=99`.
-4. **Gate E and real-data Gate C** are owed. After that: merge, or measure and revert.
+4. **Gate E and real-data Gate C** are measured (see "Gate E"): SHIP, so nothing is
+   reverted.
+
+## Gate E — measured: SHIP
+
+Run `gatee7-20261115-firstzero_ac`, 2026-11-15, on this module as it stands on `dev` at
+`8000158`, default parameters (`FIRSTZEROAC_100`). Recorded with
+`python docs/gate_e_ledger.py record ... --measured 2026-11-15`.
+
+- Pooled max |ρ| **0.0542** vs `Swing_Range_pct` (manifest), n = 389,949. The
+  compute_all max is 0.0505, vs `ui`.
+- Top-5 per-frame max median |ρ| **0.0919** vs `Swing_Range_pct`, over 89 frames; 0
+  frames at or above 0.90.
+- 687 comparators (329 compute_all + 358 manifest); 1 dropped as degenerate
+  (`squeeze_SQZ_NO`, constant). Canary bit-equal on AKBNK, BIENY, AGHOL and SASA.
+- Under `r3-perframe-0.90` that is the < 0.76 band: SHIP, nothing removed, no waiver.
+- Next comparators: `ui` 0.0505, `Supertrend_Flip_Age` 0.0503, `natr` 0.0502.
+
+**Gate C on real data**, from the same run (89 BIST daily frames, flat zero-volume bars
+dropped by the harness): 389,949 of 398,849 pooled bars fire (97.77%), all 389,949
+non-zero. The 8,900 empty bars are exactly 89 × 100, one warm-up per frame, so on these
+frames the rounding guard and the bad-close rule blanked no bar. How many fired bars read
+the `length` sentinel (100) is not in the run's outputs.
 
 ## Gate F — suites
 
@@ -311,9 +335,6 @@ All counts are as of `dev` at `4a88858`.
 
 ## Not done here
 
-- **Gate C on real data and Gate E.** They need the BIST frames and Backtesting:
-  ```sh
-  python scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.firstzero_ac --name firstzero_ac
-  python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD
-  ```
 - **The Backtesting suite.**
+- (Gate C on real data and Gate E were listed here; both landed on 2026-11-15, see
+  "Gate E".)

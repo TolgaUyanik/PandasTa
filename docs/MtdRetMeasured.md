@@ -1,8 +1,10 @@
 # mtd_ret — measured (issue #206)
 
-> **Status: Gates A, B, D cleared. Gate C synthetic only. Gate E OWED, verdict pending. Gate F
-> this repo only.** The Backtesting repo and the BIST cache were not available in this session,
-> so nothing here is a real-data measurement of the port.
+> **Status: Gates A, B, D cleared. Gate E measured 2026-11-15: DISCLOSE, 0.7997 vs `bias`**
+> (run `gatee7-20261115-mtd_ret`, recorded in `docs/gate_e_ledger.csv`; see "Gate E"). Gate C's
+> real-data counts come from the same run. **Gate F this repo only.** The rest of this file was
+> written 2026-11-02 without the Backtesting repo or the BIST cache; only the Gate E section and
+> the C and E rows of the gate table are real-data measurements of the port.
 
 Month-to-date return from the month's first open, as a fraction. Module
 `pandas_ta/performance/mtd_ret.py`, column `MTD_RET`. Tests: `tests/test_mtd_ret.py` (24).
@@ -12,21 +14,39 @@ numpy 1.26.4). Measured 2026-11-02.
 Source is Reddit, tier 4: r/thinkorswim 1opks13 (2025-11-06). Existence, not evidence: nothing
 here tests the poster's claimed use, a watchlist column showing the gain since the period start.
 
-## Gate E: the prototype's numbers, not this port's
+## Gate E — measured: DISCLOSE
 
-The issue's screen, `screen_r9_20261029`, measured the prototype `b3_mtd_ret`: max |ρ| 0.7997 vs
-`bias` (n = 397,156), top-5 per-frame max median 0.8029, verdict DISCLOSE. Its fork overlap was
-0.8411 vs `pivot:PIVOT_PP_DIST_PCT`. The prototype sits in `docs/issues/screen/`, which is not on
-this machine, so the port has not been compared with it. Do not read those figures as this
-column's result.
+Run `gatee7-20261115-mtd_ret`, 2026-11-15, on this module as it stands on `dev` at `8000158`,
+default parameters (`MTD_RET`). Recorded with
+`python docs/gate_e_ledger.py record ... --measured 2026-11-15`.
 
-Owed, from `../Backtesting/Backtesting`:
+- Pooled max |ρ| **0.7997** vs `bias` (compute_all), n = 397,158. The manifest's max is
+  0.7840, vs `bias_ta` (n = 396,624).
+- Top-5 per-frame max median |ρ| **0.8029** vs `bias`, over 89 frames; 0 frames at or above
+  0.90.
+- 687 comparators (329 compute_all + 358 manifest); none dropped as degenerate. Canary
+  bit-equal on AKBNK, BIENY, AGHOL and SASA.
+- Next comparators: `ATR_POSITION` 0.7934, `bias_ta` 0.7840, `ZSCORE_20` 0.7760, `BB_%B`
+  0.7760.
 
-    python scripts/analysis/gate_e_overlap.py run --module pandas_ta.performance.mtd_ret --name mtd_ret
-    python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD
+**Disclosure.** `MTD_RET` overlaps the engine's `bias` at ρ 0.80, and the next four
+comparators at 0.78–0.79. Each places the close against a recent level. Read from the
+Backtesting source: `bias` is `(close - sma20) / sma20` (`indicator_engine.py:988`), and
+`ATR_POSITION` is the close's position between `ATR_LOWER` and `ATR_UPPER`
+(`ml_features.py:274`). By their names only, not read: `bias_ta`, `ZSCORE_20` and `BB_%B`.
+`MTD_RET` places the close against the month's first open. A miner given `MTD_RET` next to
+`bias` gets much the same signal twice.
 
-The prototype's 0.7997 sits 0.0003 under the 0.80 line, where DISCLOSE becomes DISCLOSE_GAP. If
-the port lands on the other side, that changes the disclosure band, not whether it ships.
+**Band.** Pooled 0.7997 is in DISCLOSE (0.76 ≤ ρ < 0.80), 0.0003 under the 0.80 line where
+DISCLOSE_GAP starts, so it ships with the comparator named here and no waiver. The per-frame
+0.8029 is above 0.80, but the ladder's per-frame limb only acts at 0.90 (STRUCK), so it does not
+move the band. Either way it ships; the band only changes the disclosure.
+
+**The prototype.** The issue's screen, `screen_r9_20261029`, measured the prototype
+`b3_mtd_ret` at 0.7997 vs `bias` (n = 397,156), per-frame 0.8029, DISCLOSE. The port reproduces
+both to four decimals over 2 more bars. The screen's fork overlap, 0.8411 vs
+`pivot:PIVOT_PP_DIST_PCT`, was measured on the prototype; Gate E compares against the engine
+only, so this fork's columns are **still not measured** against the port.
 
 ## Gates
 
@@ -34,10 +54,10 @@ the port lands on the other side, that changes the disclosure band, not whether 
 |---|---|---|
 | A Correctness | pass, against the issue's restatement | The thread itself returned Reddit's "Blocked" page, so the formula is the issue's: at the first bar of a new period store its open, value = (close / period_open − 1) × 100, as a fraction per the issue. Hand-derived 5-bar frame across a month and year boundary reads 0.10, −0.10, 0.10, −0.50, 0.50. An independent per-bar loop matches exactly on all 900 bars |
 | B Causality | pass | Rewriting all bars from `j` onward, all 899 offsets: real module **0 of 899** leak. Two mutants, `exec`'d in memory, each differing from the real module. `s.iloc[0]` → `s.iloc[-1]` (each month anchored on its last open) leaks at **858 of 899**; the other 41 offsets are months' first bars, where no partial month sits behind the cut. `s.iloc[0]` → `s.iloc[min(1, len(s) - 1)]` (anchored one bar late) leaks at **42 of 899**, exactly the months' second bars, which is why the sweep takes every offset. Unsorted frames are refused, not swept: see below |
-| C Reachability | synthetic only | 900-bar walk, 42 months: 900 non-NaN, 424 above the month's first open, 476 below, 900 distinct, range [−0.132356, 0.268591], median −0.003668. Real-data counts come with the Gate E run |
+| C Reachability | pass | **Real data** (Gate E run `gatee7-20261115-mtd_ret`, 89 BIST daily frames, flat zero-volume bars dropped by the harness): 398,849 of 398,849 pooled bars non-NaN, 387,805 non-zero, so 11,044 read exactly 0. Synthetic, 900-bar walk, 42 months: 900 non-NaN, 424 above the month's first open, 476 below, 900 distinct, range [−0.132356, 0.268591], median −0.003668 |
 | D Scale-free | pass | ×8/×64 bit-identical, max\|diff\| 0.0. ×10/×3.7 max\|diff\| 2.22e-16 against a 1e-9 tolerance. Run on the same frame with February 2022's first open blanked, so 20 of 900 bars are NaN and the masks have something to match; they match at all four. `0 < 424 < 900` on the unblanked frame |
-| E Attribution | **OWED** | See above |
-| F Suites | this repo only | With `GATE_E_PENDING_OK=1` and CI's two deselected tests: 4203 passed, 86 skipped, 0 failed; one of the skips is `mtd_ret`'s owed row. Without the variable, `test_every_indicator_that_needs_a_row_has_one` fails until the row is recorded, as designed. The parent repo's suite was not run |
+| E Attribution | **DISCLOSE** | 0.7997 vs `bias`, n = 397,158; per-frame 0.8029. See "Gate E" |
+| F Suites | this repo only | With `GATE_E_PENDING_OK=1` and CI's two deselected tests: 4203 passed, 86 skipped, 0 failed; one of the skips is `mtd_ret`'s owed row. Without the variable, `test_every_indicator_that_needs_a_row_has_one` failed until the row was recorded (2026-11-15), as designed. The parent repo's suite was not run |
 
 ## Choices a reader should check
 
