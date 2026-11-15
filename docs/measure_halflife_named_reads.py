@@ -43,11 +43,13 @@ def main() -> None:
         frames[t] = f[cols + ['ADX'] + NAMED]
     cand = cols[0]
     pooled = GE._pool(frames, [cand, 'ADX'] + NAMED)
+    rows = {c: GE.pair_rho(pooled[cand].astype('float64'), pooled[c].astype('float64'))
+            for c in ['ADX'] + NAMED}
+    rho, n, _ = rows['ADX']
+    if not (abs(rho - RUN_ADX[0]) <= 1e-9 and n == RUN_ADX[1]):   # NaN rho fails too
+        raise RuntimeError(f"ADX check failed: {rho!r}, n={n} != run {RUN_ADX}")
     print(f"candidate {cand}, frames {len(frames)}, pooled bars {len(pooled[cand]):,}")
-    for c in ['ADX'] + NAMED:
-        rho, n, why = GE.pair_rho(pooled[cand].astype('float64'), pooled[c].astype('float64'))
-        if c == 'ADX' and (abs(rho - RUN_ADX[0]) > 1e-9 or n != RUN_ADX[1]):
-            raise RuntimeError(f"ADX check failed: {rho!r}, n={n} != run {RUN_ADX}")
+    for c, (rho, n, why) in rows.items():
         print(f"{c:16s} rho {rho:+.6f}  |rho| {abs(rho):.4f}  n {n:,} {why}")
 
 

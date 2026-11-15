@@ -234,7 +234,7 @@ The Backtesting suite cannot be run here. Both rows were recorded on 2026-11-15 
 
 - `CATEGORY_TOTAL` 310 → 311. Statistics is not in `CATEGORY_BUCKETS`.
 - README: 311 registered, 319 callable, statistics (29).
-- `docs/MLCompanionContract.md`: 655 → 656 tagged and 298 → 299 `SF`, with a revert note
+- `docs/MLCompanionContract.md`: 655 → 656 tagged and 298 → 299 `SF`, with a revert note (replaced by the Gate E verdict, 2026-11-15)
   (newest first).
 - `docs/IndicatorDictionary.md`, regenerated with `.venv-pd2`. Its diff is the
   `lumpiness` row (`LUMPINESS_100` SF, 100 warm-up), the four counts and the shortlist

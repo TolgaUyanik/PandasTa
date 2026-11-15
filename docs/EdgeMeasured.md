@@ -238,7 +238,7 @@ Backtesting suite cannot be run here. Both rows were recorded on 2026-11-15 (see
 
 - `CATEGORY_TOTAL` 300 → 301, `CATEGORY_BUCKETS["volatility"]` 28 → 29.
 - README: 301 registered, 309 callable, volatility (29).
-- `docs/MLCompanionContract.md`: 645 → 646 tagged and 288 → 289 `SF`, with a revert note.
+- `docs/MLCompanionContract.md`: 645 → 646 tagged and 288 → 289 `SF`, with a revert note (replaced by the Gate E verdict, 2026-11-15).
 - `docs/IndicatorDictionary.md`, regenerated with `.venv-pd2`. Its diff is the edge row
   (`EDGE_21` SF, 20 warm-up), the four counts and the shortlist entry, and nothing else.
 

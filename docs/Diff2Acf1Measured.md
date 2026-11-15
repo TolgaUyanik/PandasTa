@@ -249,8 +249,8 @@ deviation 2%:
 
 ## Family — what it restates
 
-All of this section is synthetic except the Gate E bound in the last bullet of the first
-part. Gate E compares against the engine's columns, not this fork's, so it does not measure
+All of this section is synthetic except the last bullet of the first part: the #94/#96
+ledger figures and the Gate E bound. Gate E compares against the engine's columns, not this fork's, so it does not measure
 this column against #94 or #96.
 
 **The window's own return autocorrelations** (100 paths × 600 bars). Let
@@ -271,9 +271,10 @@ lag-1 and lag-2 autocorrelations of the same window's 99 log returns.
 - **Two plain return-autocorrelation columns have since shipped on `dev`:** #94
   (`ts_ac1_60`, lag 1, 60 returns) and #96 (`ts_aggac_60`, mean of lags 1–10). Their ledger
   rows (measured 2026-11-13) are SHIP, 0.2536 and 0.2676 vs `mad_pct`.
-  - Their overlap with this column is not measured on real data. By the numbers above the
-    Spearman is 0.61–0.71 at equal windows. That is below the 0.76 ship line, but it is
-    synthetic and the windows differ (60 against 100), so it needs its own measurement.
+  - For #94 (lag 1), the synthetic numbers above give 0.61–0.71 at equal windows: below
+    the 0.76 ship line, but synthetic, and the windows differ (60 against 100). For #96
+    (mean of lags 1–10) there is no synthetic figure. Neither pair is measured on real
+    data; each needs its own measurement.
   - Whether the engine's 687 Gate E comparators hold a return-autocorrelation column is
     still not read here, but the Gate E run bounds it: the largest pooled |ρ| against any
     of the 686 non-degenerate comparators is 0.1323, so none, autocorrelation or not, has a
@@ -373,7 +374,7 @@ Without the variable, `test_every_indicator_that_needs_a_row_has_one` failed (be
 
 - `CATEGORY_TOTAL` 315 → 316. Statistics is not in `CATEGORY_BUCKETS`.
 - README: 316 registered, 324 callable, statistics (29).
-- `docs/MLCompanionContract.md`: 660 → 661 tagged and 303 → 304 `SF`, with a revert note
+- `docs/MLCompanionContract.md`: 660 → 661 tagged and 303 → 304 `SF`, with a revert note (replaced by the Gate E verdict, 2026-11-15)
   (newest first).
 - `docs/IndicatorDictionary.md`, regenerated with `.venv-pd2`. Its diff is the
   `diff2_acf1` row (`DIFF2ACF1_100` SF, 99 warm-up), the four counts and the shortlist

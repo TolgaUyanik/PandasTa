@@ -4,9 +4,11 @@
 > 0.4209 vs `ADX`** (run `gatee7-20261115-halflife`, 2026-11-15, recorded in
 > `docs/gate_e_ledger.csv`; see the Gate table and "HLIFE-3 result"). Gate C's real-data counts
 > come from the same run. **Still owed:** HLIFE-4 (`docs/indicators/halflife.md` and the parent's
-> register pickup; see the end of this file) and the real-data family check against `KPSS_100`
-> and `CUSUM_100`. Issue [#4](https://github.com/TolgaUyanik/PandasTa/issues/4) was closed on
-> 2026-11-13 with HLIFE-3 and HLIFE-4 unchecked, so no open issue tracks these two.
+> register pickup; see the end of this file) and the real-data family check against `KPSS_100`,
+> `CUSUM_100` and `LEAN_HURST_100_20` (see "The family"). Issue
+> [#4](https://github.com/TolgaUyanik/PandasTa/issues/4) was closed by the owner on 2026-11-13
+> ("Done in #256"; none of its four HLIFE checkboxes is ticked). HLIFE-3 landed only on 2026-11-15,
+> and HLIFE-4 and the family check are not done, so no open issue tracks them.
 > Until 2026-11-15, `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
 > owed a row for `halflife`: a **skip** in CI on PRs into `dev`, a failure without
 > `GATE_E_PENDING_OK`. The row is now recorded, as is `mtd_ret`'s (#206).
@@ -120,8 +122,9 @@ So the NaN branch fires rarely on prices that look like random walks. The issue 
 "`lambda >= 0` on a trending or random-walk window", and that is true of the population `lambda`,
 not of its 100-bar estimate. Whether the column still carries information on BIST is not what Gate E
 measures: Gate E measures overlap with the engine's columns (SHIP, see "HLIFE-3 result"). On real
-data the column is NaN far more often than on the synthetic walk: 7.81% of post-warm-up bars against
-0.45% (Gate C row below). A longer window cuts the bias at the cost of responsiveness: at 2,000 bars the median
+data the column is NaN on 7.81% of post-warm-up bars, counting every NaN cause (the run does not
+split them; see the Gate C row below), against 0.45% on the seed-11 walk and 4% (8 of 200) on the
+101-bar random walks above. A longer window cuts the bias at the cost of responsiveness: at 2,000 bars the median
 error over K = 50 paths is −1.6% … +0.8% (standard error of the median 3.6% at theta 0.02), so no
 bias is detectable at that resolution. Gate E did not force a longer window (SHIP, 0.4209); whether
 to lengthen it for the bias is the owner's call.
@@ -209,15 +212,20 @@ pooled:
 ### The family (issue #4's tie rule)
 
 #4 says to measure the persistence family against its survivor, because Gate E only compares a
-candidate with the engine's shipped columns. Since #4 was written, two family members have shipped
-in this fork: `kpss` (#157) and `cusum` (#16). Per Tolga's note on #16, `kpss` is not among Gate
-E's comparators, so the harness will not see this overlap. A synthetic indication, **not** the
+candidate with the engine's shipped columns. Since #4 was written, three family members have shipped
+in this fork: `kpss` (#157), `cusum` (#16) and `lean_hurst_100` (#85, Gate E row measured
+2026-11-11, before HLIFE-3 reported, so #4's "do not extend to `hurst`" block was not held for it).
+Per Tolga's note on #16, `kpss` is not among Gate E's comparators, so the harness will not see this
+overlap; the same holds for the other two, which are this fork's columns, not the engine's. A
+synthetic indication, **not** the
 real-data measurement, pinned by `test_family_overlap_on_synthetic_walks`: on 10 tick-rounded
 3,000-bar walks (`_walk(3000, seed)`, σ = 1.5%, seeds 0–9), signed Spearman ρ on pairwise-complete
 bars of `HLIFE_100` against `KPSS_100` has median 0.240 (max 0.458), against `CUSUM_100` median
-0.224 (max 0.334), and against `ZSCORE_20` median −0.008. The real-data ρ against `KPSS_100` and
-`CUSUM_100` on the 89 frames is **still owed**: the HLIFE-3 run (2026-11-15) compares against the
-engine's columns only, so it does not include them. #4 blocked #85 (`lean_hurst_100`),
+0.224 (max 0.334), and against `ZSCORE_20` median −0.008. Against `LEAN_HURST_100_20` there is no
+figure, synthetic or real: neither this file nor `docs/LeanHurst100Measured.md` measures the pair.
+The real-data ρ against `KPSS_100`, `CUSUM_100` and `LEAN_HURST_100_20` on the 89 frames is
+**still owed**: the HLIFE-3 run (2026-11-15) compares against the engine's columns only, so it
+does not include them. #4 blocked #85 (`lean_hurst_100`),
 `variance_ratio` and a rolling ADF until HLIFE-3 reported; it reported on 2026-11-15 (SHIP), and
 `lean_hurst_100` already has its own row in `docs/gate_e_ledger.csv` (SHIP, measured 2026-11-11).
 Whether `variance_ratio` and a rolling ADF also wait for the real-data family check is the owner's

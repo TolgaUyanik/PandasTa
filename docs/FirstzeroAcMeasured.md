@@ -332,7 +332,7 @@ The Backtesting suite cannot be run here.
   `CATEGORY_BUCKETS`.
 - README: 318 registered, 326 callable, statistics (29).
 - `docs/MLCompanionContract.md`: 662 → 663 tagged and 51 → 52 `ORD`, `SF` unchanged at
-  305, with a revert note (newest first).
+  305, with a revert note (replaced by the Gate E verdict, 2026-11-15) (newest first).
 - `docs/IndicatorDictionary.md`, regenerated with `.venv-pd2`. Its diff is the
   `firstzero_ac` row (`FIRSTZEROAC_100` ORD, warm-up 100), the four counts and the
   shortlist entry.
