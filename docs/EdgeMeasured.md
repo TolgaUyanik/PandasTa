@@ -222,7 +222,8 @@ The prototype's figure in the issue (0.3889 vs `natr`) carried over to four deci
 Outputs: `MultipleBranchWork/Backtesting-adhoc-gatee-agent/backtest_results/gatee/gatee7-20261115-edge/`
 on the owner's machine; Backtesting `91ab7ae2`, stamp `engine_code` `f58eb5da`,
 `pandas_ta_src_sha1` `9293d757`. To re-run, from `../Backtesting/Backtesting`:
-`python scripts/analysis/gate_e_overlap.py run --module pandas_ta.volatility.edge --name <run name>`.
+`python scripts/analysis/gate_e_overlap.py run --module pandas_ta.volatility.edge --name <run name>`,
+with this tree on `PYTHONPATH` (`record` checks the run's `pandas_ta_src_sha1`).
 
 ## Gate F — suites
 

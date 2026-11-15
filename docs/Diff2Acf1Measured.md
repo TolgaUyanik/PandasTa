@@ -268,11 +268,12 @@ lag-1 and lag-2 autocorrelations of the same window's 99 log returns.
   else. None of these paths has zero returns, so tick-rounded data is not covered.
 - Against the lag-1 autocorrelation alone it is 0.61–0.71 pooled, and it varies a lot by
   path (0.28 to 0.89, p10 to p90).
-- **Two open issues would add a plain return-autocorrelation column:** #94 (TS-AC1-60,
-  lag-1) and #96 (TS-AGGAC-60, mean of lags 1–10).
-  - If #94 ships, it and this column will overlap. By the numbers above, the Spearman is
-    0.61–0.71 at equal windows. That is below the 0.76 ship line, but it is synthetic and
-    the windows differ (60 against 100), so it needs its own measurement.
+- **Two plain return-autocorrelation columns have since shipped on `dev`:** #94
+  (`ts_ac1_60`, lag 1, 60 returns) and #96 (`ts_aggac_60`, mean of lags 1–10). Their ledger
+  rows (measured 2026-11-13) are SHIP, 0.2536 and 0.2676 vs `mad_pct`.
+  - Their overlap with this column is not measured on real data. By the numbers above the
+    Spearman is 0.61–0.71 at equal windows. That is below the 0.76 ship line, but it is
+    synthetic and the windows differ (60 against 100), so it needs its own measurement.
   - Whether the engine's 687 Gate E comparators hold a return-autocorrelation column is
     still not read here, but the Gate E run bounds it: the largest pooled |ρ| against any
     of the 686 non-degenerate comparators is 0.1323, so none, autocorrelation or not, has a
@@ -355,7 +356,8 @@ reads 0.0002 higher.
 Outputs: `MultipleBranchWork/Backtesting-adhoc-gatee-agent/backtest_results/gatee/gatee7-20261115-diff2_acf1/`
 on the owner's machine; Backtesting `91ab7ae2`, stamp `engine_code` `f58eb5da`,
 `pandas_ta_src_sha1` `9293d757`. To re-run, from `../Backtesting/Backtesting`:
-`python scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.diff2_acf1 --name <run name>`.
+`python scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.diff2_acf1 --name <run name>`,
+with this tree on `PYTHONPATH` (`record` checks the run's `pandas_ta_src_sha1`).
 
 ## Gate F — suites
 

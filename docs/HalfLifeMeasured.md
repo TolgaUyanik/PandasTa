@@ -3,9 +3,10 @@
 > **Status: HLIFE-1 and HLIFE-2 (Gates A, B, D) pass. HLIFE-3 (Gate E) is measured: SHIP,
 > 0.4209 vs `ADX`** (run `gatee7-20261115-halflife`, 2026-11-15, recorded in
 > `docs/gate_e_ledger.csv`; see the Gate table and "HLIFE-3 result"). Gate C's real-data counts
-> come from the same run. **Still owed** (issue [#4](https://github.com/TolgaUyanik/PandasTa/issues/4)):
-> HLIFE-4 (`docs/indicators/halflife.md` and the parent's register pickup; see the end of this
-> file) and the real-data family check against `KPSS_100` and `CUSUM_100`.
+> come from the same run. **Still owed:** HLIFE-4 (`docs/indicators/halflife.md` and the parent's
+> register pickup; see the end of this file) and the real-data family check against `KPSS_100`
+> and `CUSUM_100`. Issue [#4](https://github.com/TolgaUyanik/PandasTa/issues/4) was closed on
+> 2026-11-13 with HLIFE-3 and HLIFE-4 unchecked, so no open issue tracks these two.
 > Until 2026-11-15, `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
 > owed a row for `halflife`: a **skip** in CI on PRs into `dev`, a failure without
 > `GATE_E_PENDING_OK`. The row is now recorded, as is `mtd_ret`'s (#206).
@@ -159,8 +160,9 @@ constant); canary bit-equal on AKBNK, BIENY, AGHOL and SASA. Outputs:
 `MultipleBranchWork/Backtesting-adhoc-gatee-agent/backtest_results/gatee/gatee7-20261115-halflife/`
 on the owner's machine; Backtesting `91ab7ae2`, stamp `engine_code` `f58eb5da`,
 `pandas_ta_src_sha1` `9293d757`. To re-run, from `../Backtesting/Backtesting`:
-`python scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.halflife --name <run name>`.
-The run's top 5, pooled:
+`python scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.halflife --name <run name>`,
+with this tree on `PYTHONPATH` (`record` checks the run's `pandas_ta_src_sha1`). The run's top 5,
+pooled:
 
 | comparator | set | ρ | n |
 |---|---|---|---|
@@ -173,29 +175,36 @@ The run's top 5, pooled:
 * **Per frame:** the top-5 per-frame max median |ρ| is 0.4224, vs `ADX`, over 89 frames; 0 frames
   at or above 0.90.
 * **The columns named for a specific read** are not in the run's top 25 (last entry `TK_Cross_Age`,
-  0.2040), so the run's outputs do not hold them. They were computed afterwards on the same cache
-  by `docs/measure_halflife_named_reads.py`, which uses the harness's own `assemble_frame`, `_pool`
-  and `pair_rho` (run from the gatee worktree's `Backtesting/`, `PYTHONPATH` on this tree). The
-  same code gives `ADX` 0.420861, n = 359,496, the run's figure exactly. Pooled, signed ρ, every
-  n = 359,496:
+  0.2040), so the run's outputs do not hold them. They were computed afterwards (2026-11-15) on
+  the same cache by `docs/measure_halflife_named_reads.py`. It uses the harness's own
+  `assemble_frame`, `_pool` and `pair_rho`, refuses a stale cache as `run` does (`check_stamp`,
+  `check_canary`), and asserts `ADX` against the run (0.42086080470239484, n = 359,496, within
+  1e-9) before printing. `LINREG_*` is read as the seven upper-case `LINREG_` columns plus the
+  engine's lower-case `linreg`. Its output, verbatim (run from the gatee worktree's
+  `Backtesting/`, `PYTHONPATH` on this tree):
 
-  | comparator | ρ |
-  |---|---|
-  | `BB_BWidth` | 0.1997 |
-  | `natr` | 0.1890 |
-  | `natr_percentile` | 0.1766 |
-  | `LINREG_SLOPE` | 0.0814 |
-  | `ZSCORE_20` | 0.0559 |
-  | `LINREG_DEV` | 0.0432 |
-  | `LINREG_UPPER_2` | 0.0121 |
-  | `LINREG_UPPER_1` | 0.0111 |
-  | `LINREG_VALUE` | 0.0101 |
-  | `LINREG_LOWER_1` | 0.0089 |
-  | `LINREG_LOWER_2` | 0.0076 |
+  ```
+  candidate HLIFE_100, frames 89, pooled bars 398,849
+  ADX              rho +0.420861  |rho| 0.4209  n 359,496
+  natr             rho +0.189011  |rho| 0.1890  n 359,496
+  natr_percentile  rho +0.176557  |rho| 0.1766  n 359,496
+  ZSCORE_20        rho +0.055932  |rho| 0.0559  n 359,496
+  BB_BWidth        rho +0.199708  |rho| 0.1997  n 359,496
+  LINREG_SLOPE     rho +0.081435  |rho| 0.0814  n 359,496
+  LINREG_VALUE     rho +0.010058  |rho| 0.0101  n 359,496
+  LINREG_DEV       rho +0.043248  |rho| 0.0432  n 359,496
+  LINREG_UPPER_1   rho +0.011108  |rho| 0.0111  n 359,496
+  LINREG_LOWER_1   rho +0.008904  |rho| 0.0089  n 359,496
+  LINREG_UPPER_2   rho +0.012068  |rho| 0.0121  n 359,496
+  LINREG_LOWER_2   rho +0.007592  |rho| 0.0076  n 359,496
+  linreg           rho +0.009851  |rho| 0.0099  n 359,496
+  ```
+
+  The largest of the named reads is `BB_BWidth` at 0.1997.
 * **Verdict against the ladder:** pooled 0.4209 and per-frame 0.4224 are under 0.76, so SHIP; no
-  revert. The prediction ("low ρ") set no number; the measured maximum is 0.42, against trend
-  strength (`ADX`) and cloud thickness, not against any column the issue named. All of those
-  are in the comparator set (checked by name in the run's cached AKBNK frame).
+  revert. The prediction ("low ρ") set no number. The measured maximum is 0.4209 vs `ADX` (trend
+  strength); next is the cloud-thickness pair at 0.3984; none of the top 5 is a column the issue
+  named.
 
 ### The family (issue #4's tie rule)
 
@@ -211,7 +220,8 @@ bars of `HLIFE_100` against `KPSS_100` has median 0.240 (max 0.458), against `CU
 engine's columns only, so it does not include them. #4 blocked #85 (`lean_hurst_100`),
 `variance_ratio` and a rolling ADF until HLIFE-3 reported; it reported on 2026-11-15 (SHIP), and
 `lean_hurst_100` already has its own row in `docs/gate_e_ledger.csv` (SHIP, measured 2026-11-11).
-Whether `variance_ratio` and a rolling ADF also wait for the real-data family check is #4's call.
+Whether `variance_ratio` and a rolling ADF also wait for the real-data family check is the owner's
+call (#4 is closed; see the status block).
 
 ### Gate F (the author's machine, `.venv-pd2`)
 
@@ -229,8 +239,8 @@ local check was the counter, wiring and halflife tests, and the full suite is CI
 
 The +33 passes are the 32 tests of `tests/test_halflife.py` and
 `test_every_new_indicator_has_gate_b_and_d_tests[halflife]`; the extra skip in both is the owed
-ledger row (`mtd_ret`, #206, on `dev`; `halflife` here), which fails instead without the
-variable. Earlier, on the `12891bd` base (2026-11-08/09): `dev` 4437 passed / 84 skipped, this
+ledger row (`mtd_ret`, #206, on `dev`; `halflife` here), which failed instead without the
+variable until both rows were recorded on 2026-11-15. Earlier, on the `12891bd` base (2026-11-08/09): `dev` 4437 passed / 84 skipped, this
 branch 4470 / 84; without the variable 1 failed in each (`mtd_ret`; `['halflife', 'mtd_ret']`).
 CI runs: `7c4896e` 4463 passed / 86 skipped, `835eba1` (run 42519643902) 4466 passed / 86
 skipped, both green on numpy 1.26.4 without statsmodels. CI prints no skip reasons; its 2 passes fewer and 2 skips more than the local run are

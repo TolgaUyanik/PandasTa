@@ -34,8 +34,10 @@ default parameters (`MTD_RET`). Recorded with
 next comparator, `ATR_POSITION`, reads pooled 0.7934, per-frame median 0.7956, 39 of 89
 frames at or above 0.80. Read from the Backtesting source, both place the close against a
 recent level: `bias` is `(close - sma20) / sma20` (`indicator_engine.py:988`), and
-`ATR_POSITION` is the close's position between `ATR_LOWER` and `ATR_UPPER`
-(`ml_features.py:274`). `MTD_RET` places the close against the month's first open.
+`ATR_POSITION` is the close's position in an `SMA_20 ± 2·ATR` channel
+(`speedy_indicators.py:358-365`, reached via `indicator_engine.py:81`), which works out to
+`50 + 25·(close − SMA_20)/ATR`: the same anchor as `bias`, scaled by ATR instead of by the
+average. `MTD_RET` places the close against the month's first open.
 `bias_ta` (0.7840), `ZSCORE_20` and `BB_%B` (0.7760 each) were not read.
 
 **Band.** Pooled 0.7997 is in DISCLOSE (0.76 ≤ ρ < 0.80), 0.0003 under the 0.80 line where
@@ -48,7 +50,8 @@ band only changes the disclosure.
 Outputs: `MultipleBranchWork/Backtesting-adhoc-gatee-agent/backtest_results/gatee/gatee7-20261115-mtd_ret/`
 on the owner's machine; Backtesting `91ab7ae2`, stamp `engine_code` `f58eb5da`,
 `pandas_ta_src_sha1` `9293d757`. To re-run, from `../Backtesting/Backtesting`:
-`python scripts/analysis/gate_e_overlap.py run --module pandas_ta.performance.mtd_ret --name <run name>`.
+`python scripts/analysis/gate_e_overlap.py run --module pandas_ta.performance.mtd_ret --name <run name>`,
+with this tree on `PYTHONPATH` (`record` checks the run's `pandas_ta_src_sha1`).
 
 **The prototype.** The issue's screen, `screen_r9_20261029`, measured the prototype
 `b3_mtd_ret` at 0.7997 vs `bias` (n = 397,156), per-frame 0.8029, DISCLOSE. The port reproduces
