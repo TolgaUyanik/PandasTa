@@ -194,9 +194,11 @@ unguarded failure here is INVISIBLE rather than absurd: the returns of an
 exactly geometric path are mathematically constant, so the answer is 0, but
 in float64 they differ in their last bits and an unguarded reading then
 reports a run length of that noise -- measured, a 1%-a-bar ladder reads 1,
-2, 3 or 4 on 280 of 300 bars (counts 85 / 64 / 80 / 51) and an exact x1.5
-ladder reads 1, 2, 3, 5 or 8, every one of those values inside the live
-range of a real walk (1 to 9). On a walk and on a tick-rounded walk the
+2, 3 or 4 on all 280 of its fired bars (counts 85 / 64 / 80 / 51 on this
+machine; being rounding noise they move with numpy's kernels, 87 / 75 / 73 /
+45 under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`) and an
+exact x1.5 ladder reads 1, 2, 3, 5 or 8, every one of those values inside the
+live range of a real walk (1 to 9). On a walk and on a tick-rounded walk the
 floor changes neither a value nor a NaN flag (280 of 300 bars fire on each,
 bit-equal to the unguarded form). What it COSTS is stated rather than
 hidden: on a monotone one-tick-per-bar path the returns genuinely decrease

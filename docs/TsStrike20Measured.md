@@ -288,6 +288,15 @@ reading then reports the longest run *of that noise*:
 | 1%-a-bar ladder | 0.0 on all 280 fired bars | **1, 2, 3, 4** on 280 bars (counts 85 / 64 / 80 / 51) |
 | exact ×1.5 ladder | 0.0 on all 280 | **1, 2, 3, 5, 8** (counts 234 / 25 / 18 / 1 / 2) |
 
+⚠ **Those unguarded values and counts are rounding noise, so they are not
+portable.** Re-measured 2026-11-15 with
+`NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (numpy's kernels on a
+runner without AVX-512), the 1%-a-bar ladder gives the same four values with
+counts **87 / 75 / 73 / 45** and the ×1.5 ladder is unchanged. The table above
+is this machine's run. What `tests/test_ts_strike_20.py` asserts is therefore
+the structural part only: all 280 fired bars nonzero, and every unguarded value
+a value the column takes on a real walk.
+
 ⚠ **This is why the floor matters more here than it did for `ts_c3_20`.** That
 column's unguarded failure reached 8.0e+41 and could not be missed. Here every
 unguarded value — 1 to 8 — is *inside the live range of a real walk* (1 to 9,
@@ -580,6 +589,28 @@ verdict quoted two Gate B grids as slash-joined number runs, and
 scans every prose file in the fork for five or more slash-joined numbers —
 went red, taking the suite to 4 failed while this line still said 3. Re-run
 the suite after touching anything, prose included.
+
+**Fix session, 2026-11-15** (the launcher's CI-CPU check found
+`test_an_exactly_geometric_frame_reads_zero_rather_than_a_run_of_noise`
+pinning a CPU-dependent detail; see the ⚠ under §The rounding-noise floor):
+
+* `python docs/measure_ts_strike_20_cpu.py disable pytest` → **144 passed**
+  under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`, and
+  `… native pytest` → **144 passed** on this machine's kernels. The script
+  sets the variable before importing numpy and then runs the module in the
+  same process, which a shell prefix would also do; it is committed as the
+  receipt for the two count sets quoted above.
+* `python -m pytest -q` → **2 failed, 10,764 passed, 85 skipped** in
+  272.83 s. The failures are
+  `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
+  (needs `../AlternativeRepos`, deselected in CI) and
+  `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`.
+  The porting session's third failure,
+  `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`, is
+  gone: `CLAUDE.md` records it as fixed on 2026-11-15 by #8 (PINECITE),
+  which tracked the one `docs/pine/` file its evidence cites. The passed
+  count also moved far more than this session's edits explain (5,954 →
+  10,764); it is quoted as what this run printed, not reconciled.
 
 The launcher runs both repos' suites in clean worktrees.
 

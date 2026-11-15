@@ -67,8 +67,12 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    than absurd.** The returns of an exactly geometric path are
    mathematically constant, so the answer is 0, but in float64 they differ
    in their last bits: unguarded, a 1%-a-bar ladder reads 1, 2, 3 or 4 on
-   280 of 300 bars and an exact x1.5 ladder reads 1, 2, 3, 5 or 8 -- every
-   one of those values inside the live range of a real walk (1 to 9), where
+   all 280 of its fired bars and an exact x1.5 ladder reads 1, 2, 3, 5 or 8
+   -- every one of those values inside the live range of a real walk (1 to
+   9), which is the form the test asserts, since the exact values and counts
+   are float64 noise and move with numpy's kernels (measured: the 1%-a-bar
+   ladder's counts are 85 / 64 / 80 / 51 here and 87 / 75 / 73 / 45 under
+   `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`), where
    `ts_c3_20`'s unguarded failure reached 8e+41 and could not be missed. The
    floor is ABSOLUTE (4096 eps = 9.09e-13) because what it bounds is the
    range of dimensionless price ratios, which has no window of its own to
@@ -688,26 +692,41 @@ def test_a_positive_offset_only_delays_and_a_negative_one_is_the_callers_ask():
 # ------------------------------------------------------- the noise floor
 
 
-@pytest.mark.parametrize("frame,values,counts", [
-    (Series(100.0 * np.exp(np.arange(300) * 0.01)), [1, 2, 3, 4],
-     [85, 64, 80, 51]),
-    (Series(np.cumprod(np.full(300, 1.5)) * 1e-20), [1, 2, 3, 5, 8],
-     [234, 25, 18, 1, 2]),
-])
+@pytest.mark.parametrize("frame", [
+    Series(100.0 * np.exp(np.arange(300) * 0.01)),
+    Series(np.cumprod(np.full(300, 1.5)) * 1e-20),
+], ids=["1%-a-bar ladder", "x1.5 ladder"])
 def test_an_exactly_geometric_frame_reads_zero_rather_than_a_run_of_noise(
-        frame, values, counts):
+        frame):
     """Both ladders have mathematically constant returns, so the answer is 0.
-    Unguarded they report a run anyway, out of float64 rounding -- and
-    unlike `ts_c3_20`'s 8e+41, every value they report is an ORDINARY one
-    that nothing downstream could flag."""
+    Unguarded they report a run anyway, out of float64 rounding -- on EVERY
+    fired bar -- and unlike `ts_c3_20`'s 8e+41, every value they report is an
+    ORDINARY one that nothing downstream could flag: each one is a value the
+    same column takes on a real walk, which is what the last assertion
+    compares against rather than a hard-coded list.
+
+    What is pinned here is structural, because the detail is not portable:
+    the unguarded reading is float64 noise, so WHICH noise value a bar gets
+    depends on numpy's kernels. Measured on this machine, the 1%-a-bar ladder
+    reads 1, 2, 3, 4 with counts 85 / 64 / 80 / 51, and with
+    `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` the same four
+    values with counts 87 / 75 / 73 / 45. The x1.5 ladder came out identical
+    both ways (1, 2, 3, 5, 8; 234 / 25 / 18 / 1 / 2). The value SET held in
+    both runs too, but it is no more guaranteed than the counts, so neither
+    is asserted."""
     guarded = ts_strike_20(frame)
     unguarded = _variant(frame, guard=False)
     assert int(guarded.notna().sum()) == 280
     assert sorted(set(guarded.dropna().tolist())) == [0.0]
-    got, cnt = np.unique(unguarded.dropna().to_numpy(), return_counts=True)
-    assert got.astype(int).tolist() == values
-    assert cnt.tolist() == counts
-    assert max(values) <= 9  # the live range of the walk in Gate C/D below
+    assert (guarded.isna() == unguarded.isna()).all()
+    noise = unguarded.dropna().to_numpy()
+    # The guard is not cosmetic: unguarded, pure rounding plants a strike on
+    # every bar that fires.
+    assert int((noise > 0.0).sum()) == 280
+    # And every one of those is a value a real frame produces, so nothing
+    # downstream could tell the noise from a reading.
+    live = set(ts_strike_20(_walk()).dropna().tolist())
+    assert set(noise.tolist()) <= live
 
 
 @pytest.mark.parametrize("frame_fn", [_walk, _tick_rounded])
