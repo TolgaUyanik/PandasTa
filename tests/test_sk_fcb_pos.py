@@ -698,17 +698,22 @@ def test_the_source_library_is_not_readable_here():
     pinned shut here, so the claim cannot rot into "checked against
     Skender" if one of them ever opens.
 
-    `docs/pine/` is the corpus `CLAUDE.md` describes as untracked; it holds
-    Pine, not C#, but it is the only vendored-source directory this repo
-    has ever had, and its absence is half of why this port cites the
-    issue's naming of `Fcb.Series.cs` instead of its lines.
+    `docs/pine/` is the Pine corpus `CLAUDE.md` describes as untracked apart
+    from one tracked file (#8, TradingView's `ta` library); it holds Pine,
+    not C#, but it is the only vendored-source directory this repo has ever
+    had, and the absence of any vendored source beyond that file is half of
+    why this port cites the issue's naming of `Fcb.Series.cs` instead of its
+    lines.
 
     ⚠ A FOURTH route, web access, was unavailable in the session that
     wrote this and is NOT pinned here: a test cannot see it. Said in the
     module docstring and in `docs/SkFcbPosMeasured.md`'s "What this port
     does NOT establish" too, so "all routes are pinned" is nowhere."""
     assert importlib.util.find_spec("stock_indicators") is None
-    assert not (ROOT / "docs" / "pine").exists()
+    # `docs/pine/` holds only the one tracked file (#8): TradingView's `ta`
+    # library, which the Pine audit cites. Anything more is a vendored corpus.
+    pine = ROOT / "docs" / "pine"
+    assert not pine.exists() or {x.name for x in pine.iterdir()} <= {"RA2vGpkA-ta.pine"}
     assert not list(ROOT.rglob("Fcb.Series.cs"))
 
 

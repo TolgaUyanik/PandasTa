@@ -16,10 +16,12 @@ stale, and `test_no_other_document_retypes_the_split` now scans this file
 along with every document in the fork. The fix was to make `PRIMITIVES`
 outrank a namespace match; this test is the guard.
 
-The corpus test is skipped when `docs/pine/` is absent — it is untracked by design
-(2,211 files, 46MB, 912 of them MPL-2.0 © TradingView), so it exists on a
-working checkout and not in CI. The other guards read the committed CSV and run
-everywhere.
+The corpus test is skipped unless the full corpus is present — it is untracked by
+design (2,211 files, 46MB, 912 of them MPL-2.0 © TradingView), so it exists on a
+working checkout and not in CI. One corpus file IS tracked (#8): TradingView's
+`ta` library, `docs/pine/RA2vGpkA-ta.pine`, the only file the audit evidence
+cites, so `docs/pine/` exists on every clone and is not by itself the signal.
+The other guards read the committed CSV and run everywhere.
 """
 import collections
 import csv
@@ -37,6 +39,17 @@ DOCS = os.path.join(_FORK, "docs")
 CSV = os.path.join(DOCS, "pine_builtin_coverage.csv")
 GEN = os.path.join(DOCS, "gen_pine_builtin_coverage.py")
 CORPUS = os.path.join(DOCS, "pine")
+# Corpus files committed to the repo (#8); see the module docstring and NOTICE.
+# Read from the generator's source, so the two cannot drift apart.
+TRACKED_PINE = set(re.findall(r'"([^"]+\.pine)"', re.search(
+    r"TRACKED_PINE = frozenset\(\{([^}]*)\}\)", open(GEN, encoding="utf8").read()).group(1)))
+
+
+def _full_corpus_present():
+    """True only when `docs/pine/` holds .pine files beyond the tracked ones."""
+    if not os.path.isdir(CORPUS):
+        return False
+    return any(f.endswith(".pine") and f not in TRACKED_PINE for f in os.listdir(CORPUS))
 
 # One definition of "a verdict-count claim", used by both split guards. It was
 # inline in a single test; two tests reading the same shape must not drift.
@@ -100,8 +113,9 @@ def test_primitives_stay_primitives_after_they_land():
         )
 
 
-@pytest.mark.skipif(not os.path.isdir(CORPUS),
-                    reason="docs/pine corpus is untracked by design (licence)")
+@pytest.mark.skipif(not _full_corpus_present(),
+                    reason="docs/pine corpus is untracked by design (licence); only "
+                           "the cited ta library is tracked")
 def test_regenerating_reproduces_the_committed_csv(tmp_path):
     """Re-run the classifier; the verdict column must not move.
 
@@ -411,7 +425,8 @@ def test_every_map_entry_is_reachable():
     # exclusion is a hole opened in advance -- it excuses a map that does not
     # exist today and would silently excuse one appearing under that name
     # tomorrow. So every exclusion must name something real.
-    NOT_NAME_KEYED = set()
+    # TRACKED_PINE (#8) is keyed by corpus file name, not by a Pine name.
+    NOT_NAME_KEYED = {"TRACKED_PINE"}
     phantom = sorted(n for n in NOT_NAME_KEYED if not hasattr(gen, n))
     assert phantom == [], (
         f"NOT_NAME_KEYED excludes attributes the classifier does not define: "

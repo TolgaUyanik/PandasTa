@@ -266,7 +266,8 @@ column is still `SUM_<length>`), `normalize`, `covariance`, and `pivot`. 25 test
   **TVPTA-1b's actual deliverable is already delivered by this triage** — "extend `triage_pine_indicators.py`'s classifier against `script_type == 'library'`" is exactly what `docs/PineCorpusTriage.md` ran, verbatim classifier, over all 992: `no_math` 649 (65.4%), `portable` 179, `extractable_core` 90, `needs_multisymbol` 74. **Read that document before writing TVPTA-1b's spec; do not re-run the classifier.** Refer any resumption of Queue B to TVPTA-1b (`../Backtesting/TODO.md:489`) — **no third pine initiative.**
   ⚠ **If Queue B is resumed anyway**, the preconditions are in `PineCorpusTriage.md` §5 and are not optional: TVPTA-9 first (every Gate E verdict produced before it is against an incomplete comparator set), then the licence terms of the **90 non-MPL-headered files** of the 269 resolved per file, then the wiring backlog. Expected yield after all of it: 2–7, plausibly 1.
   `docs/pine/` holds 2,211 `.pine` files, untracked since 2026-09-07 (912 are MPL-2.0
-  © TradingView; root `LICENSE` is MIT). TVPTA already ported 195 and left two queues:
+  © TradingView; root `LICENSE` is MIT). (2026-11-15, #8: `docs/pine/RA2vGpkA-ta.pine` is
+  tracked again, see `NOTICE`; the rest stays ignored by `.gitignore`'s `docs/pine/*`.) TVPTA already ported 195 and left two queues:
   the 43-candidate `defer` backlog (TVPTA-6) and the 992 never-scanned `library`-type files (TVPTA-1b).
   **Done when:** this repo's side of whichever queue is picked is ported and green; the queue's own
   acceptance criteria stay owned by the parent task.
@@ -317,7 +318,8 @@ column is still `SUM_<length>`), `normalize`, `covariance`, and `pivot`. 25 test
 
 ⚠ Ties: extends **TVPTA-1b** (`../Backtesting/TODO.md:489`) and **TVPTA-6** (`:253`) — do not open a
 third pine initiative. ~~`docs/pine/` is currently neither committed nor gitignored; decide which in
-PINEBI-0.~~ **Stale — it IS gitignored** (`.gitignore:167`, decided 2026-09-07). The open licensing
+PINEBI-0.~~ **Stale — it IS gitignored** (decided 2026-09-07; since #8, 2026-11-15, by `docs/pine/*` with one
+tracked exception, `docs/pine/RA2vGpkA-ta.pine`). The open licensing
 question is the tracked second copy in `Backtesting`, above, not this one. `williamsFractal` (-1b) overlaps the engine's existing `FRACTAL_UP`/`FRACTAL_DN` columns and
 `ta.pivothigh`/`ta.pivotlow` (-1a) — measure all three against each other before shipping any.
 The other 6 `© TradingView` libraries on disk (`ZigZag`, `zigzag-force`, `RiskMetrics`, `ValueAtTime`,
