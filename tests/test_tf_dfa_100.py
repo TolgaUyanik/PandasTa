@@ -93,7 +93,7 @@ What this file pins, in order of how much it would hurt to lose:
 
 8. **Gate E is SHIP, and the test says whose measurement the row is.**
    `test_the_gate_e_row_is_this_ports_own_measurement` pins the ledger
-   row to run `is112-tf_dfa_100-da670816` (2026-11-15, on THIS module):
+   row to run `is112-tf_dfa_100-0bdd5848` (2026-11-15, on THIS module):
    pooled **0.0979** against the manifest's `Swing_Range_pct` at
    n = 389,949, top-five per-frame max median **0.0996** against the
    same comparator over 89 frames, 687 comparators, no waiver. Both
@@ -1121,7 +1121,7 @@ def _tf_dfa_100_ledger_row():
 
 def test_the_gate_e_row_is_this_ports_own_measurement():
     """The ledger row for `tf_dfa_100` must come from the run on THIS
-    module, `is112-tf_dfa_100-da670816` (measured 2026-11-15), and NOT
+    module, `is112-tf_dfa_100-0bdd5848` (measured 2026-11-15), and NOT
     from the catalog screen of 2026-10-24, which measured the
     PROTOTYPE. The two agree on the comparator, its set, its rank order
     and all four of the screen's published figures to four decimals --
@@ -1156,7 +1156,7 @@ def test_the_gate_e_row_is_this_ports_own_measurement():
     row = _tf_dfa_100_ledger_row()
     assert row["module"] == "pandas_ta.statistics.tf_dfa_100"
     assert row["column"] == "TFDFA_100"
-    assert row["run"] == "is112-tf_dfa_100-da670816"
+    assert row["run"] == "is112-tf_dfa_100-0bdd5848"
     assert row["verdict"] == "SHIP"
     assert row["verdict_schema"] == "r3-perframe-0.90"
     assert row["waiver"] == ""

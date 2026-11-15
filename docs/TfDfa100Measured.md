@@ -6,7 +6,7 @@ Source: **TSFEL** (Fraunhofer Portugal AICOS, BSD-3-Clause),
 Module: `pandas_ta/statistics/tf_dfa_100.py` · column **`TFDFA_100`**
 (statistics, scale-free) · tests: `tests/test_tf_dfa_100.py` ·
 every number here is printed by `python docs/measure_tf_dfa_100.py`, except
-§E's and §C1's, which come from the Gate E run `is112-tf_dfa_100-da670816`.
+§E's and §C1's, which come from the Gate E run `is112-tf_dfa_100-0bdd5848`.
 
 `TFDFA_100` is the DFA-1 exponent of the last 100 simple returns: cumulate
 the mean-centred returns into a profile, remove a straight line from each
@@ -26,7 +26,7 @@ what is left at each box size, and fit a straight line through the five
 
 Gate E is **SHIP** (§E): max |ρ| **0.0979** against the manifest's
 `Swing_Range_pct` over n = 389,949, top-five per-frame max median **0.0996**
-over the 89 frames, run `is112-tf_dfa_100-da670816` of 2026-11-15 on this
+over the 89 frames, run `is112-tf_dfa_100-0bdd5848` of 2026-11-15 on this
 module. Gate C's real-data limb comes off the same run and is in §C1.
 
 ---
@@ -431,7 +431,7 @@ all eight firing frames.
 
 ### §C1 — real data
 
-**Closed**, off the Gate E run of 2026-11-15 (`is112-tf_dfa_100-da670816`,
+**Closed**, off the Gate E run of 2026-11-15 (`is112-tf_dfa_100-0bdd5848`,
 §E), whose ledger row carries the counts:
 
 ```
@@ -543,7 +543,7 @@ difference, for the reason §A2 gives.
 ## Gate E — attribution
 
 **Gate E: SHIP.** Measured 2026-11-15 on **this module** by run
-`is112-tf_dfa_100-da670816`
+`is112-tf_dfa_100-0bdd5848`
 (`gate_e_overlap.py run --module pandas_ta.statistics.tf_dfa_100`), recorded
 in `docs/gate_e_ledger.csv` by
 `python docs/gate_e_ledger.py record <run dir> --measured 2026-11-15`.
@@ -560,7 +560,7 @@ limbs read the same comparator**, `Swing_Range_pct`.
 ### §E1 — the run
 
 ```
-run                is112-tf_dfa_100-da670816      measured 2026-11-15
+run                is112-tf_dfa_100-0bdd5848      measured 2026-11-15
 module             pandas_ta.statistics.tf_dfa_100   fn tf_dfa_100
 kwargs             {}  (defaults)                 end  none, no column excluded
 frames             89 ALTPORT-1 BIST frames       pooled bars 398,849
@@ -569,9 +569,22 @@ degenerate         1 dropped: squeeze_SQZ_NO (manifest), constant
 canary             AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal
 versions           pandas 2.3.3, numpy 1.26.4
 module sha1        654c61f85635bd4900a7b52f84fbbba12778fca0
-pandas_ta src sha1 665b891c182f2675333f83fb9ba54a3508eda051
+pandas_ta src sha1 ff3c788afbb682a8fbfc308eabd3706edaa46abf
 schema             r3-perframe-0.90
 ```
+
+⚠ **This row replaced an earlier one.** An earlier run of the same module,
+`is112-tf_dfa_100-da670816`, was recorded in commit `cba9ac9` and then
+re-run by the issue-solver against the tree at that commit, producing
+`is112-tf_dfa_100-0bdd5848`; `record` overwrote the row. The two runs agree
+on every figure this file quotes — the same `module_sha1` (`654c61f8`), the
+same output fingerprint, the same pooled 0.09794533770230351 against the
+same `Swing_Range_pct` at the same n = 389,949, the same per-frame table of
+§E3 and the same top-25 of §E3 — and differ only in the run id and in
+`pandas_ta_src_sha1`, which moved from `665b891c` to `ff3c788a` with
+commit `cba9ac9`. That commit touched `docs/` and `tests/` only and left
+`pandas_ta/` untouched, so what moved is the stamp over the tree and not the
+indicator.
 
 Per comparator set, the strongest in each:
 
