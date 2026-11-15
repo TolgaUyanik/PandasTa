@@ -16,7 +16,10 @@ One column, `TFSPECENT_64`, dimensionless, in `[0, 1]`. Dictionary tag `SF`,
 warm-up 64.
 
 **Every number below is printed by `python docs/measure_tf_spec_entropy_64.py`**
-(section letters match the headings), on `numpy 1.26.4`, on nine synthetic
+(section letters match the headings) **except §C1 and §E .. §E3, which are read
+off the Gate E run** `is111-tf_spec_entropy_64-066296ba` and off the row it
+put in `docs/gate_e_ledger.csv` — the only real-data numbers in this file.
+The script runs on `numpy 1.26.4`, on nine synthetic
 1,500-bar frames unless a section says otherwise. `python
 docs/measure_tf_spec_entropy_64_cpu.py` re-runs the test module — and any named
 section — with `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`.
@@ -283,9 +286,38 @@ the frame, where `np.roll` wraps the warm-up's `False` round to the end.
 
 ## Gate C — reachability
 
-⚠ **Synthetic only in this session. The real-data limb is owed with the Gate E
-run** (`Gate E: pending, run by issue-solver after this session`), and the
-receipt session records it.
+### §C1 — real data, read off the Gate E run
+
+Closed by run `is111-tf_spec_entropy_64-066296ba` (§E). The ledger row carries
+the pooled counts over the 89 real BIST frames:
+
+| | |
+|---|---|
+| pooled bars | 398,849 |
+| fired (`non_nan`) | **393,153** |
+| empty | 5,696 |
+| fired bars reading exactly 0.0 (`non_nan - non_zero`) | **0** |
+
+So `0 < fires < n` holds on real data and not only on the synthetic frames
+below.
+
+**The 5,696 empty bars are `89 × 64` exactly**, with nothing left over — the
+constant `length`-bar warm-up of the table below, on real prices, on every one
+of the 89 frames. That is the strongest form this row can take: a
+data-dependent warm-up, or any warm-up other than 64, could not land on the
+multiple exactly.
+`tests/test_tf_spec_entropy_64.py::test_the_gate_e_run_closes_gate_c_on_real_data`
+pins it as `empty == n_frames * WARMUP` rather than as 5,696.
+⚠ The arithmetic assumes every frame is longer than 64 bars, which the row
+cannot show — it carries the pooled total, not per-frame lengths (4,481.4 bars
+per frame on average).
+
+**No real bar read exactly 0.0**, which is §A5's bound ("reaches exactly 0.0
+on **0** bars") holding on 393,153 real bars as well as on the synthetic ones.
+⚠ It is evidence about the LOW end only: the row records no maximum, so
+`< 1.0` at the top end rests on §A5's synthetic sweep.
+
+### §C2 — synthetic frames
 
 | frame | bars | fired | distinct | mean | min | max |
 |---|---|---|---|---|---|---|
@@ -374,37 +406,114 @@ uses the `cumprod` builder.
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
+**SHIP.** Measured on **this module** by run
+`is111-tf_spec_entropy_64-066296ba` (2026-11-15), recorded in
+`docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record … --measured 2026-11-15`. Everything in
+§E .. §E3 is read off that run's `overlap_max.csv`, `top25.csv`,
+`perframe.csv`, `degenerate.csv` and `meta.json`.
 
-No row in `docs/gate_e_ledger.csv`, so
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails locally and skips in CI (`GATE_E_PENDING_OK=1`).
-`tests/test_tf_spec_entropy_64.py::test_the_gate_e_row_is_owed_and_not_yet_recorded`
-asserts the row's absence, which is the receipt session's cue to replace it
-with one pinning the recorded row's identity.
+Run facts, from `meta.json`: module `pandas_ta.statistics.tf_spec_entropy_64`,
+`kwargs {}` (defaults, so `length = 64`), 89 ALTPORT-1 frames, 398,849 pooled
+bars, 687 comparators (329 `compute_all` + 358 manifest), canary
+`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`, `pandas 2.3.3 numpy
+1.26.4`. `candidate_source_sha1` `5210c406`, `pandas_ta_src_sha1` `210e8224`.
+One comparator was dropped as degenerate: `squeeze_SQZ_NO`, constant
+(`degenerate.csv`).
 
-What the 2026-10-24 screen measured, **on the prototype and not on this
-module** (run `screen_r2_20261024`, 89 ALTPORT-1 frames, 398,849 bars,
-329 + 358 comparators, canary bit-equal):
+### §E — the one column
 
-* max |ρ| **0.0284** vs `Supertrend_Flip_Age`, n = 393,242; top-5 per-frame max
-  median 0.0578 → **SHIP** under `r3-perframe-0.90`.
-* Next comparators: `VOL_SMA_20` 0.0257, `Volume` 0.0255.
-* Stage-2 fork overlap (not Gate E; scale-free `Category` outputs at defaults,
-  12 frames): max |ρ| 0.0497 vs `covariance:COV_30_1`, per-frame max median
-  0.0550.
+| | |
+|---|---|
+| column | `TFSPECENT_64` |
+| pooled max \|ρ\| | **0.028405361212209455** (ρ = -0.0284…) |
+| against | `Supertrend_Flip_Age`, manifest |
+| n | 393,153 |
+| top-5 per-frame max median | **0.0582545580507147**, against `VOL_SMA_30` |
+| frames | 89 |
+| verdict | **SHIP** (`r3-perframe-0.90`); `verdict_pooled_only` SHIP |
+| waiver | none — only STRUCK needs one |
+
+Both limbs are far under the 0.76 ship line, so neither carried the other.
+0.0284 against a 0.76 line is not a near miss of any band: the pooled figure
+would have to grow by more than a factor of 26 to reach even DISCLOSE.
+
+### §E1 — the whole of the overlap, not just the maximum
+
+The five top comparators, pooled and per frame (`top25.csv`, `perframe.csv`):
+
+| comparator | set | pooled \|ρ\| | per-frame median | per-frame max, one frame | frames ≥ 0.80 |
+|---|---|---|---|---|---|
+| `Supertrend_Flip_Age` | manifest | 0.028405 | 0.039564 | 0.171666 | 0 |
+| `VOL_SMA_20` | compute_all | 0.025802 | 0.053009 | 0.343315 | 0 |
+| `Volume` | compute_all | 0.025591 | 0.039863 | 0.296104 | 0 |
+| `dist_from_high_60` | compute_all | 0.025356 | 0.052115 | 0.301541 | 0 |
+| `VOL_SMA_30` | compute_all | 0.025196 | 0.058255 | 0.333135 | 0 |
+
+`pct_frames_ge_090` and `pct_frames_ge_080` are **0.0 on all five**. The
+single worst frame anywhere in that table reads 0.343315 (`VOL_SMA_20`), which
+is still under the 0.76 ship line, so no frame of the 89 — on these five
+comparators — reaches any disclosure band.
+
+⚠ That last sentence is bounded by what `perframe.csv` carries: the harness
+writes per-frame rows for the **top five** comparators only, so the 682 others
+are pinned by their pooled figures alone and this file cannot say what their
+worst single frame does.
+
+The tail of `top25.csv` is flat: rank 25 is `cdl_doji` at 0.020215, so the
+whole top-25 spans 0.0202 .. 0.0284 — a range of 0.008. **18 of those 25 read
+volume** (`VOL_SMA_20`, `Volume`, `VOL_SMA_30`, `MAX_DOWN_VOL_10`,
+`AD_Zscore_Pctl`, `AD_Zscore_State`, `AD_Slope_norm`, `OBV_Zscore`, `OBV`,
+`aobv_OBV`, `aobv_OBVe_4`, `aobv_OBVe_12`, `aobv_OBV_min_2`,
+`aobv_OBV_max_2`, `CMF`, `CMF_Bars_Above_Zero`, `adosc_norm`, `pvt`); the
+other 7 are `Supertrend_Flip_Age`, `dist_from_high_60`, `Pct_Up_Days_63`,
+`Supertrend_Bars_Long`, `BODY_PCT`, `uo` and `cdl_doji`. The nearest thing the
+engine has to this column is activity, and the sign is **negative on 23 of the
+25** (`OBV_Zscore` and `cdl_doji` are the two positives): a busier, less
+entropic tape. All of it at |ρ| ≤ 0.0284.
+
+The best `compute_all` comparator is `VOL_SMA_20` at 0.025802; the manifest
+limb's best **is** the pooled maximum.
+
+### §E2 — against the screen's prototype figure
+
+The 2026-10-24 screen measured the **prototype** (run `screen_r2_20261024`)
+at max |ρ| 0.0284 vs `Supertrend_Flip_Age` over n = 393,242, with `VOL_SMA_20`
+0.0257 and `Volume` 0.0255 behind it. This run reproduces the comparator, its
+set and its rank order, and the pooled figure to four decimals; the runners-up
+move in the **fourth** decimal (0.0258 and 0.0256 here).
+
+n differs by exactly **89 = 1 bar per frame**: 393,242 − 393,153. That is
+§A1b's single divergence on real data — the prototype fires the warm-up bar
+`length - 1` as `-0.0` and this module returns NaN there — and it is one bar
+per frame because a BIST frame holds no window of 64 exactly-equal returns, the
+only other way the two part. The top-5 per-frame max median also moves slightly
+(0.0578 on the prototype, 0.0583 here).
 
 §A1 measures this module bit-equal to that prototype on every bar both define,
-so the run on the port is expected to reproduce those digits — which is exactly
-why the receipt session must pin the row's *identity* and not only its
-arithmetic.
+so the agreement is expected — and an expected agreement is the easiest kind of
+row to copy over by mistake, which is why
+`tests/test_tf_spec_entropy_64.py::test_the_gate_e_row_is_this_ports_own_measurement`
+pins the row's **run id** and not only its arithmetic.
+
+### §E3 — what Gate E does not cover
+
+Stage-2 fork overlap, measured by the screen and **not** by this run (not Gate
+E; scale-free `Category` outputs at defaults, 12 frames): max |ρ| 0.0497 vs
+`covariance:COV_30_1`, per-frame max median 0.0550. The 687 Gate E comparators
+are the engine's and hold no pandas_ta port, so the fork's own columns are
+still bounded only by that sweep and by §L4's synthetic frames.
 
 ---
 
 ## Gate F — suites
 
-* `tests/test_tf_spec_entropy_64.py`: **257 passed**.
-* The same 257 under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`,
+* `tests/test_tf_spec_entropy_64.py`: **258 passed** in the receipt session
+  (257 in the porting session; `test_the_gate_e_row_is_owed_and_not_yet_recorded`
+  became `test_the_gate_e_row_is_this_ports_own_measurement` and
+  `test_the_gate_e_run_closes_gate_c_on_real_data` was added, so the count
+  moved by one).
+* The same 258 under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`,
   via `python docs/measure_tf_spec_entropy_64_cpu.py`, which refuses to run
   unless the dispatch actually took. ⚠ It prints the dispatchable features
   still enabled (`SSSE3 SSE41 POPCNT SSE42 AVX F16C AVX512CD AVX512_CLX
