@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Tests for `pandas_ta.performance.mtd_ret` -- month-to-date return from the
 month's first open. Issue #206; source is tier-4 Reddit crowd talk (module
-docstring). Numbers: `docs/MtdRetMeasured.md`. Gate E is owed (CLAUDE.md, "Owed,
-not failed").
+docstring). Numbers: `docs/MtdRetMeasured.md`. Gate E: DISCLOSE, 0.7997 vs
+`bias` (`docs/gate_e_ledger.csv`, measured 2026-11-15).
 
 What these pin, in order of how much it would hurt to lose:
 

@@ -373,7 +373,10 @@ def test_column_is_not_constant():
 
 
 def test_family_overlap_on_synthetic_walks():
-    """#4's tie rule, as an indication only: real-data rho is HLIFE-3's job."""
+    """#4's tie rule, as an indication only: the real-data rho against KPSS_100,
+    CUSUM_100 and LEAN_HURST_100_20 is still owed (no synthetic figure exists for
+    the last); Gate E (HLIFE-3, 2026-11-15) compares against the engine's columns
+    only."""
     rho = {"kpss": [], "cusum": [], "zscore": []}
     for seed in range(10):
         w = _walk(3000, seed)

@@ -35,8 +35,9 @@ diff2y_acf1 = diff2y_acf_list[0]                                        # L975
 **Status:**
 - Gates A, B and D are cleared, and this repo's suite is green, which is the half of
   Gate F that runs here.
-- Gate C has synthetic counts only, and Gate E is owed. Both need the BIST frames and the
-  private Backtesting repo, which the contributor's machine does not have.
+- Gate E is measured: **SHIP**, 0.1323 vs `Swing_Range_pct` (run
+  `gatee7-20261115-diff2_acf1`, 2026-11-15, recorded in `docs/gate_e_ledger.csv`; see
+  "Gate E"). Gate C's real-data counts come from the same run.
 - One finding is the owner's to weigh: on synthetic paths the column is close to a
   function of the window's lag-1 and lag-2 return autocorrelations (see "Family").
 
@@ -187,7 +188,10 @@ In the tests:
 
 - **Synthetic:** 501 of 600 bars fire (the first at bar 99), all 501 values are distinct,
   and all lie in (−1, 1).
-- **Real data: owed.** The counts come with the Gate E run on BIST.
+- **Real data** (Gate E run `gatee7-20261115-diff2_acf1`, 89 BIST daily frames, flat
+  zero-volume bars dropped by the harness): 390,038 of 398,849 pooled bars fire (97.79%),
+  all 390,038 non-zero. The 8,811 empty bars are exactly 89 × 99, one warm-up per frame,
+  so on these frames neither rule below blanked a bar.
 - What blanks a bar:
   - a bad close, or a price ratio that overflows, blanks the `length` bars whose window
     holds it;
@@ -245,7 +249,9 @@ deviation 2%:
 
 ## Family — what it restates
 
-All of this section is synthetic. Gate E on real data is owed.
+All of this section is synthetic except the last bullet of the first part: the #94/#96
+ledger figures and the Gate E bound. Gate E compares against the engine's columns, not this fork's, so it does not measure
+this column against #94 or #96.
 
 **The window's own return autocorrelations** (100 paths × 600 bars). Let
 `g = (2ρ̂1 − 1 − ρ̂2) / (2(1 − ρ̂1))`, the population identity evaluated on the sample
@@ -262,13 +268,18 @@ lag-1 and lag-2 autocorrelations of the same window's 99 log returns.
   else. None of these paths has zero returns, so tick-rounded data is not covered.
 - Against the lag-1 autocorrelation alone it is 0.61–0.71 pooled, and it varies a lot by
   path (0.28 to 0.89, p10 to p90).
-- **Two open issues would add a plain return-autocorrelation column:** #94 (TS-AC1-60,
-  lag-1) and #96 (TS-AGGAC-60, mean of lags 1–10).
-  - If #94 ships, it and this column will overlap. By the numbers above, the Spearman is
-    0.61–0.71 at equal windows. That is below the 0.76 ship line, but it is synthetic and
-    the windows differ (60 against 100), so it needs its own measurement.
-  - Whether the engine's 687 Gate E comparators already hold a return-autocorrelation
-    column is not visible from here.
+- **Two plain return-autocorrelation columns have since shipped on `dev`:** #94
+  (`ts_ac1_60`, lag 1, 60 returns) and #96 (`ts_aggac_60`, mean of lags 1–10). Their ledger
+  rows (measured 2026-11-13) are SHIP, 0.2536 and 0.2676 vs `mad_pct`.
+  - For #94 (lag 1), the synthetic numbers above give 0.61–0.71 at equal windows: below
+    the 0.76 ship line, but synthetic, and the windows differ (60 against 100). For #96
+    (mean of lags 1–10) there is no synthetic figure. Neither pair is measured on real
+    data; each needs its own measurement.
+  - Whether the engine's 687 Gate E comparators hold a return-autocorrelation column is
+    still not read here, but the Gate E run bounds it: the largest pooled |ρ| against any
+    of the 686 non-degenerate comparators is 0.1323, so none, autocorrelation or not, has a
+    higher pooled |ρ| with this column. Single frames run higher: up to 0.5383 vs `natr`
+    among the five comparators the run measures per frame (`perframe.csv`).
 
 **Columns in `Category` that use serial correlation.** A grep of `pandas_ta` for
 `autocorr`, `.corr(...shift(` and `.cov(...shift(` finds two modules besides this one:
@@ -325,32 +336,45 @@ separate run with tracemalloc on:
 
 Machine load moves these, so they are an order of magnitude.
 
-## Gate E — owed
+## Gate E — measured: SHIP
 
-From `../Backtesting/Backtesting` on the owner's machine:
+Run `gatee7-20261115-diff2_acf1`, 2026-11-15, on this module as it stands on `dev` at
+`8000158`, default parameters (`DIFF2ACF1_100`). Recorded with
+`python docs/gate_e_ledger.py record ... --measured 2026-11-15`.
 
-```sh
-python scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.diff2_acf1 --name diff2_acf1
-python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD   # from this repo
-```
+- Pooled max |ρ| **0.1323** vs `Swing_Range_pct` (manifest), n = 390,038. The
+  compute_all max is 0.1309, vs `natr`.
+- Top-5 per-frame max median |ρ| **0.1089** vs `Swing_Range_pct`, over 89 frames; 0
+  frames at or above 0.90.
+- 687 comparators (329 compute_all + 358 manifest); 1 dropped as degenerate
+  (`squeeze_SQZ_NO`, constant). Canary bit-equal on AKBNK, BIENY, AGHOL and SASA.
+- Under `r3-perframe-0.90` that is the < 0.76 band: SHIP, nothing removed, no waiver.
+- Next comparators: `natr` 0.1309, `Stop_2ATR_pct` 0.1309, `BB_BWidth` 0.1142.
 
-The prototype's numbers in the issue (max |ρ| 0.1321 vs `Swing_Range_pct`, SHIP) are not
-a measurement of this port.
+The prototype's figure in the issue was 0.1321 vs the same `Swing_Range_pct`; the port
+reads 0.0002 higher.
+
+Outputs: `MultipleBranchWork/Backtesting-adhoc-gatee-agent/backtest_results/gatee/gatee7-20261115-diff2_acf1/`
+on the owner's machine; Backtesting `91ab7ae2`, stamp `engine_code` `f58eb5da`,
+`pandas_ta_src_sha1` `9293d757`. To re-run, from `../Backtesting/Backtesting`:
+`python scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.diff2_acf1 --name <run name>`,
+with this tree on `PYTHONPATH` (`record` checks the run's `pandas_ta_src_sha1`).
 
 ## Gate F — suites
 
 Full suite on this branch (`.venv-pd2`, CI's two deselects, `GATE_E_PENDING_OK=1`):
 5302 passed, 84 skipped, 0 failed (after merging `dev` at `5859c0f`).
 
-Without the variable, `test_every_indicator_that_needs_a_row_has_one` fails on the owed
-rows `diff2_acf1` and `mtd_ret`; `mtd_ret` is already owed on `dev`. The Backtesting suite
-cannot be run here.
+Without the variable, `test_every_indicator_that_needs_a_row_has_one` failed (before
+2026-11-15) on the owed rows `diff2_acf1` and `mtd_ret`; `mtd_ret` was already owed on
+`dev`. The Backtesting suite cannot be run here. Both rows were recorded on 2026-11-15
+(see "Gate E").
 
 ## Counters touched
 
 - `CATEGORY_TOTAL` 315 → 316. Statistics is not in `CATEGORY_BUCKETS`.
 - README: 316 registered, 324 callable, statistics (29).
-- `docs/MLCompanionContract.md`: 660 → 661 tagged and 303 → 304 `SF`, with a revert note
+- `docs/MLCompanionContract.md`: 660 → 661 tagged and 303 → 304 `SF`, with a revert note (replaced by the Gate E verdict, 2026-11-15)
   (newest first).
 - `docs/IndicatorDictionary.md`, regenerated with `.venv-pd2`. Its diff is the
   `diff2_acf1` row (`DIFF2ACF1_100` SF, 99 warm-up), the four counts and the shortlist
