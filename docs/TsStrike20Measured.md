@@ -2,9 +2,10 @@
 
 Issue #90 (TS-STRIKE-20), ported 2026-11-12 on branch `issue-90-ts-strike-20`.
 Column: **`TS_STRIKE_20`**, `pandas_ta/statistics/ts_strike_20.py`.
-**Status: Gates A–D cleared, Gate E owed.** Gate E and both repos' suites are
-run by issue-solver after this session; a later receipt session records the
-`docs/gate_e_ledger.csv` row and fills in Gate C's real-data counts.
+**Status: shipped — Gates A–E cleared** (Gate E measured 2026-11-15 by the
+launcher, run `is90-ts_strike_20-7d84c7e5`: max \|ρ\| 0.1856 vs `DMN`, SHIP;
+row recorded in `docs/gate_e_ledger.csv`). Gate F is run by issue-solver in
+clean worktrees.
 
 Every number here is printed by `python docs/measure_ts_strike_20.py` (its
 sections can be run one at a time, e.g. `… gate_b`) on pandas 2.3.3 / numpy
@@ -397,23 +398,25 @@ Two consequences, pinned as tests:
 
 ## Gate C — reachability
 
-**Real data: owed.** The pooled non-NaN and non-zero counts over the 89 frozen
-ALTPORT-1 frames come from the launcher's Gate E run and are recorded by the
-receipt session. The arithmetic floor on the NaN count is `89 × 20 = 1,780`
-warm-up bars of 398,849 — that denominator is **not** measured here (this
-worktree has no BIST frames); it is the pooled bar count every Gate E run on
-the 89 frozen ALTPORT-1 frames reports, e.g. `docs/TsC320Measured.md` §Gate E.
-Two bad-data causes can empty bars on real data, each measured on synthetic
+**Real data, measured 2026-11-15** by the launcher's Gate E run
+`is90-ts_strike_20-7d84c7e5` over the 89 frozen ALTPORT-1 frames: non-NaN
+**397,069** of 398,849 pooled bars, non-zero **397,069**. The 1,780 empty bars
+are exactly the arithmetic floor `89 × 20` — one warm-up per frame and nothing
+else, so no frame on the universe carries a bad close or an overflowing close
+pair. Two bad-data causes could have emptied more, each measured on synthetic
 frames below: a close inside a frame that is NaN, zero, negative or subnormal
 (**21 bars each** — one bad close spoils two returns), and a close PAIR whose
-ratio overflows (**20 bars** — one spoiled return). Nothing is predicted here.
+ratio overflows (**20 bars** — one spoiled return). Neither occurs here.
 
 Note what is **not** a NaN cause for this column: a degenerate window. 21
 consecutive identical closes (a halted or limit-locked session), an exactly
 geometric window and a near-monotone fine-tick window at a high price all read
-**0** rather than NaN, so they show up in the *non-zero* count and not in the
-NaN count. The receipt session should expect the non-zero count to sit below
-the non-NaN count by however many such windows the 89 frames carry.
+**0** rather than NaN, so they would show up in the *non-zero* count and not in
+the NaN count. The porting session expected the non-zero count to sit below the
+non-NaN count by however many such windows the 89 frames carry; measured, the
+two counts are **equal**, so not one of the 397,069 fired bars on the universe
+reads 0 — no window of 21 BIST daily closes in these frames is flat to the
+9.09e-13 floor.
 
 The rest of this section is **synthetic**: 1,500-bar generated paths, 1,480
 fired bars each.
@@ -519,21 +522,31 @@ accident.
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.** The harness
-(`gate_e_overlap.py`) needs the private Backtesting engine, the 827 MB BIST
-cache and the 89 frozen ALTPORT-1 frames, none of which are in this worktree;
-this session is forbidden to run it or to read `../Backtesting`. A later
-receipt session records the `docs/gate_e_ledger.csv` row, which is why
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails here until then.
+**Measured 2026-11-15 by the launcher**, run `is90-ts_strike_20-7d84c7e5`,
+`gate_e_overlap.py run --module pandas_ta.statistics.ts_strike_20` against the
+code at this branch's HEAD (`candidate_source_sha1` `7045dbf2`,
+`pandas_ta_src_sha1` `5a88fdbe`). Universe: the 89 frozen ALTPORT-1 frames,
+398,849 pooled bars, 687 comparators (329 `compute_all` + 358 `ml_features`
+manifest `1d`), defaults (`kwargs` empty), pandas 2.3.3 / numpy 1.26.4, canary
+`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`. Bands `r3-perframe-0.90`.
 
-What the issue reports for the PROTOTYPE (2026-10-24, run `screen_20261024`,
-n = 397,158 — a prototype is not a port): max \|ρ\| **0.1855** vs `DMN`,
-top-5 per-frame max median 0.1848 → SHIP; next comparators
-`Dist_to_BB_Upper_pct` 0.1826 and `ui` 0.1810. The port is bit-equal to that
-prototype on every fired bar of a 1,500-bar walk (§Gate A, A2) and differs from
-it only at one warm-up bar per frame, so the re-run is expected to land near
-those numbers — expected, not measured, and the launcher's run is what decides.
+| column | max \|ρ\| | against | set | n | per-frame max median | frames ≥ 0.90 | verdict |
+|---|---|---|---|---|---|---|---|
+| `TS_STRIKE_20` | **0.1856** | `DMN` | compute_all | 397,069 | **0.1852** (`DMN`) | 0 of 89 | **SHIP** |
+
+Pooled and per-frame both sit far under the 0.76 SHIP line, so the column
+ships unchanged. The run's best manifest comparator is
+`Dist_to_BB_Upper_pct` at **0.1829** over the same 397,069 bars; the run
+reports `n_degenerate` **1** (one comparator with no variation to rank
+against) and the ledger row is `is90-ts_strike_20-7d84c7e5`, recorded in
+`docs/gate_e_ledger.csv` on 2026-11-15.
+
+Against the issue's PROTOTYPE numbers (2026-10-24, run `screen_20261024`,
+n = 397,158 — a prototype is not a port): max \|ρ\| 0.1855 vs `DMN`, top-5
+per-frame max median 0.1848, next comparators `Dist_to_BB_Upper_pct` 0.1826 and
+`ui` 0.1810. The port lands on the same comparator with 0.1856 / 0.1852 over 89
+fewer bars — the one warm-up bar per frame that §Gate A, A2 measures as the
+only difference between the two spellings.
 
 **Nearest shipped columns on ONE 1,500-bar synthetic walk — NOT Gate E** (12
 shipped columns, one frame; Gate E is 687 comparators over 89 frozen BIST
@@ -611,6 +624,19 @@ pinning a CPU-dependent detail; see the ⚠ under §The rounding-noise floor):
   which tracked the one `docs/pine/` file its evidence cites. The passed
   count also moved far more than this session's edits explain (5,954 →
   10,764); it is quoted as what this run printed, not reconciled.
+
+**Receipt session, 2026-11-15** (after `docs/gate_e_ledger.py record` added this
+port's row):
+
+* `python -m pytest -q` → **2 failed, 10,771 passed, 85 skipped** in 275.79 s.
+  The failures are
+  `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
+  (needs `../AlternativeRepos`, deselected in CI) and
+  `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, which
+  now reports `['arch_lm', 'diff2_acf1', 'edge', 'firstzero_ac', 'halflife',
+  'lumpiness', 'mtd_ret']` — seven rows owed on `dev` before this branch, and
+  **`ts_strike_20` is no longer among them**. CI into `dev` skips that test
+  under `GATE_E_PENDING_OK=1`.
 
 The launcher runs both repos' suites in clean worktrees.
 
