@@ -8,8 +8,10 @@ Module: `pandas_ta/statistics/tf_zero_cross_20.py` · column
 `tests/test_tf_zero_cross_20.py` · every number here is printed by
 `python docs/measure_tf_zero_cross_20.py` — and the same figures come back
 under `python docs/measure_tf_zero_cross_20_cpu.py --all` (§F2) — EXCEPT
-§F1's test counts (pytest), §E's screen figures (issue #113, run
-`screen_r2_20261024`, measured on the prototype and not on this module),
+§F1's test counts (pytest), §E's and §C1's figures (the launcher's Gate E
+run `is113-tf_zero_cross_20-05d1c160`, and the 2026-10-24 screen's
+`screen_r2_20261024`, which was measured on the prototype and not on this
+module),
 `CLAUDE.md`'s gate-table figures (the 687 comparators, the 89 frozen
 ALTPORT-1 frames and the `r3-perframe-0.90` bands) and the `2213dc9` /
 2026-11-11 date, which is read from `git log`.
@@ -43,10 +45,14 @@ three-valued `np.sign` the issue's line names. It is an integer on
    that the column is not constant: 13 to 15 distinct values on each of the
    nine varied frames, and all of `0 .. 19` reached pooled.
 
-Gate E: **pending, run by issue-solver after this session.** The issue's
-figure — max |ρ| 0.3498 vs `stdev`, n = 397,158, per-frame max median
-0.3296, SHIP — is the 2026-10-24 screen's, measured on the prototype and not
-on this module. Gate C's real-data limb is owed from the same run (§C1).
+Gate E: **measured on this module, SHIP** — max |ρ| **0.3497** vs `stdev`
+(compute_all), n = 397,069; top-five per-frame max median **0.3294** vs
+`LINREG_DEV` over 89 frames, 0 frames at or above 0.90. Run
+`is113-tf_zero_cross_20-05d1c160`, 2026-11-15, recorded in
+`docs/gate_e_ledger.csv` (§E). The 2026-10-24 screen's prototype figure
+(0.3498 vs `stdev`, n = 397,158) carried over. Gate C's real-data limb comes
+off the same run (§C1). ⚠ The momersion overlap of point 1 is **still not
+measured on real frames** — see §E for what the run does and does not bound.
 
 ---
 
@@ -239,7 +245,11 @@ How often that happens, by grid, on the same 1,500-bar walk:
 | flat | 100.00% |
 
 ⚠ Real BIST daily data is a tick grid, not a continuous walk. The live share
-is owed from the Gate E run.
+is **still not measured**: the Gate E run has landed (§E) and its outputs
+(`overlap_max.csv`, `top25.csv`, `perframe.csv`, `degenerate.csv`,
+`meta.json`) carry correlations and bar counts, not the frames' returns, so
+the flat-return share of BIST daily closes cannot be read off it from this
+worktree.
 
 ---
 
@@ -364,8 +374,24 @@ and a 50% move of one close need not change any pair's SIGN.)
 
 ### §C1 — real data
 
-⚠ **Owed.** It comes off the Gate E run, which issue-solver runs after this
-session. No real frame is reachable from this worktree.
+From the Gate E run (`is113-tf_zero_cross_20-05d1c160`, 2026-11-15, 89
+frozen ALTPORT-1 BIST daily frames, 398,849 pooled bars, defaults):
+
+| what | count |
+|---|---|
+| bars the column is defined on (`non_nan`) | 397,069 of 398,849 |
+| of them non-zero (`non_zero`) | 397,065 |
+| bars the column is NaN | 1,780 |
+
+So the single shipped column fires on **99.55%** of the pooled bars and
+reads exactly 0 — a window of 20 returns with no sign change at all — on
+**4** of them. The 1,780 NaN bars are the warm-up and the gaps: 89 frames ×
+20 warm-up bars is 1,780, so on these frames the module reported no gap
+beyond the warm-up.
+
+The frames themselves are not reachable from this worktree; these counts are
+the run's, read from `overlap_max.csv` (`non_nan`, `non_zero`) and
+`meta.json` (`n_frames`, `pooled_bars`).
 
 ### §C2 — synthetic frames
 
@@ -454,35 +480,50 @@ What does: the column is not constant.
 
 ## Gate E — attribution
 
-**Pending, run by issue-solver after this session.** When the run lands, its
-row goes into `docs/gate_e_ledger.csv` and its numbers into this section;
-`tests/test_tf_zero_cross_20.py::test_the_gate_e_row_is_owed_and_not_yet_recorded`
-asserts the row is absent, which is the receipt session's cue.
+**Measured. SHIP.** Run `is113-tf_zero_cross_20-05d1c160`, measured
+2026-11-15 by issue-solver with
+`gate_e_overlap.py run --module pandas_ta.statistics.tf_zero_cross_20`
+(`kwargs {}`, so the shipped defaults), 89 frozen ALTPORT-1 BIST daily
+frames, 398,849 pooled bars, 329 `compute_all` + 358 `ml_features` manifest
+= 687 comparators, bands `r3-perframe-0.90`, canary `AKBNK.IS, BIENY.IS,
+AGHOL.IS, SASA.IS bit-equal`, pandas 2.3.3 / numpy 1.26.4. Recorded in
+`docs/gate_e_ledger.csv` against module sha1 `7743715b`.
 
-What exists today is the **screen's figure, measured on the prototype and
-not on this module** (issue #113): max |ρ| **0.3498** vs `stdev` over
-n = 397,158, top-five per-frame max median 0.3296 → SHIP, then `LINREG_DEV`
-0.3417 and `mad` 0.3367; run `screen_r2_20261024`, 89 ALTPORT-1 frames,
-329 + 358 comparators, canary bit-equal. §A1 shows this module and the
-prototype agree exactly wherever BOTH are defined — the prototype also reads
-one bar per frame that this module reports as a gap — so the figure is
-expected to carry over, and Gate E's statistic is a Spearman over the bars
-where both fire. The launcher's run on THIS module is still the number that
-decides.
+| column | max \|ρ\| | against | set | n | per-frame max median | against | frames ≥ 0.90 | verdict |
+|---|---|---|---|---|---|---|---|---|
+| `TFZEROCROSS_20` | **0.3497** | `stdev` | compute_all | 397,069 | **0.3294** | `LINREG_DEV` | 0 of 89 | **SHIP** |
 
-⚠ **What the Gate E comparator set cannot see.** Its 687 comparators are the
-engine's `compute_all` ∪ the `ml_features` manifest, not this fork's own
-`Category` columns, so a SHIP verdict there says nothing about §L1's
-−0.97 against `LEAN_MOMERSION_20`. The screen's stage-2 fork overlap, which
-would see it, ran on 2026-10-24 and reported 0.2420 vs
-`chop:CHOP_14_1_100` — eighteen days before `lean_momersion_20` landed, so
-that number is about a fork that did not yet contain the overlapping
-column.
+The sign is negative throughout (ρ = −0.3497): more sign changes in the
+window go with a narrower recent range. Pooled-only verdict SHIP as well,
+so neither limb of the band is close. The next comparators, from
+`top25.csv`: `LINREG_DEV` 0.3417, `mad` 0.3367, `variance` 0.3357,
+`CHANNEL_WIDTH` 0.3097, `ATR` 0.3061. The manifest side is further off:
+max 0.2626 vs `Swing_Range_pct`. One comparator was dropped as degenerate
+(`squeeze_SQZ_NO`, constant over the pooled bars).
 
-**OWED from the Gate E run — with a rule, not a note.** The redundancy call
-is the owner's, but "the owner's call" with no trigger is a call that never
-gets made: the moment a SHIP row is recorded, every test here goes green
-and the disclosure becomes prose. So the receipt session owes:
+**The prototype figure carried over.** The 2026-10-24 screen measured the
+prototype expression at 0.3498 vs `stdev` over n = 397,158 with a top-five
+per-frame max median of 0.3296; this module reads 0.34973 vs the same
+comparator over n = 397,069, 89 bars fewer — the gap §A1 predicts, where
+the prototype counts a missing return's comparisons as sign changes and this
+module reports a gap.
+
+⚠ **What this verdict does NOT settle: the momersion overlap.** The 687
+comparators are the engine's `compute_all` ∪ the `ml_features` manifest.
+`LEAN_MOMERSION_20` is not named anywhere in this run's outputs
+(`overlap_max.csv`, `top25.csv`, `degenerate.csv`), and those outputs do not
+list the 687 names, so whether it was a comparator is not decidable from
+this worktree. What the run DOES bound: the maximum over all 687 is 0.3497,
+so **if** `LEAN_MOMERSION_20` was among them its pooled |ρ| is at most that
+— nowhere near §L1's −0.9655 .. −0.9795 on continuous synthetic frames. The
+two readings are not in conflict: §L1c says the overlap collapses as the
+flat-return share rises, and BIST daily closes are a tick grid whose flat
+share is not measured here (§A7).
+
+**STILL OWED — the item stands, with a rule and not a note.** The receipt
+session could not discharge it: the measurement needs the 89 frames' own
+bars, and the Gate E harness compares against the engine's columns, not this
+fork's, so no artifact in the run answers it. It therefore stays owed:
 
 > Compute Spearman(`TFZEROCROSS_20`, `LEAN_MOMERSION_20`) pooled and its
 > top-five per-frame median over the same 89 ALTPORT-1 frames the Gate E
@@ -496,6 +537,10 @@ and the disclosure becomes prose. So the receipt session owes:
 > SHIP above roughly 20% (§L1c). The real flat-return share of BIST daily
 > closes decides it, and it is not measurable from this worktree.
 
+So `tf_zero_cross_20` ships on the gate the protocol defines — Gate E SHIP
+against the 687 comparators — and the fork-internal redundancy remains the
+owner's open call, disclosed in the module docstring, in the dictionary row
+and here.
 `tests/test_tf_zero_cross_20.py::test_the_overlap_measurement_is_still_owed_from_the_gate_e_run`
 asserts this item is still here, so it cannot be dropped silently.
 
@@ -510,17 +555,24 @@ the same 336 under `python docs/measure_tf_zero_cross_20_cpu.py`, which
 disables `AVX512F AVX512_SKX AVX2 FMA3` and refuses to run if the
 environment edit did not take.
 
-Full suite: **3 failed, 10,611 passed, 85 skipped**. The three are
-`tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
-(the known clean-checkout break, `CLAUDE.md` "Known breaks"),
+Full suite, re-run in the receipt session (2026-11-15, after the Gate E row
+was recorded): **2 failed, 10,619 passed, 85 skipped**. The two are
 `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
 (needs the sibling `../AlternativeRepos` checkout; CI deselects it by name)
 and
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-whose message names
+whose message now names
 `['arch_lm', 'diff2_acf1', 'edge', 'firstzero_ac', 'halflife', 'lumpiness',
-'mtd_ret', 'tf_zero_cross_20']` — the owed row this commit ships with. CI
-into `dev` sets `GATE_E_PENDING_OK=1` and skips the last.
+'mtd_ret']` — seven OTHER indicators' owed rows, with
+`tf_zero_cross_20` off the list since its row landed. CI into `dev` sets
+`GATE_E_PENDING_OK=1` and skips it.
+
+⚠ The port session recorded **3 failed, 10,611 passed, 85 skipped** here,
+the third being
+`tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`.
+That one passes now, because `docs/pine/RA2vGpkA-ta.pine` is tracked again
+(#8, PINECITE — `CLAUDE.md` "Known breaks"), which is unrelated to this
+port.
 
 ### §F2 — which figures move between the two dispatches
 
@@ -580,7 +632,9 @@ that produces a value is `length + 1` closes (`length` closes returns
 ### §L1 — the fork columns nearest to it
 
 Spearman on 1,500-bar synthetic frames. ⚠ SYNTHETIC: the number that decides
-ship or revert is the launcher's Gate E run on the 89 BIST frames.
+ship or revert is the launcher's Gate E run on the 89 BIST frames, which
+landed SHIP (§E) — but against the engine's comparators, which do not
+settle the momersion column of this table.
 
 The `flat?` column is the script's own, and it is what defines the band
 below: `-` is a frame with no exactly-zero return, `flat` one with some.
@@ -639,10 +693,12 @@ The same walk rounded to a coarser and coarser tick:
 | 1.0 | 37.63% | −0.6647 | −0.6800 |
 | 2.0 | 63.04% | 0.0097 | 0.0042 |
 
-⚠ Which row of that table real BIST daily data sits in is NOT measured here.
-It comes off the Gate E run — the engine's comparator set does not contain
-`LEAN_MOMERSION_20`, but the run's own frames would make the measurement
-possible.
+⚠ Which row of that table real BIST daily data sits in is STILL NOT
+measured. The Gate E run has landed (§E) and does not answer it: its
+outputs carry correlations against the engine's comparators and bar counts,
+not the frames' returns, and `LEAN_MOMERSION_20` is not named in them. The
+run's own frames would make the measurement possible; they are not
+reachable from this worktree.
 
 **What this means for a feature set.** Below about 5% flat returns the two
 columns are one signal at two scales, and a miner given both double-weights

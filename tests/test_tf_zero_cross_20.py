@@ -87,14 +87,19 @@ What this file pins, in order of how much it would hurt to lose:
    asserted exactly, because a reader who assumes a window statistic
    sees direction would be wrong.
 
-8. **Gate E is owed.**
-   `test_the_gate_e_row_is_owed_and_not_yet_recorded` asserts
-   `docs/gate_e_ledger.csv` carries no row for this indicator, which
-   is the state this commit ships in and the receipt session's cue.
+8. **Gate E is measured and SHIP.**
+   `test_the_gate_e_row_is_recorded_and_ships` asserts
+   `docs/gate_e_ledger.csv` carries exactly one row for this
+   indicator, `TFZEROCROSS_20`, verdict SHIP, pooled |rho| under the
+   0.76 ship line and per-frame max median under 0.90 (measured
+   0.3497 vs `stdev` and 0.3294 vs `LINREG_DEV`, run
+   `is113-tf_zero_cross_20-05d1c160`, 2026-11-15). That verdict is
+   against the ENGINE's 687 comparators and does not touch point 1.
 
 Every number quoted here is printed by
-`python docs/measure_tf_zero_cross_20.py` -- EXCEPT Gate E's 0.3498,
-which is the 2026-10-24 screen's, and its 687 comparators and 89
+`python docs/measure_tf_zero_cross_20.py` -- EXCEPT Gate E's 0.3497
+and 0.3294, which are the launcher's run, and the 2026-10-24
+screen's 0.3498; the 687 comparators and 89
 frames, which are `CLAUDE.md`'s gate table; the 2026-10-24 date,
 which is the screen run id `screen_r2_20261024`'s; the 2026-11-11
 date and commit `2213dc9`, read from `git log`; and the "6 of 8"
@@ -860,12 +865,25 @@ def test_the_overlap_warning_survives_the_dictionary_cut():
     assert "0 .. `length - 1`" in cut, cut
 
 
-def test_the_gate_e_row_is_owed_and_not_yet_recorded():
-    """Gate E is run by issue-solver after this session; the receipt session
-    records the row and replaces this test."""
+def test_the_gate_e_row_is_recorded_and_ships():
+    """Gate E was run by issue-solver on the committed module
+    (`is113-tf_zero_cross_20-05d1c160`, 2026-11-15): max |rho| 0.3497 vs
+    `stdev`, per-frame max median 0.3294 vs `LINREG_DEV`, SHIP. This pins
+    the row's existence and its verdict -- `tests/test_gate_e_ledger.py`
+    pins the rest (sha1s, fingerprint, universe, comparator count), so what
+    is asserted here is only what would make this file's claims wrong: that
+    the single shipped column is recorded and is not STRUCK. The numbers are
+    compared as the band reads them, not to the last digit, since the row is
+    a float written by a different machine's run."""
     path = ROOT / "docs" / "gate_e_ledger.csv"
-    rows = list(csv.DictReader(path.read_text(encoding="utf-8").splitlines()))
-    assert not [r for r in rows if r["indicator"] == "tf_zero_cross_20"]
+    rows = [r for r in csv.DictReader(path.read_text(encoding="utf-8").splitlines())
+            if r["indicator"] == "tf_zero_cross_20"]
+    assert [r["column"] for r in rows] == ["TFZEROCROSS_20"], rows
+    row = rows[0]
+    assert row["verdict"] == "SHIP", row
+    assert float(row["max_abs_rho"]) < 0.76, row
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90, row
+    assert row["against"] == "stdev", row
 
 
 def test_the_overlap_measurement_is_still_owed_from_the_gate_e_run():
