@@ -55,6 +55,10 @@ atr.__doc__ = \
 Averge True Range is used to measure volatility, especially volatility caused by
 gaps or limit moves.
 
+The default `mamode="rma"` is not Wilder's smoothing (see `rma`), so the default
+ATR differs from Pine's `ta.atr`. Pass `mamode="wrma"` for Wilder smoothing
+(matches Pine's `ta.rma` on NaN-free input; see `wilder_rma`).
+
 Sources:
     https://www.tradingview.com/wiki/Average_True_Range_(ATR)
 
@@ -64,7 +68,8 @@ Calculation:
     EMA = Exponential Moving Average
     SMA = Simple Moving Average
     WMA = Weighted Moving Average
-    RMA = WildeR's Moving Average
+    RMA = pandas ewm(alpha=1/length, adjust=True); not Wilder's smoothing
+    WRMA = Wilder's smoothing (SMA-seeded), see wilder_rma
     TR = True Range
 
     tr = TR(high, low, close, drift)
@@ -74,8 +79,12 @@ Calculation:
         ATR = SMA(tr, length)
     elif 'wma':
         ATR = WMA(tr, length)
-    else:
+    elif 'wrma':
+        ATR = WRMA(tr, length)
+    elif 'rma' (default):
         ATR = RMA(tr, length)
+    else:
+        ATR = ma(mamode, tr, length)  # unknown names fall back to EMA
 
     if percent:
         ATR *= 100 / close
@@ -85,7 +94,8 @@ Args:
     low (pd.Series): Series of 'low's
     close (pd.Series): Series of 'close's
     length (int): It's period. Default: 14
-    mamode (str): "sma", "ema", "wma" or "rma". Default: "rma"
+    mamode (str): "sma", "ema", "wma", "rma" or "wrma" (any name `ma` accepts).
+        Default: "rma", which is NOT Wilder's smoothing; "wrma" is.
     drift (int): The difference period. Default: 1
     offset (int): How many periods to offset the result. Default: 0
 
