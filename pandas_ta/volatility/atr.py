@@ -55,6 +55,9 @@ atr.__doc__ = \
 Averge True Range is used to measure volatility, especially volatility caused by
 gaps or limit moves.
 
+The default `mamode="rma"` is not Wilder's smoothing (see `rma`), so the default
+ATR differs from Pine's `ta.atr`. Pass `mamode="wrma"` for true Wilder smoothing.
+
 Sources:
     https://www.tradingview.com/wiki/Average_True_Range_(ATR)
 
