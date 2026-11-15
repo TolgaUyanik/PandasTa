@@ -100,6 +100,28 @@ What this file pins, in order of how much it would hurt to lose:
    0 earlier bars moved and an unbounded forward reach; the high/low mask
    exists for infinities, and with it a NaN and an infinite price give
    bit-identical columns.
+9. **Gate E is DISCLOSE_GAP, and whose measurement the ledger row is.**
+   `test_the_gate_e_row_is_this_ports_own_measurement` pins the row to run
+   `is108-sk_fcb_pos-d0e27f53` (2026-11-15, on THIS module): pooled
+   **0.8348** against the manifest's `pgo` at n = 397,262, top-five
+   per-frame max median **0.8405** over 89 frames, 687 comparators, no
+   waiver. The column SHIPS -- DISCLOSE_GAP is not STRUCK -- and both
+   limbs are pinned as the BAND (0.80 <= rho < 0.90) rather than as
+   digits, so a re-recorded row that crossed 0.90 fails here. The
+   screen's PROTOTYPE read the same four figures on 2026-10-24, and item
+   2's §A2 limb asserts this module bit-equal to that prototype -- an
+   expected agreement is the easiest kind of row to copy over by
+   mistake, so the row's identity is pinned and not only its arithmetic.
+   `test_the_gate_e_run_closes_gate_c_on_real_data` reads Gate C's real
+   limb off the same row: 397,501 of 398,849 bars fire, the 1,348 empty
+   ones are NOT a whole number of bars per frame (15.15 on average),
+   which is item 6's data-dependent warm-up on real data, and 1,322
+   fired bars read exactly 0.0, which is item 7's tick-grid regime on
+   real prices.
+   ⚠ Not pinned, because the band does not read it: ONE of the 89 frames
+   reaches 0.9010 against `pgo` (the median the band reads is 0.8405).
+   ⚠ Not available at all: the row counts NaNs and zeros, not SIGNS, so
+   item 1's crossed and collapsed bands stay synthetic figures.
 
 ⚠ **Counts, distinct-value counts and Spearman figures are NOT pinned to
 their measured digits.** The frames are built with `np.exp` and
@@ -1455,28 +1477,97 @@ def test_the_docstrings_first_paragraph_survives_the_dictionary_cut():
     assert desc({"desc": longer}) != longer
 
 
-def test_the_gate_e_row_is_owed():
-    """Gate E is OWED, not done: the launcher runs
-    `gate_e_overlap.py run --module pandas_ta.momentum.sk_fcb_pos` after
-    this session, and a later receipt session records the row and replaces
-    this test with one pinning the row's identity (that is what issue
-    #107's `test_the_gate_e_row_is_this_ports_own_measurement` became).
-
-    Until then `tests/test_gate_e_ledger.py::
-    test_every_indicator_that_needs_a_row_has_one` reports `sk_fcb_pos`
-    among the indicators owing a measurement -- a skip under
-    `GATE_E_PENDING_OK=1` on the way to `dev`, a failure locally and
-    toward `main`. This test asserts the ABSENCE of a row, so the receipt
-    session has a cue it cannot miss: it fails the moment the row lands.
-
-    ⚠ The screen's 0.8348 against `pgo` (n = 397,262, DISCLOSE_GAP) was
-    measured on the PROTOTYPE on 2026-10-24, not on this module. §A2
-    asserts the two bit-equal on all eight synthetic frames, so the port's
-    own run is expected to agree -- but "expected" is not "measured", and
-    nothing here may be written as if it were."""
+def _sk_fcb_pos_ledger_row():
     ledger = ROOT / "docs" / "gate_e_ledger.csv"
     rows = list(csv.DictReader(ledger.open(encoding="utf-8")))
     assert rows, "the ledger should not be empty"
-    assert [r for r in rows if r["indicator"] == "sk_fcb_width"], \
-        "the sibling's row should still be there"
-    assert not [r for r in rows if r["indicator"] == "sk_fcb_pos"]
+    rows = [r for r in rows if r["indicator"] == "sk_fcb_pos"]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_the_gate_e_row_is_this_ports_own_measurement():
+    """The ledger row for `sk_fcb_pos` must come from the run on THIS
+    module, `is108-sk_fcb_pos-d0e27f53` (measured 2026-11-15), and NOT
+    from the catalog screen of 2026-10-24, which measured the PROTOTYPE.
+    The two agree to every digit issue #108 printed -- pooled 0.8348
+    against the manifest's `pgo` at n = 397,262, top-five per-frame max
+    median 0.8405 over 89 frames, runners-up `willr` 0.8303 and
+    `kdj_J_9_3` 0.8256 -- which is exactly why the row's identity needs
+    pinning: `tests/test_gate_e_ledger.py` re-derives a row's
+    `module_sha1` and output fingerprint from the tree and checks its
+    verdict arithmetic, but it cannot see WHOSE measurement a row came
+    from. Item 2's §A2 limb asserts this module bit-equal to the retyped
+    prototype on all eight frames, so the agreement is expected.
+
+    The verdict is **DISCLOSE_GAP**, the `0.80 <= rho < 0.90` band of
+    `r3-perframe-0.90`: the column SHIPS with the disclosure and the row
+    needs no waiver (only STRUCK needs one). Both limbs are asserted as
+    the BAND's bounds and not as digits -- pooled in `[0.80, 0.90)` and
+    the top-five per-frame max median in the same half-open interval --
+    so a re-recorded row that moved within the band still has to stay in
+    it, while a row that crossed 0.90 (STRUCK, the column would be
+    removed) or fell under 0.80 fails here.
+
+    This test replaced `test_the_gate_e_row_is_owed`, which asserted the
+    row was ABSENT and so failed the moment the receipt session recorded
+    it. `docs/SkFcbPosMeasured.md` §E .. §E5 carries the result in full,
+    including the part the band does not read: ONE of the 89 frames
+    reaches 0.9010 against `pgo`, while the median the band reads is
+    0.8405."""
+    row = _sk_fcb_pos_ledger_row()
+    assert row["module"] == "pandas_ta.momentum.sk_fcb_pos"
+    assert row["column"] == COLUMN
+    assert row["run"] == "is108-sk_fcb_pos-d0e27f53"
+    assert row["verdict"] == "DISCLOSE_GAP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert row["against"] == "pgo"
+    assert row["against_set"] == "manifest"
+    assert row["perframe_max_against"] == "pgo"
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    # DISCLOSE_GAP is 0.80 <= |rho| < 0.90 on the pooled limb with no
+    # top-5 comparator's per-frame median at 0.90 or above.
+    assert 0.80 <= float(row["max_abs_rho"]) < 0.90
+    assert 0.80 <= float(row["perframe_max_median_abs_rho"]) < 0.90
+
+
+def test_the_gate_e_run_closes_gate_c_on_real_data():
+    """Gate C's real-data limb, read off the SAME ledger row rather than
+    retyped: the column fires on 397,501 of the run's 398,849 pooled bars
+    over 89 real BIST frames, so `0 < fires < n` holds there and not only
+    on the synthetic frames of item 6.
+
+    The 1,348 empty bars are NOT a constant warm-up, and that is the
+    real-data form of item 6's finding: 1,348 is not a whole number of
+    bars per frame (15.15 on average, 89 * 15 + 13), so no per-frame
+    constant can produce it, while the floor `2 * SPAN` per frame is 356
+    of the 1,348. Asserted as those two relations -- not a whole multiple
+    of `n_frames`, and at least `2 * SPAN * n_frames` -- rather than as
+    1,348. ⚠ 15.15 is EMPTY BARS per frame and not a mean first-fire bar:
+    the two coincide only if the real NaNs are a leading prefix, which
+    this row cannot show, because a COLLAPSED band empties its own bar
+    wherever it sits (item 1).
+
+    `non_zero` is 1,322 SHORT of `non_nan`, i.e. 1,322 fired real bars
+    read exactly 0.0 -- the close landed exactly on the lower leg. Item
+    7's exact readings were measured on a 2.0-tick synthetic frame, and
+    this is the same regime on real prices, where 21.17% of BIST daily
+    bars close exactly at an extreme. Asserted as `0 < non_zero <
+    non_nan`, the structural fact, with 1,322 the figure measured by that
+    run.
+
+    ⚠ The row carries no count of NEGATIVE or COLLAPSED denominators --
+    it reports NaN and zero only -- so item 1's three regimes stay
+    SYNTHETIC figures, and the collapsed bars sit inside the 1,348
+    empties where this row cannot separate them from the warm-up."""
+    row = _sk_fcb_pos_ledger_row()
+    pooled = int(row["pooled_bars"])
+    fires = int(row["non_nan"])
+    frames = int(row["n_frames"])
+    empty = pooled - fires
+    assert 0 < fires < pooled
+    assert empty % frames != 0, empty
+    assert empty >= 2 * SPAN * frames
+    # 1,322 bars read exactly 0.0 in this run; pinned as the relation.
+    assert 0 < int(row["non_zero"]) < fires

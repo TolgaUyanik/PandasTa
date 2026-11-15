@@ -21,9 +21,19 @@ rather than the formula's, it says so.
 
 ## The one-paragraph verdict
 
-The port **ships**, with Gate E owed. Gates A–D are clean and the column is
-not a restatement of its sibling `sk_fcb_width` on this frame set (max
-|ρ| 0.2096, §F) although both are built from the same two band legs.
+The port **ships**, Gate E included. Gates A–D are clean, Gate E measured
+**DISCLOSE_GAP** on this module — pooled |ρ| 0.8348 against the manifest's
+`pgo` over n = 397,262, top-five per-frame max median 0.8405 over 89 real
+frames (§E) — which is the 0.80 ≤ ρ < 0.90 band, so the column stays and needs
+no waiver. It is not a restatement of its sibling `sk_fcb_width` on the
+synthetic frame set (max |ρ| 0.2096, §F) although both are built from the same
+two band legs.
+
+**What DISCLOSE_GAP means for a consumer:** this column is persistently close
+to the close-position family on real data. Nine of the 687 engine comparators
+reach 0.80, 80 of the 89 frames reach 0.80 against `pgo`, and one frame reaches
+0.9010 (§E2, §E3). Pairing it with `willr`, `pgo`, `kdj` or `%B` in a miner
+double-weights most of one signal.
 
 **What a consumer must know before using it, and it is not the formula:**
 the denominator `upper - lower` is **not positive and is not guarded to be**.
@@ -54,17 +64,24 @@ written before it was measured.
    returns it *on* the centre. That divergence is measured (§A3) and the
    centre reading is the `centre-read` Gate B mutant — but which one
    `Fcb.Series.cs` uses is unknown here.
-3. **Gate E is owed.** See §E. The screen's 0.8348 against `pgo` was measured
-   on the **prototype** on 2026-10-24, not on this module.
-4. **No real-data figure in this file.** Every count, range and ρ below is
-   from eight synthetic frames of 1,500 bars. Per `CLAUDE.md`, 86,415 of
-   408,253 real BIST daily bars (21.17%) close exactly at an extreme, so the
-   real-data regime is the *tick-grid* end of §C2 and these continuous frames
-   do not predict it.
+3. **Gate E is done, and it measured ρ only.** §E is this module's own run
+   (2026-11-15). It establishes how far the column sits from 687 engine
+   comparators, and nothing about whether the formula is right: a wrong port
+   with the same shape would land in the same band.
+4. **Almost no real-data figure in this file.** Every count, range and ρ
+   outside §E4 is from eight synthetic frames of 1,500 bars. Per `CLAUDE.md`,
+   86,415 of 408,253 real BIST daily bars (21.17%) close exactly at an
+   extreme, so the real-data regime is the *tick-grid* end of §C2 and these
+   continuous frames do not predict it. §E4 carries the only real-data counts
+   here — fired bars and exact zeros — and explicitly **not** the sign of the
+   denominator.
 5. **Why the synthetic ρ against `cci` (0.8860, §F) sits so close to the
    screen's real-data ρ against `cci` (0.8556) is not established.** It is a
    coincidence of two different measurements until something measures the
-   link.
+   link. ⚠ A third figure now sits beside them and does not settle it either:
+   Gate E's own run reads **0.8012** against the engine's `CCI` (§E2, rank 9),
+   which is a *different* column from the fork's `cci:CCI_14_0.015` — this
+   session did not read the engine.
 
 ---
 
@@ -518,27 +535,121 @@ the shift while the relative size stays tiny.
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
+### §E The run on THIS module
 
-The launcher runs
-`gate_e_overlap.py run --module pandas_ta.momentum.sk_fcb_pos` in the
-Backtesting worktree; a later receipt session records the row in
-`docs/gate_e_ledger.csv` and writes the measured numbers into this section.
-Until then:
+**Measured 2026-11-15, run `is108-sk_fcb_pos-d0e27f53`**, by issue-solver after
+the porting session:
+`gate_e_overlap.py run --module pandas_ta.momentum.sk_fcb_pos`, default
+parameters (`kwargs {}`), 89 ALTPORT-1 frames, 398,849 pooled bars,
+329 `compute_all` + 358 manifest = **687 comparators**, **0** dropped as
+degenerate, canary bit-equal on AKBNK.IS, BIENY.IS, AGHOL.IS and SASA.IS, data
+`1be6495e`, module sha1 `e55bbfde`, tree sha1 `b77648e7`, pandas 2.3.3 /
+numpy 1.26.4. Recorded in `docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record … --measured 2026-11-15`.
 
-* `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-  reports `sk_fcb_pos` among the indicators owing a measurement — a skip under
-  `GATE_E_PENDING_OK=1` on the way to `dev`, a failure locally and toward
-  `main`.
-* `tests/test_sk_fcb_pos.py::test_the_gate_e_row_is_owed` asserts the row is
-  **absent**, so it fails the moment the receipt session records it. That is
-  the cue, deliberately placed.
+| column | max \|ρ\| | against | set | n | per-frame max median | verdict |
+|---|---:|---|---|---:|---:|---|
+| `SK_FCB_POS_2` | **0.8347587029753524** | `pgo` | manifest | 397,262 | **0.8405193324600877** (`pgo`, 89 frames) | **DISCLOSE_GAP** |
 
-**What the screen measured, on the PROTOTYPE, on 2026-10-24 — not on this
-module.** Run `screen_r2_20261024`,
+`verdict_pooled_only` is the same **DISCLOSE_GAP**, so neither limb carried the
+other. The `compute_all` limb alone reads 0.8302729829853229 against `willr`
+over n = 397,308.
+
+**The column SHIPS, with this disclosure.** Under `r3-perframe-0.90`,
+DISCLOSE_GAP is the 0.80 ≤ ρ < 0.90 band: not STRUCK, so nothing is removed
+and the row needs no waiver (only STRUCK does).
+
+**The run reproduced the screen's PROTOTYPE figures to every digit issue #108
+printed** — same comparator `pgo`, same n = 397,262, the same 0.8348 and
+0.8405, the same runners-up `willr` 0.8303 and `kdj_J_9_3` 0.8256. §A2 asserts
+this module bit-equal to the retyped prototype on all eight synthetic frames,
+so that agreement is what the port predicted. An *expected* agreement is the
+easiest kind of row to copy over by mistake, which is why
+`tests/test_sk_fcb_pos.py::test_the_gate_e_row_is_this_ports_own_measurement`
+pins the row's **run id** and not only its arithmetic.
+
+### §E2 The nearest comparators, ranked (`top25.csv`)
+
+| rank | comparator | set | \|ρ\| | n |
+|---:|---|---|---:|---:|
+| 1 | `pgo` | manifest | 0.8348 | 397,262 |
+| 2 | `willr` | compute_all | 0.8303 | 397,308 |
+| 3 | `kdj_J_9_3` | compute_all | 0.8256 | 397,347 |
+| 4 | `Dist_to_Tenkan_pct` | manifest | 0.8181 | 397,469 |
+| 5 | `ZSCORE_20` | compute_all | 0.8126 | 396,979 |
+| 6 | `BB_%B` | compute_all | 0.8126 | 396,979 |
+| 7 | `BB_PctB` | manifest | 0.8126 | 396,979 |
+| 8 | `kdj_K_9_3` | compute_all | 0.8088 | 397,414 |
+| 9 | `CCI` | compute_all | 0.8012 | 396,979 |
+| 10 | `willr_Pctl` | manifest | 0.8000 | 392,333 |
+| … | | | | |
+| 25 | `ATR_POSITION_Pctl` | manifest | 0.7534 | 391,800 |
+
+Nine of the 687 comparators reach 0.80 and the list falls to 0.7534 by rank 25,
+so the crowding is a *family*, not one twin: every one of the top nine is a
+**close-position-in-a-range** measure (`pgo`, `willr`, `kdj`, `Dist_to_Tenkan`,
+`ZSCORE_20`, `%B`, `CCI`). That is the family §F predicted from the synthetic
+frames and the family the issue's "next comparators" named.
+
+⚠ `BB_%B` (compute_all) and `BB_PctB` (manifest) are **rank-identical** in this
+run — same |ρ| to all 16 digits (0.8126370956902021) and the same n — so they
+are one measurement under two names; `ZSCORE_20` differs from them only at the
+9th decimal (0.8126370965330801).
+
+### §E3 Per-frame, where the band's second limb is read (`perframe.csv`)
+
+| comparator | median \|ρ\| | mean | max | min | frames ≥ 0.90 | frames ≥ 0.80 |
+|---|---:|---:|---:|---:|---:|---:|
+| `pgo` | **0.8405** | 0.8370 | **0.9010** | 0.7523 | 1 of 89 | 80 of 89 |
+| `willr` | 0.8315 | 0.8303 | 0.8801 | 0.7309 | 0 of 89 | 81 of 89 |
+| `kdj_J_9_3` | 0.8295 | 0.8256 | 0.8771 | 0.7315 | 0 of 89 | 79 of 89 |
+| `Dist_to_Tenkan_pct` | 0.8236 | 0.8197 | 0.8789 | 0.7217 | 0 of 89 | 74 of 89 |
+| `ZSCORE_20` | 0.8147 | 0.8158 | 0.8773 | 0.7303 | 0 of 89 | 71 of 89 |
+
+⚠ **One frame of the 89 does cross 0.90** — 0.9010 against `pgo`
+(`pct_frames_ge_090` 1.1235955056179776 = 1/89). The band does **not** read
+that: STRUCK needs a top-5 comparator's per-frame **median** ≥ 0.90, and the
+median is 0.8405. Reported because a single-frame crossing is the thing a
+reader of "DISCLOSE_GAP" would otherwise not know.
+
+⚠ The overlap is **stable across frames rather than driven by a few**: the
+weakest of the 89 frames still reads 0.7217 … 0.7523 on the top four
+comparators, and 71 … 81 of 89 frames sit at or above 0.80. This is a column
+that is persistently close to the position family, not one with a handful of
+outlier frames.
+
+### §E4 What the run adds to Gate C — real data
+
+The row's own counts, over the 89 real BIST frames:
+
+| pooled bars | fired (`non_nan`) | empty | `non_zero` |
+|---:|---:|---:|---:|
+| 398,849 | 397,501 | 1,348 | 396,179 |
+
+* `0 < fires < n` **on real data**, which is Gate D's guard off the synthetic
+  frames (§C) confirmed where it matters.
+* The 1,348 empty bars are **not** a whole number of bars per frame (15.15 on
+  average, and 1,348 = 89 × 15 + 13), which is §C's **data-dependent warm-up**
+  measured on real prices rather than a constant. The floor `2 * SPAN` per
+  frame accounts for 356 of them.
+* `non_zero` is **1,322 short of `non_nan`**: 1,322 fired real bars read
+  exactly 0.0, i.e. the close landed exactly on the lower leg. §C2's exact
+  readings were measured on a 2.0-tick synthetic frame; this is the same
+  regime on real prices, where 21.17% of BIST daily bars close exactly at an
+  extreme (`CLAUDE.md`, FVGDEAD).
+
+⚠ **What the row does NOT carry.** It counts NaNs and zeros, not signs or
+denominators, so §C4's three regimes stay **synthetic**: the 5 … 91 crossed
+bars per frame, the collapsed-band bars and the 142 … 400 sub-zero readings are
+not measured on real data by this run. The collapsed bars are *inside* the
+1,348 empties and this row cannot separate them from the warm-up.
+
+### §E5 The screen's prototype figures, for the record
+
+Run `screen_r2_20261024`,
 `gate_e_overlap.py run --module ind_screen_r2 --fn screen`, Backtesting `main`
-b2d94243, 89 ALTPORT-1 frames, 398,849 bars, 329 + 358 = 687 comparators,
-canary bit-equal:
+b2d94243, same 89 frames, same 687 comparators, canary bit-equal — measured on
+the **prototype** on 2026-10-24, before this module existed:
 
 | comparator | pooled \|ρ\| | n |
 |---|---:|---:|
@@ -546,14 +657,11 @@ canary bit-equal:
 | `willr` | 0.8303 | — |
 | `kdj_J_9_3` | 0.8256 | — |
 
-Top-5 per-frame max median **0.8405** → **DISCLOSE_GAP** (0.80 ≤ ρ < 0.90 in
-`r3-perframe-0.90`). The screen's stage-2 fork overlap (scale-free `Category`
-outputs at defaults, 12 frames) put it at 0.8556 against `cci:CCI_14_0.015`,
-per-frame max median 0.8567 — not a restatement at the 0.90 line.
-
-§A2 asserts this module bit-equal to the retyped prototype on all eight
-synthetic frames, so the port's own run is **expected** to agree. "Expected" is
-not "measured", and nothing in this file is written as if it were.
+Top-5 per-frame max median **0.8405** → DISCLOSE_GAP. §E reproduces all four
+figures. The screen's stage-2 fork overlap (scale-free `Category` outputs at
+defaults, 12 frames) put it at 0.8556 against `cci:CCI_14_0.015`, per-frame max
+median 0.8567 — not a restatement at the 0.90 line, and not re-measured here:
+the 687 Gate E comparators are the engine's and hold no `pandas_ta` port.
 
 ---
 
@@ -562,6 +670,20 @@ not "measured", and nothing in this file is written as if it were.
 ⚠ **Synthetic.** Gate E measures 687 engine comparators over 89 real BIST
 frames and none of them is a `pandas_ta` port. What follows is this session's
 own frames and is not a substitute for §E.
+
+What §E settled about this table: the **family** it names was right — the
+engine's nine comparators at 0.80 and above are all close-position measures
+(§E2) — and the **levels** straddle it rather than matching it. The fork's
+`pgo:PGO_14` reads 0.4068 … 0.8644 over the seven firing frames here, against
+the engine's `pgo` at 0.8348 pooled over real data; the fork's `willr:WILLR_14`
+reads 0.3958 … 0.8531 against the engine's `willr` at 0.8303. Each real figure
+lands inside its synthetic spread and near the upper end of it; what drags the
+spread down is the 2.0-tick `coarse` frame (0.4068 / 0.3958) and the `trend`
+frame (0.6807 / 0.6141), neither of which has a real-data counterpart here.
+⚠ The pairs share a name
+only: this session did not read the engine, so no claim is made that the two
+`pgo`s are the same computation, and the synthetic figures are not evidence
+about Gate E either way.
 
 Spearman ρ of `SK_FCB_POS_2` against each comparator, per frame:
 
@@ -815,7 +937,7 @@ such in
 | 2 | `pandas_ta/momentum/__init__.py` | `from .sk_fcb_pos import sk_fcb_pos` |
 | 3 | `pandas_ta/__init__.py` → `Category["momentum"]` | added; momentum now holds **86** |
 | 4 | `pandas_ta/core.py` → `df.ta.sk_fcb_pos()` | added |
-| 5 | `tests/test_sk_fcb_pos.py` | 218 tests |
+| 5 | `tests/test_sk_fcb_pos.py` | 219 tests |
 
 Column name `SK_FCB_POS_2`, category tag `momentum`, accessor output
 bit-equal to the direct call. `offset=2` shifts by exactly 2 bars;
@@ -855,19 +977,24 @@ identical on both invocations.
 
 ## Gate F — suites
 
-* `python -m pytest tests/test_sk_fcb_pos.py -q` → **218 passed**.
-* `python docs/measure_sk_fcb_pos_cpu.py` → the same **218 passed** with
+* `python -m pytest tests/test_sk_fcb_pos.py -q` → **219 passed**
+  (218 in the porting session; `test_the_gate_e_row_is_owed` became
+  `test_the_gate_e_row_is_this_ports_own_measurement` and
+  `test_the_gate_e_run_closes_gate_c_on_real_data` was added, so the count
+  moved by one).
+* `python docs/measure_sk_fcb_pos_cpu.py` → the same **219 passed** with
   `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`, numpy 1.26.4,
   dispatchable features still enabled printed by the run and the four asserted
   absent. §A1 and §C4 re-run under that environment are **identical cell for
   cell**.
-* `python -m pytest -q` (whole suite, this worktree) → **3 failed, 9,516
-  passed, 85 skipped** in 340 s. All three failures are expected and none is
-  this port's:
+* `python -m pytest -q` (whole suite, this worktree, after the Gate E row
+  landed) → **3 failed, 9,524 passed, 85 skipped** in 260 s. All three
+  failures are expected and none is this port's:
   1. `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-     — the owed row, which reports
-     `['arch_lm', 'diff2_acf1', 'edge', 'firstzero_ac', 'halflife', 'lumpiness', 'mtd_ret', 'sk_fcb_pos']`.
-     A skip under `GATE_E_PENDING_OK=1` on the way to `dev`.
+     — rows owed by **seven other** indicators,
+     `['arch_lm', 'diff2_acf1', 'edge', 'firstzero_ac', 'halflife', 'lumpiness', 'mtd_ret']`;
+     `sk_fcb_pos` is no longer in that list. A skip under
+     `GATE_E_PENDING_OK=1` on the way to `dev`.
   2. `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
      — `dev`'s known clean-checkout break (`CLAUDE.md` *Known breaks*).
   3. `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
