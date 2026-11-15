@@ -2061,6 +2061,12 @@ class AnalysisIndicators(BasePandasObject):
         result = tf_centroid_20(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def tf_spec_entropy_64(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = tf_spec_entropy_64(close=close, length=length, offset=offset,
+                                    **kwargs)
+        return self._post_process(result, **kwargs)
+
     def trend_scan(self, horizons=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = trend_scan(close=close, horizons=horizons, offset=offset, **kwargs)
