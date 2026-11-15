@@ -29,18 +29,26 @@ default parameters (`MTD_RET`). Recorded with
 - Next comparators: `ATR_POSITION` 0.7934, `bias_ta` 0.7840, `ZSCORE_20` 0.7760, `BB_%B`
   0.7760.
 
-**Disclosure.** `MTD_RET` overlaps the engine's `bias` at ρ 0.80, and the next four
-comparators at 0.78–0.79. Each places the close against a recent level. Read from the
-Backtesting source: `bias` is `(close - sma20) / sma20` (`indicator_engine.py:988`), and
+**Disclosure.** `MTD_RET` overlaps the engine's `bias`: pooled ρ 0.7997; per frame
+(`perframe.csv`) median 0.8029, 50 of 89 frames at or above 0.80, range 0.7549–0.8694. The
+next comparator, `ATR_POSITION`, reads pooled 0.7934, per-frame median 0.7956, 39 of 89
+frames at or above 0.80. Read from the Backtesting source, both place the close against a
+recent level: `bias` is `(close - sma20) / sma20` (`indicator_engine.py:988`), and
 `ATR_POSITION` is the close's position between `ATR_LOWER` and `ATR_UPPER`
-(`ml_features.py:274`). By their names only, not read: `bias_ta`, `ZSCORE_20` and `BB_%B`.
-`MTD_RET` places the close against the month's first open. A miner given `MTD_RET` next to
-`bias` gets much the same signal twice.
+(`ml_features.py:274`). `MTD_RET` places the close against the month's first open.
+`bias_ta` (0.7840), `ZSCORE_20` and `BB_%B` (0.7760 each) were not read.
 
 **Band.** Pooled 0.7997 is in DISCLOSE (0.76 ≤ ρ < 0.80), 0.0003 under the 0.80 line where
 DISCLOSE_GAP starts, so it ships with the comparator named here and no waiver. The per-frame
 0.8029 is above 0.80, but the ladder's per-frame limb only acts at 0.90 (STRUCK), so it does not
-move the band. Either way it ships; the band only changes the disclosure.
+move the band (`backtesting_engine/gate_e.py:99-111`, `verdict()`: the per-frame median feeds
+only STRUCK; the pooled figure picks DISCLOSE_GAP, DISCLOSE or SHIP). Either way it ships; the
+band only changes the disclosure.
+
+Outputs: `MultipleBranchWork/Backtesting-adhoc-gatee-agent/backtest_results/gatee/gatee7-20261115-mtd_ret/`
+on the owner's machine; Backtesting `91ab7ae2`, stamp `engine_code` `f58eb5da`,
+`pandas_ta_src_sha1` `9293d757`. To re-run, from `../Backtesting/Backtesting`:
+`python scripts/analysis/gate_e_overlap.py run --module pandas_ta.performance.mtd_ret --name <run name>`.
 
 **The prototype.** The issue's screen, `screen_r9_20261029`, measured the prototype
 `b3_mtd_ret` at 0.7997 vs `bias` (n = 397,156), per-frame 0.8029, DISCLOSE. The port reproduces

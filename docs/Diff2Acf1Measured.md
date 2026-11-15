@@ -249,9 +249,9 @@ deviation 2%:
 
 ## Family — what it restates
 
-All of this section is synthetic. Gate E on real data has since run (see "Gate E"); it
-compares against the engine's columns, not this fork's, so it does not measure anything
-in this section against #94 or #96.
+All of this section is synthetic except the Gate E bound in the last bullet of the first
+part. Gate E compares against the engine's columns, not this fork's, so it does not measure
+this column against #94 or #96.
 
 **The window's own return autocorrelations** (100 paths × 600 bars). Let
 `g = (2ρ̂1 − 1 − ρ̂2) / (2(1 − ρ̂1))`, the population identity evaluated on the sample
@@ -274,8 +274,10 @@ lag-1 and lag-2 autocorrelations of the same window's 99 log returns.
     0.61–0.71 at equal windows. That is below the 0.76 ship line, but it is synthetic and
     the windows differ (60 against 100), so it needs its own measurement.
   - Whether the engine's 687 Gate E comparators hold a return-autocorrelation column is
-    still not read here, but the Gate E run bounds it: the largest |ρ| against any of the
-    687 is 0.1323, so no comparator, autocorrelation or not, overlaps this column more.
+    still not read here, but the Gate E run bounds it: the largest pooled |ρ| against any
+    of the 686 non-degenerate comparators is 0.1323, so none, autocorrelation or not, has a
+    higher pooled |ρ| with this column. Single frames run higher: up to 0.5383 vs `natr`
+    among the five comparators the run measures per frame (`perframe.csv`).
 
 **Columns in `Category` that use serial correlation.** A grep of `pandas_ta` for
 `autocorr`, `.corr(...shift(` and `.cov(...shift(` finds two modules besides this one:
@@ -350,14 +352,20 @@ Run `gatee7-20261115-diff2_acf1`, 2026-11-15, on this module as it stands on `de
 The prototype's figure in the issue was 0.1321 vs the same `Swing_Range_pct`; the port
 reads 0.0002 higher.
 
+Outputs: `MultipleBranchWork/Backtesting-adhoc-gatee-agent/backtest_results/gatee/gatee7-20261115-diff2_acf1/`
+on the owner's machine; Backtesting `91ab7ae2`, stamp `engine_code` `f58eb5da`,
+`pandas_ta_src_sha1` `9293d757`. To re-run, from `../Backtesting/Backtesting`:
+`python scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.diff2_acf1 --name <run name>`.
+
 ## Gate F — suites
 
 Full suite on this branch (`.venv-pd2`, CI's two deselects, `GATE_E_PENDING_OK=1`):
 5302 passed, 84 skipped, 0 failed (after merging `dev` at `5859c0f`).
 
-Without the variable, `test_every_indicator_that_needs_a_row_has_one` fails on the owed
-rows `diff2_acf1` and `mtd_ret`; `mtd_ret` is already owed on `dev`. The Backtesting suite
-cannot be run here. Both rows were recorded on 2026-11-15 (see "Gate E").
+Without the variable, `test_every_indicator_that_needs_a_row_has_one` failed (before
+2026-11-15) on the owed rows `diff2_acf1` and `mtd_ret`; `mtd_ret` was already owed on
+`dev`. The Backtesting suite cannot be run here. Both rows were recorded on 2026-11-15
+(see "Gate E").
 
 ## Counters touched
 

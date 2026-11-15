@@ -3,8 +3,9 @@
 > **Status: HLIFE-1 and HLIFE-2 (Gates A, B, D) pass. HLIFE-3 (Gate E) is measured: SHIP,
 > 0.4209 vs `ADX`** (run `gatee7-20261115-halflife`, 2026-11-15, recorded in
 > `docs/gate_e_ledger.csv`; see the Gate table and "HLIFE-3 result"). Gate C's real-data counts
-> come from the same run. **HLIFE-4 and the real-data family check are still owed** (issue
-> [#4](https://github.com/TolgaUyanik/PandasTa/issues/4)).
+> come from the same run. **Still owed** (issue [#4](https://github.com/TolgaUyanik/PandasTa/issues/4)):
+> HLIFE-4 (`docs/indicators/halflife.md` and the parent's register pickup; see the end of this
+> file) and the real-data family check against `KPSS_100` and `CUSUM_100`.
 > Until 2026-11-15, `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
 > owed a row for `halflife`: a **skip** in CI on PRs into `dev`, a failure without
 > `GATE_E_PENDING_OK`. The row is now recorded, as is `mtd_ret`'s (#206).
@@ -121,7 +122,8 @@ measures: Gate E measures overlap with the engine's columns (SHIP, see "HLIFE-3 
 data the column is NaN far more often than on the synthetic walk: 7.81% of post-warm-up bars against
 0.45% (Gate C row below). A longer window cuts the bias at the cost of responsiveness: at 2,000 bars the median
 error over K = 50 paths is −1.6% … +0.8% (standard error of the median 3.6% at theta 0.02), so no
-bias is detectable at that resolution. That is the owner's call if Gate E disappoints.
+bias is detectable at that resolution. Gate E did not force a longer window (SHIP, 0.4209); whether
+to lengthen it for the bias is the owner's call.
 
 ## Gates
 
@@ -133,7 +135,7 @@ numpy 2.4.2. `tests/test_halflife.py` passes in both: 32 of 32.
 |---|---|
 | A (HLIFE-1) | **(a) Known-truth oracle:** for each theta, K = 50 independent 2,001-bar O-U paths (seeds 1000–1049), one 2,000-pair estimate per path. Median relative error against `ln(2)/theta`: −1.56%, +0.83%, +0.09%, +0.60% at theta 0.02, 0.05, 0.1, 0.2. A single path is noisy: SD 20.3%, 13.3%, 9.0%, 6.3% (min/max −35%/+47% at theta 0.02), so the standard error of the median (1.2533·SD/√K) is 3.6%, 2.3%, 1.6%, 1.1%. Asserted: \|median error\| ≤ 3 such standard errors, with the SDs fixed at their measured values rather than recomputed from the sample, plus the sample SD within ±25% of them (a variance blow-up fails instead of widening its own band). **(b) Hand fixture:** closes 10, 12, 13, 13.5 at length 3 → `lambda = -0.5` → 2·ln 2 = 1.3863, arithmetic in the test. **Independent loop:** `np.polyfit` per window, on a walk and an O-U path at lengths 100, 30 and 3: max relative difference 2.1e-12, NaN masks identical (asserted rtol 1e-8). **Hostile inputs** (table in "Rolling sums" above): a 1e5 → 1 collapse and a 1e7 bad tick are pinned against the same loop, by `test_hostile_inputs_stay_precise`. **Bias at the default window:** pinned (table above). **NaN branch:** an accelerating trend, a flat series, alternating 10/12 (`lambda = -2`) and an explosive zig-zag are NaN throughout; no value is ≤ 0 or inf. |
 | B (HLIFE-2) | Future perturbation at 31 offsets, with two futures (another walk, and the same walk ×1000). The real module leaks at 0 of 31. Two one-bar look-ahead mutants (`importlib` source read, `exec`'d in memory) are each shown to change the output, then caught at 31 of 31: the slope written one bar early (`.shift(-1)`), and the one-bar change read one bar ahead. **No recursive stage, measured on values:** a +5% move of close 500 changes all 101 bars whose window holds it (each by at least 7.2%), leaves every bar before 500 bit-identical, moves bars 601–799 by at most 6.6e-15 relative, and leaves every bar from 800 (the next block) bit-identical. The 601–799 residue is a numerical dependence on a departed value, the rounding of pandas' rolling add/remove, bounded by the block. An EMA-smoothed mutant moves later bars by 0.25 and is caught by the same test. |
-| C (HLIFE-2) | **Real data** (Gate E run `gatee7-20261115-halflife`, 89 BIST daily frames, flat zero-volume bars dropped by the harness): 359,496 of 398,849 pooled bars fire (90.13%), all non-zero. Of the 39,353 empty bars, 8,900 are the warm-up (89 × 100); the other **30,453 are NaN after the warm-up, 7.81% of the 389,949 post-warm-up bars**. The run does not split them between the NaN branch (`lambda >= 0`), a flat window and a bad close. Synthetic, seed-11 walk: 1,095 non-NaN of 1,100 post-warm-up bars, 1,095 distinct values, range 3.13 to 2,341 bars. The NaN branch fires on 5 of 1,100 bars here, so it is reachable and not always on. |
+| C (HLIFE-2) | **Real data** (Gate E run `gatee7-20261115-halflife`, 89 BIST daily frames, flat zero-volume bars dropped by the harness): 359,496 of 398,849 pooled bars fire (90.13%), all non-zero. Of the 39,353 empty bars, 8,900 are the warm-up (89 × 100); the other **30,453 are NaN after the warm-up, 7.81% of the 389,949 post-warm-up bars**. The run does not split them between the NaN branch (`lambda >= 0` or `lambda <= -1`), a flat window and a bad close. Synthetic, seed-11 walk: 1,095 non-NaN of 1,100 post-warm-up bars, 1,095 distinct values, range 3.13 to 2,341 bars. The NaN branch fires on 5 of 1,100 bars here, so it is reachable and not always on. |
 | D (HLIFE-2) | Close ×8 and ×64 are bit-identical. ×10 and ×3.7 differ by at most 1.1e-13 and 9.5e-14 relative; the test asserts ≤ 1e-10, because relative error grows as `lambda` nears 0 (values up to 2,341 bars). NaN masks match in all four. |
 | E (HLIFE-3) | **SHIP.** Pooled max \|ρ\| 0.4209 vs `ADX`, n = 359,496; top-5 per-frame max median 0.4224 vs `ADX`. Run `gatee7-20261115-halflife` (2026-11-15) on the module as it stands on `dev` at `8000158`, recorded with `python docs/gate_e_ledger.py record ... --measured 2026-11-15`. Pre-registration and result below. |
 | F | **No new regressions in this repo** (below). Backtesting not run. |
@@ -153,7 +155,12 @@ numpy 2.4.2. `tests/test_halflife.py` passes in both: 32 of 32.
 ### HLIFE-3 result (run `gatee7-20261115-halflife`, 2026-11-15)
 
 687 comparators (329 compute_all + 358 manifest), 1 dropped as degenerate (`squeeze_SQZ_NO`,
-constant); canary bit-equal on AKBNK, BIENY, AGHOL and SASA. The run's top 5, pooled:
+constant); canary bit-equal on AKBNK, BIENY, AGHOL and SASA. Outputs:
+`MultipleBranchWork/Backtesting-adhoc-gatee-agent/backtest_results/gatee/gatee7-20261115-halflife/`
+on the owner's machine; Backtesting `91ab7ae2`, stamp `engine_code` `f58eb5da`,
+`pandas_ta_src_sha1` `9293d757`. To re-run, from `../Backtesting/Backtesting`:
+`python scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.halflife --name <run name>`.
+The run's top 5, pooled:
 
 | comparator | set | ρ | n |
 |---|---|---|---|
@@ -165,9 +172,26 @@ constant); canary bit-equal on AKBNK, BIENY, AGHOL and SASA. The run's top 5, po
 
 * **Per frame:** the top-5 per-frame max median |ρ| is 0.4224, vs `ADX`, over 89 frames; 0 frames
   at or above 0.90.
-* **The columns named for a specific read** (`natr`, `natr_percentile`, `ZSCORE_20`, `BB_BWidth`,
-  `LINREG_*`) are not in the run's top 25, whose last entry is `TK_Cross_Age` at 0.2040. So each
-  has pooled |ρ| of at most 0.2040. Their exact values are not in the run's outputs.
+* **The columns named for a specific read** are not in the run's top 25 (last entry `TK_Cross_Age`,
+  0.2040), so the run's outputs do not hold them. They were computed afterwards on the same cache
+  by `docs/measure_halflife_named_reads.py`, which uses the harness's own `assemble_frame`, `_pool`
+  and `pair_rho` (run from the gatee worktree's `Backtesting/`, `PYTHONPATH` on this tree). The
+  same code gives `ADX` 0.420861, n = 359,496, the run's figure exactly. Pooled, signed ρ, every
+  n = 359,496:
+
+  | comparator | ρ |
+  |---|---|
+  | `BB_BWidth` | 0.1997 |
+  | `natr` | 0.1890 |
+  | `natr_percentile` | 0.1766 |
+  | `LINREG_SLOPE` | 0.0814 |
+  | `ZSCORE_20` | 0.0559 |
+  | `LINREG_DEV` | 0.0432 |
+  | `LINREG_UPPER_2` | 0.0121 |
+  | `LINREG_UPPER_1` | 0.0111 |
+  | `LINREG_VALUE` | 0.0101 |
+  | `LINREG_LOWER_1` | 0.0089 |
+  | `LINREG_LOWER_2` | 0.0076 |
 * **Verdict against the ladder:** pooled 0.4209 and per-frame 0.4224 are under 0.76, so SHIP; no
   revert. The prediction ("low ρ") set no number; the measured maximum is 0.42, against trend
   strength (`ADX`) and cloud thickness, not against any column the issue named. All of those
@@ -184,8 +208,10 @@ real-data measurement, pinned by `test_family_overlap_on_synthetic_walks`: on 10
 bars of `HLIFE_100` against `KPSS_100` has median 0.240 (max 0.458), against `CUSUM_100` median
 0.224 (max 0.334), and against `ZSCORE_20` median −0.008. The real-data ρ against `KPSS_100` and
 `CUSUM_100` on the 89 frames is **still owed**: the HLIFE-3 run (2026-11-15) compares against the
-engine's columns only, so it does not include them. #85 (`lean_hurst_100`), `variance_ratio` and a
-rolling ADF stay blocked until HLIFE-3 reports, as #4 says.
+engine's columns only, so it does not include them. #4 blocked #85 (`lean_hurst_100`),
+`variance_ratio` and a rolling ADF until HLIFE-3 reported; it reported on 2026-11-15 (SHIP), and
+`lean_hurst_100` already has its own row in `docs/gate_e_ledger.csv` (SHIP, measured 2026-11-11).
+Whether `variance_ratio` and a rolling ADF also wait for the real-data family check is #4's call.
 
 ### Gate F (the author's machine, `.venv-pd2`)
 

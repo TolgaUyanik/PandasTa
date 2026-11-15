@@ -63,7 +63,8 @@ Tests: `tests/test_firstzero_ac.py` (39 tests). The four statsmodels tests skip 
 statsmodels is absent (CI, and the pandas 3 venv: 35 passed, 4 skipped there).
 
 Every number below is reproduced by `docs/measure_firstzero_ac.py`; the section name is
-given with each block. Synthetic data only.
+given with each block. Synthetic data only, except the "Gate E" section and the 0.0542 in
+"Family", which come from Gate E run `gatee7-20261115-firstzero_ac` (89 BIST frames).
 
 ## Window
 
@@ -311,6 +312,11 @@ dropped by the harness): 389,949 of 398,849 pooled bars fire (97.77%), all 389,9
 non-zero. The 8,900 empty bars are exactly 89 × 100, one warm-up per frame, so on these
 frames the rounding guard and the bad-close rule blanked no bar. How many fired bars read
 the `length` sentinel (100) is not in the run's outputs.
+
+Outputs: `MultipleBranchWork/Backtesting-adhoc-gatee-agent/backtest_results/gatee/gatee7-20261115-firstzero_ac/`
+on the owner's machine; Backtesting `91ab7ae2`, stamp `engine_code` `f58eb5da`,
+`pandas_ta_src_sha1` `9293d757`. To re-run, from `../Backtesting/Backtesting`:
+`python scripts/analysis/gate_e_overlap.py run --module pandas_ta.statistics.firstzero_ac --name <run name>`.
 
 ## Gate F — suites
 

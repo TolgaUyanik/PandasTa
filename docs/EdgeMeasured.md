@@ -219,14 +219,19 @@ Run `gatee7-20261115-edge`, 2026-11-15, on this module as it stands on `dev` at
 
 The prototype's figure in the issue (0.3889 vs `natr`) carried over to four decimals.
 
+Outputs: `MultipleBranchWork/Backtesting-adhoc-gatee-agent/backtest_results/gatee/gatee7-20261115-edge/`
+on the owner's machine; Backtesting `91ab7ae2`, stamp `engine_code` `f58eb5da`,
+`pandas_ta_src_sha1` `9293d757`. To re-run, from `../Backtesting/Backtesting`:
+`python scripts/analysis/gate_e_overlap.py run --module pandas_ta.volatility.edge --name <run name>`.
+
 ## Gate F — suites
 
 Full suite on this branch (`.venv-pd2`, CI's two deselects, `GATE_E_PENDING_OK=1`):
 4877 passed, 84 skipped, 0 failed.
 
-Without the variable, `test_every_indicator_that_needs_a_row_has_one` fails on the owed
-rows `edge` and `mtd_ret`; `mtd_ret` is already owed on `dev`. The Backtesting suite cannot
-be run here. Both rows were recorded on 2026-11-15 (see "Gate E").
+Without the variable, `test_every_indicator_that_needs_a_row_has_one` failed (before
+2026-11-15) on the owed rows `edge` and `mtd_ret`; `mtd_ret` was already owed on `dev`. The
+Backtesting suite cannot be run here. Both rows were recorded on 2026-11-15 (see "Gate E").
 
 ## Counters touched
 
