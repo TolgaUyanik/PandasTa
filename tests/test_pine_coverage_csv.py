@@ -40,7 +40,9 @@ CSV = os.path.join(DOCS, "pine_builtin_coverage.csv")
 GEN = os.path.join(DOCS, "gen_pine_builtin_coverage.py")
 CORPUS = os.path.join(DOCS, "pine")
 # Corpus files committed to the repo (#8); see the module docstring and NOTICE.
-TRACKED_PINE = {"RA2vGpkA-ta.pine"}
+# Read from the generator's source, so the two cannot drift apart.
+TRACKED_PINE = set(re.findall(r'"([^"]+\.pine)"', re.search(
+    r"TRACKED_PINE = frozenset\(\{([^}]*)\}\)", open(GEN, encoding="utf8").read()).group(1)))
 
 
 def _full_corpus_present():
@@ -423,7 +425,8 @@ def test_every_map_entry_is_reachable():
     # exclusion is a hole opened in advance -- it excuses a map that does not
     # exist today and would silently excuse one appearing under that name
     # tomorrow. So every exclusion must name something real.
-    NOT_NAME_KEYED = set()
+    # TRACKED_PINE (#8) is keyed by corpus file name, not by a Pine name.
+    NOT_NAME_KEYED = {"TRACKED_PINE"}
     phantom = sorted(n for n in NOT_NAME_KEYED if not hasattr(gen, n))
     assert phantom == [], (
         f"NOT_NAME_KEYED excludes attributes the classifier does not define: "

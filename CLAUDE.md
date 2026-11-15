@@ -204,13 +204,15 @@ hurt to lose, with the measured numbers. Match that when adding one — see `tes
 
 ## Known breaks
 
-**Fixed 2026-11-15 (#8, PINECITE).** `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
+No test fails on a clean checkout today.
+
+History: **fixed 2026-11-15 (#8, PINECITE).** `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
 failed on every clean checkout from `8d8f705` (which untracked the `docs/pine/` corpus) until
 then: every `audit_evidence` citation in `docs/pine_builtin_coverage.csv` names one file,
 `RA2vGpkA-ta.pine`, and it was gone. That one MPL-2.0 file is now tracked (see *Porting a Pine
 indicator* and `NOTICE`), the test runs in CI again, and `test_regenerating_reproduces_the_committed_csv`
 skips unless the full corpus is present, not merely `docs/pine/`. Older `*Measured.md` receipts
-that list it as a pre-existing failure are historical.
+that list it as a pre-existing failure, or say `docs/pine/` is absent, are historical.
 
 Separately, two indicators (`up_and_down_volume`, `volume_delta`) are **not probed** —
 they need a lower-timeframe frame the single-frame harness cannot synthesise — and the generated
