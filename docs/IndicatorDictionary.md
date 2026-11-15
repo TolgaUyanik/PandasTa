@@ -190,7 +190,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `ohlc4` | O/H/L/C | — | `OHLC4` PX | 0 | Indicator: OHLC4 |
 | `pwma` | C | `length=None`, `asc=None` | `PWMA_10` PX | 9 | Pascal's Weighted Moving Average is similar to a symmetric triangular window except PWMA's weights are based on Pascal's Triangle. |
 | `rainbow` | C | `length=None` | `RAINBOW_1` PX<br>`RAINBOW_2` PX<br>`RAINBOW_3` PX<br>`RAINBOW_4` PX<br>`RAINBOW_5` PX<br>`RAINBOW_6` PX<br>`RAINBOW_7` PX<br>`RAINBOW_8` PX<br>`RAINBOW_9` PX<br>`RAINBOW_10` PX | 10 | Rainbow Charts use multiple moving averages calculated sequentially, where each MA is calculated on the previous MA rather than the price. This… |
-| `rma` | C | `length=None` | `RMA_10` PX | 9 | The WildeR's Moving Average is simply an Exponential Moving Average (EMA) with a modified alpha = 1 / length. |
+| `rma` | C | `length=None` | `RMA_10` PX | 9 | Named after WildeR's Moving Average, but NOT Wilder's smoothing: it is pandas' `close.ewm(alpha=1/length, min_periods=length).mean()` with its… |
 | `rma2` | C | `length=None` | `RMA2_10` PX | 0 | TradingView `ta.rma2()` -- Wilder's smoothing (`alpha = 1/length`) with a per-bar `length` and a source seed instead of an SMA seed, so it is finite… |
 | `sinwma` | C | `length=None` | `SINWMA_14` PX | 13 | A weighted average using sine cycles. The middle term(s) of the average have the highest weight(s). |
 | `sma` | C | `length=None` | `SMA_10` PX | 9 | The Simple Moving Average is the classic moving average that is the equally weighted average over n periods. |

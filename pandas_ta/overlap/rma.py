@@ -29,14 +29,13 @@ def rma(close, length=None, offset=None, **kwargs):
 rma.__doc__ = \
 """wildeR's Moving Average (RMA)
 
-The WildeR's Moving Average is simply an Exponential Moving Average (EMA) with
-a modified alpha = 1 / length.
-
-Not Wilder's smoothing: this is pandas' `ewm(alpha=1/length).mean()` with its
-default `adjust=True`, not the recursive SMA-seeded form Pine's `ta.rma` uses,
-so its values differ from Pine's (kept for compatibility: changing it would move
-`atr` and everything built on `rma`). For true Wilder smoothing use
-`wilder_rma`, or `ma("wrma", ...)`.
+Named after WildeR's Moving Average, but NOT Wilder's smoothing: it is
+pandas' `close.ewm(alpha=1/length, min_periods=length).mean()` with its default
+`adjust=True`, not the recursive SMA-seeded form Pine's `ta.rma` uses, so its
+values differ from Pine's. Kept for compatibility: changing it would move `atr`,
+`rsi`, `adx`/`dx`/`dm`, `cmo`, `kdj` and everything else built on `rma`. For
+Wilder smoothing use `wilder_rma` or `ma("wrma", ...)` (matches Pine's `ta.rma`
+on NaN-free input; see `wilder_rma`).
 
 Sources:
     https://tlc.thinkorswim.com/center/reference/Tech-Indicators/studies-library/V-Z/WildersSmoothing
@@ -45,9 +44,8 @@ Sources:
 Calculation:
     Default Inputs:
         length=10
-    EMA = Exponential Moving Average
     alpha = 1 / length
-    RMA = EMA(close, alpha=alpha)
+    RMA = close.ewm(alpha=alpha, min_periods=length, adjust=True).mean()
 
 Args:
     close (pd.Series): Series of 'close's
