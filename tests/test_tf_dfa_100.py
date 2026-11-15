@@ -91,12 +91,33 @@ What this file pins, in order of how much it would hurt to lose:
    reversal and a rotation each move it, asserted as a floor, because a
    reader who knows the spectral features may assume otherwise.
 
-8. **Gate E is owed.** `test_the_gate_e_row_is_owed_and_not_yet_recorded`
-   asserts `docs/gate_e_ledger.csv` carries no row for this indicator,
-   which is the state this commit ships in and the receipt session's
-   cue.
+8. **Gate E is SHIP, and the test says whose measurement the row is.**
+   `test_the_gate_e_row_is_this_ports_own_measurement` pins the ledger
+   row to run `is112-tf_dfa_100-da670816` (2026-11-15, on THIS module):
+   pooled **0.0979** against the manifest's `Swing_Range_pct` at
+   n = 389,949, top-five per-frame max median **0.0996** against the
+   same comparator over 89 frames, 687 comparators, no waiver. Both
+   limbs are pinned as the BAND (`< 0.76`) and not as digits, so a
+   re-recorded row that moved inside the band still passes while one
+   that reached DISCLOSE, DISCLOSE_GAP or STRUCK fails here. The
+   2026-10-24 screen read the same 0.0979 against the same comparator
+   on the PROTOTYPE, and item 2 asserts this module equal to that
+   prototype to 4.441e-16, so the agreement is expected — which is
+   exactly why the row's identity is pinned and not only its
+   arithmetic.
+   `test_the_gate_e_run_closes_gate_c_on_real_data` reads Gate C's real
+   limb off the same row: 389,949 of 398,849 pooled bars fire, and the
+   8,900 empty ones are `89 * 100` EXACTLY — the constant warm-up on
+   real prices, pinned as `empty == n_frames * LENGTH`, which a
+   data-dependent warm-up could not satisfy — while `non_zero` equals
+   `non_nan`, so no real bar read exactly 0.0.
+   ⚠ Not pinned, because the row cannot carry it: the warm-up
+   arithmetic assumes every frame is longer than 100 bars, and the row
+   records no minimum or maximum, so item 1's unbounded range stays
+   synthetic-frame evidence.
 
-Every number above is printed by `python docs/measure_tf_dfa_100.py`;
+Every number above is printed by `python docs/measure_tf_dfa_100.py`,
+except item 8's, which come from that Gate E run;
 `docs/TfDfa100Measured.md` carries the tables.
 """
 import csv
@@ -1089,23 +1110,94 @@ def test_the_docstring_first_paragraph_survives_the_dictionary_cut():
     assert desc({"desc": body}) == body
 
 
-def test_the_gate_e_row_is_owed_and_not_yet_recorded():
-    """This commit ships Gate E OWED: issue-solver runs
-    `gate_e_overlap.py` after the session, and a later receipt session
-    records the row and replaces this test with one pinning its identity
-    (the shape `tests/test_tf_spec_entropy_64.py` ended up in). Until
-    then `tests/test_gate_e_ledger.py::
-    test_every_indicator_that_needs_a_row_has_one` fails locally and
-    skips on CI under `GATE_E_PENDING_OK=1`, which is the documented
-    "owed, not failed" state.
-
-    The prototype's figure is NOT this port's: the 2026-10-24 screen
-    measured max |rho| 0.0979 against `Swing_Range_pct` over 389,949
-    bars on the PROTOTYPE expression, which this module matches to
-    4.441e-16 but not bit for bit. Gate C's real-data limb is owed from
-    the same run."""
+def _tf_dfa_100_ledger_row():
     path = ROOT / "docs" / "gate_e_ledger.csv"
     with path.open(newline="", encoding="utf-8") as handle:
         rows = [r for r in csv.DictReader(handle)
                 if r["indicator"] == "tf_dfa_100"]
-    assert rows == []
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_the_gate_e_row_is_this_ports_own_measurement():
+    """The ledger row for `tf_dfa_100` must come from the run on THIS
+    module, `is112-tf_dfa_100-da670816` (measured 2026-11-15), and NOT
+    from the catalog screen of 2026-10-24, which measured the
+    PROTOTYPE. The two agree on the comparator, its set, its rank order
+    and all four of the screen's published figures to four decimals --
+    0.0979 against the manifest's `Swing_Range_pct` at n = 389,949,
+    per-frame 0.0996, then `mad_pct` 0.0958 and `BB_BWidth` 0.0955 --
+    which is exactly why the row's identity needs pinning:
+    `tests/test_gate_e_ledger.py` re-derives a row's `module_sha1` and
+    output fingerprint from the tree and checks its verdict arithmetic,
+    but it cannot see WHOSE measurement a row came from. Item 2 asserts
+    this module equal to the retyped prototype to 4.441e-16 with an
+    identical NaN mask, so the agreement is expected.
+
+    The verdict is **SHIP**, the `< 0.76` band of `r3-perframe-0.90`: no
+    disclosure, no waiver (only STRUCK needs one). Both limbs are
+    asserted as that band's bound and not as digits -- pooled and
+    top-five per-frame max median each under 0.76 -- so a re-recorded
+    row that moved inside the band still passes, while one that reached
+    DISCLOSE, DISCLOSE_GAP or STRUCK fails here.
+
+    Unlike `tf_spec_entropy_64`, both limbs read the SAME comparator
+    here, `Swing_Range_pct` (manifest), so the row's two `against`
+    fields are pinned to one name rather than two.
+    `docs/TfDfa100Measured.md` §E .. §E4 carries the run in full,
+    including what the verdict does not read: the worst SINGLE frame of
+    the top five is 0.3871 (`natr`), and `perframe.csv` covers the top
+    five comparators only, so the other 682 are bounded by their pooled
+    figures alone.
+
+    This test replaced `test_the_gate_e_row_is_owed_and_not_yet_recorded`,
+    which asserted the row was ABSENT and so failed the moment the
+    receipt session recorded it."""
+    row = _tf_dfa_100_ledger_row()
+    assert row["module"] == "pandas_ta.statistics.tf_dfa_100"
+    assert row["column"] == "TFDFA_100"
+    assert row["run"] == "is112-tf_dfa_100-da670816"
+    assert row["verdict"] == "SHIP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert row["against"] == "Swing_Range_pct"
+    assert row["against_set"] == "manifest"
+    assert row["perframe_max_against"] == "Swing_Range_pct"
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    # SHIP is |rho| < 0.76 on the pooled limb with no top-5 comparator's
+    # per-frame median at 0.76 or above.
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.76
+
+
+def test_the_gate_e_run_closes_gate_c_on_real_data():
+    """Gate C's real-data limb, read off the SAME ledger row rather than
+    retyped: the column fires on 389,949 of the run's 398,849 pooled
+    bars over 89 real BIST frames, so `0 < fires < n` holds there and
+    not only on the synthetic frames of this file.
+
+    The 8,900 empty bars are `89 * 100` **exactly**, with nothing left
+    over: the constant `length`-bar warm-up on real prices, on every one
+    of the 89 frames. Asserted as the equality `empty == n_frames *
+    LENGTH` -- a data-dependent warm-up, or a warm-up of any other
+    length, cannot land on the multiple exactly.
+    ⚠ It assumes every frame is longer than the warm-up, which the row
+    cannot show: it carries the pooled total, not per-frame lengths
+    (4,481.4 bars per frame on average).
+
+    `non_zero` EQUALS `non_nan`, so not one of the 389,949 fired real
+    bars read exactly 0.0.
+    ⚠ The row records no minimum and no maximum, so item 1's "the column
+    is NOT bounded" -- the `jump` frame's -0.2197 .. 2.3288 -- still
+    rests on the synthetic frames alone. This limb says the column
+    fires on real data and where it does not; it says nothing about its
+    range there."""
+    row = _tf_dfa_100_ledger_row()
+    pooled = int(row["pooled_bars"])
+    fires = int(row["non_nan"])
+    frames = int(row["n_frames"])
+    empty = pooled - fires
+    assert 0 < fires < pooled
+    assert empty == frames * LENGTH, empty
+    # No fired real bar read exactly 0.0 in this run.
+    assert int(row["non_zero"]) == fires

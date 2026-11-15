@@ -5,7 +5,8 @@ Source: **TSFEL** (Fraunhofer Portugal AICOS, BSD-3-Clause),
 `tsfel/feature_extraction/features.py` `dfa`.
 Module: `pandas_ta/statistics/tf_dfa_100.py` · column **`TFDFA_100`**
 (statistics, scale-free) · tests: `tests/test_tf_dfa_100.py` ·
-every number here is printed by `python docs/measure_tf_dfa_100.py`.
+every number here is printed by `python docs/measure_tf_dfa_100.py`, except
+§E's and §C1's, which come from the Gate E run `is112-tf_dfa_100-da670816`.
 
 `TFDFA_100` is the DFA-1 exponent of the last 100 simple returns: cumulate
 the mean-centred returns into a profile, remove a straight line from each
@@ -23,7 +24,10 @@ what is left at each box size, and fit a straight line through the five
    it runs **-0.2197 .. 2.3288**; the negative end is a frame with one 50%
    price gap in it.
 
-Gate E is **pending, run by issue-solver after this session** (§E).
+Gate E is **SHIP** (§E): max |ρ| **0.0979** against the manifest's
+`Swing_Range_pct` over n = 389,949, top-five per-frame max median **0.0996**
+over the 89 frames, run `is112-tf_dfa_100-da670816` of 2026-11-15 on this
+module. Gate C's real-data limb comes off the same run and is in §C1.
 
 ---
 
@@ -427,9 +431,29 @@ all eight firing frames.
 
 ### §C1 — real data
 
-**Owed.** Gate C's real-data limb comes off the Gate E run, which
-issue-solver runs after this session. The receipt session records the fired /
-pooled counts here.
+**Closed**, off the Gate E run of 2026-11-15 (`is112-tf_dfa_100-da670816`,
+§E), whose ledger row carries the counts:
+
+```
+pooled bars over the 89 BIST frames   398,849
+fired (non-NaN)                       389,949
+empty                                   8,900  = 89 * 100 exactly
+fired bars reading exactly 0.0              0  (non_zero == non_nan)
+```
+
+So `0 < fires < n` holds on real data and not only on §C2's synthetic
+frames. The 8,900 empty bars are `89 * 100` with nothing left over — §C2's
+constant 100-bar warm-up, on real prices, on every one of the 89 frames;
+`tests/test_tf_dfa_100.py::test_the_gate_e_run_closes_gate_c_on_real_data`
+pins that as `empty == n_frames * LENGTH`, which a data-dependent warm-up or
+a warm-up of any other length could not satisfy.
+
+⚠ Two things the row cannot show. The warm-up arithmetic assumes every frame
+is longer than 100 bars, and the row carries only the pooled total (4,481.4
+bars per frame on average). And the row records no minimum or maximum, so
+§C2's measured range — and the ⚠ below it — stays synthetic-only evidence:
+what the run adds is that `non_zero` equals `non_nan`, i.e. not one of the
+389,949 fired real bars read exactly 0.0.
 
 ### §C2 — synthetic frames
 
@@ -518,50 +542,162 @@ difference, for the reason §A2 gives.
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
+**Gate E: SHIP.** Measured 2026-11-15 on **this module** by run
+`is112-tf_dfa_100-da670816`
+(`gate_e_overlap.py run --module pandas_ta.statistics.tf_dfa_100`), recorded
+in `docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-15`.
 
-No row in `docs/gate_e_ledger.csv` yet, and
-`tests/test_tf_dfa_100.py::test_the_gate_e_row_is_owed_and_not_yet_recorded`
-asserts there is none, which is the receipt session's cue.
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails locally until then and skips on CI under `GATE_E_PENDING_OK=1` — the
-documented "owed, not failed" state.
+| column | max \|ρ\| | against | set | n | per-frame max median | over | verdict |
+|---|---|---|---|---|---|---|---|
+| `TFDFA_100` | **0.09794533770230351** | `Swing_Range_pct` | manifest | 389,949 | **0.09958028098681403** | 89 frames, `Swing_Range_pct` | **SHIP** |
 
-**What is known before the run, and what it is worth.** The 2026-10-24
-catalog screen measured the PROTOTYPE expression over the same 89 ALTPORT-1
-frames: max |ρ| **0.0979** vs `Swing_Range_pct` (manifest, n = 389,949), with
-the top-five per-frame max median at 0.0996 — SHIP — and the next
-comparators `mad_pct` 0.0958 and `BB_BWidth` 0.0955. This module matches that
-expression to 4.441e-16 but **not** bit for bit (§A1), so the screen's figure
-is a prior and not this port's receipt. The screen also ran a fork-overlap
-stage (12 frames, scale-free `Category` outputs at defaults): max |ρ| 0.1102
-vs `equal_highs_lows:EQH_DIST_5_5`.
+Under `r3-perframe-0.90` that is the `< 0.76` band on both limbs, so no
+disclosure and no waiver (only STRUCK needs one). `verdict_pooled_only` is
+the same SHIP, so neither limb carried the other, and unlike #111 **both
+limbs read the same comparator**, `Swing_Range_pct`.
+
+### §E1 — the run
+
+```
+run                is112-tf_dfa_100-da670816      measured 2026-11-15
+module             pandas_ta.statistics.tf_dfa_100   fn tf_dfa_100
+kwargs             {}  (defaults)                 end  none, no column excluded
+frames             89 ALTPORT-1 BIST frames       pooled bars 398,849
+comparators        687 = 329 compute_all + 358 manifest
+degenerate         1 dropped: squeeze_SQZ_NO (manifest), constant
+canary             AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal
+versions           pandas 2.3.3, numpy 1.26.4
+module sha1        654c61f85635bd4900a7b52f84fbbba12778fca0
+pandas_ta src sha1 665b891c182f2675333f83fb9ba54a3508eda051
+schema             r3-perframe-0.90
+```
+
+Per comparator set, the strongest in each:
+
+```
+set           max |rho|   against            n
+manifest        0.0979    Swing_Range_pct    389,949
+compute_all     0.0955    BB_BWidth          389,949
+```
+
+The module sha1 is the sha1 of `pandas_ta/statistics/tf_dfa_100.py` as the
+harness imported it, so **the module file must not be edited in this receipt
+session**: a one-character docstring change would move the hash and
+`tests/test_gate_e_ledger.py` would read the row as a measurement of code
+that no longer exists.
+
+### §E2 — the screen's prototype figures, and why the agreement is expected
+
+The 2026-10-24 catalog screen measured the PROTOTYPE expression over the same
+89 frames and read max |ρ| 0.0979 vs `Swing_Range_pct`, per-frame max median
+0.0996, with `mad_pct` 0.0958 and `BB_BWidth` 0.0955 behind it. This run
+reproduces the comparator, its set, its rank order and all four figures to
+four decimals:
+
+```
+                      screen (prototype)   this run (the module)
+pooled max |rho|       0.0979              0.09794533770230351
+  against              Swing_Range_pct     Swing_Range_pct (manifest)
+  n                    389,949             389,949
+per-frame max median   0.0996              0.09958028098681403
+mad_pct                0.0958              0.09583975797143650
+BB_BWidth              0.0955              0.09550381722685773
+```
+
+That is the agreement §A1 predicts — the module matches the prototype to
+4.441e-16 with identical NaN masks on all ten synthetic frames, differing
+only in the spelling of the final dot product — and **an expected agreement
+is the easiest kind of row to copy over by mistake**, which is why
+`tests/test_tf_dfa_100.py::test_the_gate_e_row_is_this_ports_own_measurement`
+pins the row's own run id and not only its arithmetic.
+
+⚠ The pooled `n` being identical, 389,949 on both, is *consistent with* the
+two sharing a NaN mask on real data but is not proof of it: `n` is the
+pairwise-complete count against one comparator, and §A1's mask measurement
+was made on synthetic frames. What this run does establish about the mask is
+in §C1: the 8,900 empty bars are `89 * 100` exactly.
+
+### §E3 — what the verdict does not read
+
+**The overlap is low everywhere, but not uniformly low per frame.** Across
+the top five comparators the per-frame figures are
+
+```
+against            median   mean     max      min      >=0.90   >=0.80
+Swing_Range_pct    0.0996   0.1099   0.3736   0.0003      0.0      0.0
+mad_pct            0.0963   0.1036   0.3645   0.0013      0.0      0.0
+BB_BWidth          0.0948   0.1013   0.3636   0.0015      0.0      0.0
+ui                 0.0804   0.0891   0.3047   0.0017      0.0      0.0
+natr               0.0836   0.1096   0.3871   0.0013      0.0      0.0
+```
+
+so the worst SINGLE frame of the five reaches 0.3871 (`natr`) and no frame
+reaches any disclosure band on any of them.
+⚠ `perframe.csv` covers the **top five comparators only**, so the other 682
+are bounded by their pooled figures alone.
+
+**What the column most resembles.** The whole top-25 spans 0.0433 .. 0.0979
+— rank 25 is `natr_Chg_5d` — and 16 of the 25 are positive. By name, 12 of
+the 25 read a range or a dispersion width (`Swing_Range_pct`, `mad_pct`,
+`BB_BWidth`, `ui`, `natr`, `Stop_2ATR_pct`, `BB_Squeeze_Age`,
+`squeeze_SQZ_OFF`, `squeeze_SQZ_ON`, `Pivot_Range_pct`, `pdist_pct`,
+`natr_Chg_5d`) and 8 are a distance to an extreme (`dist_from_high_60`,
+`Dist_to_BB_Upper_pct`, `Dist_from_High_252_pct`, `dist_low_60`,
+`Dist_to_BB_Lower_pct`, `dist_from_high_20`, `dist_low_20`,
+`ha_HA_high_DIST_PCT`); the remaining five are `ICHI_CLOUD_THICK`,
+`Cloud_Thickness_pct`, `DMN`, `chop` and `Supertrend_Flip_Age`. The nearest
+thing the engine has to this column is therefore volatility width, and it
+resembles it at |ρ| ≤ 0.0979 — which is the point of the column, since §L3
+measures it blind to the size of the returns altogether.
+
+Three pairs inside that top-25 are near-duplicates of each other rather than
+of this column: `natr` and `Stop_2ATR_pct` agree to all 16 digits
+(0.08341328218741646), `ICHI_CLOUD_THICK` and `Cloud_Thickness_pct` to 11
+(0.0684173278…), and `squeeze_SQZ_OFF` / `squeeze_SQZ_ON` are exact
+negatives — the two comparator sets overlap in content, which is why 687 is a
+count of columns and not of distinct quantities.
+
+### §E4 — the fork-overlap stage, which is the screen's and not this run's
+
+The 2026-10-24 screen also ran a stage-2 fork overlap (12 frames, scale-free
+`Category` outputs at defaults): max |ρ| 0.1102 vs
+`equal_highs_lows:EQH_DIST_5_5`, per-frame max median 0.1310. **That is not
+Gate E** and was not re-run here; Gate E is the engine's 687 comparators over
+the 89 frames, above.
 
 ⚠ That fork-overlap stage predates `lean_hurst_100` (#85), which is now
 shipped and is the closest thing in the fork to this column. §L4 measures it
-here.
+here, on synthetic frames.
 
 ---
 
 ## Gate F — suites
 
-* `tests/test_tf_dfa_100.py`: **280 passed** (277 before review round 2 added
-  the three `test_the_infinity_fold_is_what_keeps_errstate_quiet` cases).
-* The same 280 under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2
+* `tests/test_tf_dfa_100.py`: **281 passed**, re-run in the receipt session
+  (280 in the porting session, 277 before review round 2 added the three
+  `test_the_infinity_fold_is_what_keeps_errstate_quiet` cases; the receipt
+  session dropped `test_the_gate_e_row_is_owed_and_not_yet_recorded` and
+  added `test_the_gate_e_row_is_this_ports_own_measurement` and
+  `test_the_gate_e_run_closes_gate_c_on_real_data`, so the count moved by
+  one).
+* The same 281 under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2
   FMA3"`, via `python docs/measure_tf_dfa_100_cpu.py`, which refuses to run
   unless the four features really are off and prints the ones still enabled.
   One assertion had to be loosened for that run and the loosening is in the
   test: `LOG_BOX_CENTRED.sum()` is 2.220e-16 with the default dispatch and
   1.110e-15 without it, so the bound is now `len(BOXES) * eps * max|log s|`
   rather than a `1e-15` literal.
-* Full suite: **3 failed, 10,266 passed, 85 skipped** (270 s), re-run on the
-  tree this commit ships. The three failures are
+* Full suite: **3 failed, 10,274 passed, 85 skipped** (399 s), re-run on the
+  tree this commit ships (the porting session read 3 failed, 10,266 passed,
+  85 skipped). The three failures are
   the two CLAUDE.md clean-checkout breaks —
   `test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` and
   `test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`,
-  both of which CI deselects by name — and the owed Gate E row, which reports
-  `['arch_lm', 'diff2_acf1', 'edge', 'firstzero_ac', 'halflife', 'lumpiness',
-  'mtd_ret', 'tf_dfa_100']`.
+  both of which CI deselects by name — and Gate E rows owed by seven OTHER
+  indicators, `['arch_lm', 'diff2_acf1', 'edge', 'firstzero_ac', 'halflife',
+  'lumpiness', 'mtd_ret']`. `tf_dfa_100` is no longer in that list and is
+  named in none of the three.
 * ⚠ Pre-existing, outside this issue's scope and already recorded by #100,
   #101, #102, #103, #111 and #118: `pandas_ta/core.py:453` hands out the live
   `Category[name]` list and `core.py:692` removes names from it, so running
@@ -571,7 +707,9 @@ here.
 
 ### §F2 — which figures move between the two dispatches
 
-Every section above was run twice: once with the default numpy dispatch and
+Every section above that `docs/measure_tf_dfa_100.py` produces was run twice
+— §E and §C1 are not among them, being the single Gate E run of 2026-11-15 —
+once with the default numpy dispatch and
 once under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`, which
 is what the launcher re-runs port test modules under and the closest thing
 here to a GitHub runner. This table is that comparison. It exists because
