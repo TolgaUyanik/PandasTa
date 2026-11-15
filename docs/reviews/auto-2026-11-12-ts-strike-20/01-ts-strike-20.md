@@ -15,10 +15,10 @@ round, verdict quoted verbatim.
   imply — rather than a run read off float64 noise.
 * Wiring, five points plus four documents: `statistics/__init__.py`,
   `Category["statistics"]`, the `core.py` accessor, `tests/test_ts_strike_20.py`,
-  and `README.md` (322 → 323 / 330 → 331 / statistics 31 → 32),
+  and `README.md` (351 → 352 / 359 → 360 / statistics 53 → 54),
   `docs/IndicatorDictionary.md` (regenerated; `TS_STRIKE_20` **ORD**),
-  `docs/MLCompanionContract.md` (667 → 668 tagged, 51 → 52 `ORD`),
-  `tests/test_altport2_ports.py` (`CATEGORY_TOTAL` 322 → 323).
+  `docs/MLCompanionContract.md` (696 → 697 tagged, 54 → 55 `ORD`),
+  `tests/test_altport2_ports.py` (`CATEGORY_TOTAL` 351 → 352).
 * `docs/measure_ts_strike_20.py` — the run behind every number quoted
   anywhere in this port. Eight sections, runnable individually
   (`python docs/measure_ts_strike_20.py gate_b`).

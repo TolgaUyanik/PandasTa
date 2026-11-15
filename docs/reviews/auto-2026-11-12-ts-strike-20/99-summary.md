@@ -20,6 +20,15 @@ is that last fix set itself. Every verdict is quoted verbatim in
 `01-ts-strike-20.md`, including the one editorial change made inside two of
 the quotes and why.
 
+**Corrected 2026-11-15, after the pre-push gate's round 1.** The six wiring
+counts listed below (and the same six in `01-ts-strike-20.md`) were the
+pre-rebase numbers (322 → 323, 330 → 331, 31 → 32, 667 → 668, 51 → 52 and
+`CATEGORY_TOTAL` 322 → 323) left
+behind when the code edits were re-based onto the current `dev` and the prose
+was not. They are now read back out of `README.md:7,9,153`,
+`docs/MLCompanionContract.md:27` and `tests/test_altport2_ports.py:196`,
+against `git show 8000158:<path>` for the "before" side.
+
 Files:
 
 * `pandas_ta/statistics/ts_strike_20.py` (new) — the indicator, `TS_STRIKE_20`
@@ -29,10 +38,10 @@ Files:
 * `tests/test_ts_strike_20.py` (new) — 144 tests
 * `docs/measure_ts_strike_20.py` (new) — the run behind every number
 * `docs/TsStrike20Measured.md` (new) — the receipt
-* `README.md` — 322 → 323 in `Category`, 330 → 331 callable, statistics 31 → 32
+* `README.md` — 351 → 352 in `Category`, 359 → 360 callable, statistics 53 → 54
 * `docs/IndicatorDictionary.md` — regenerated; `TS_STRIKE_20` **ORD**, warm-up 20
-* `docs/MLCompanionContract.md` — 667 → 668 tagged columns, 51 → 52 `ORD`
-* `tests/test_altport2_ports.py` — `CATEGORY_TOTAL` 322 → 323
+* `docs/MLCompanionContract.md` — 696 → 697 tagged columns, 54 → 55 `ORD`
+* `tests/test_altport2_ports.py` — `CATEGORY_TOTAL` 351 → 352
 * `docs/reviews/auto-2026-11-12-ts-strike-20/{00-manifest,01-ts-strike-20,99-summary}.md`
 
 ## Suites run in this worktree
