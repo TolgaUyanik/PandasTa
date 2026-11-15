@@ -2073,6 +2073,12 @@ class AnalysisIndicators(BasePandasObject):
                                     **kwargs)
         return self._post_process(result, **kwargs)
 
+    def tf_zero_cross_20(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = tf_zero_cross_20(close=close, length=length, offset=offset,
+                                  **kwargs)
+        return self._post_process(result, **kwargs)
+
     def trend_scan(self, horizons=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = trend_scan(close=close, horizons=horizons, offset=offset, **kwargs)
