@@ -548,7 +548,10 @@ def test_the_source_library_is_not_readable_here():
     does NOT establish" too, so "all routes are pinned" is nowhere."""
     assert importlib.util.find_spec("stock_indicators") is None
     repo = Path(__file__).resolve().parents[1]
-    assert not (repo / "docs" / "pine").exists()
+    # `docs/pine/` holds only the one tracked file (#8): TradingView's `ta`
+    # library, which the Pine audit cites. Anything more is a vendored corpus.
+    pine = repo / "docs" / "pine"
+    assert not pine.exists() or {x.name for x in pine.iterdir()} <= {"RA2vGpkA-ta.pine"}
     assert not list(repo.rglob("Fcb.Series.cs"))
 
 

@@ -708,7 +708,10 @@ def test_the_source_library_is_not_readable_here():
     module docstring and in `docs/SkFcbPosMeasured.md`'s "What this port
     does NOT establish" too, so "all routes are pinned" is nowhere."""
     assert importlib.util.find_spec("stock_indicators") is None
-    assert not (ROOT / "docs" / "pine").exists()
+    # `docs/pine/` holds only the one tracked file (#8): TradingView's `ta`
+    # library, which the Pine audit cites. Anything more is a vendored corpus.
+    pine = ROOT / "docs" / "pine"
+    assert not pine.exists() or {x.name for x in pine.iterdir()} <= {"RA2vGpkA-ta.pine"}
     assert not list(ROOT.rglob("Fcb.Series.cs"))
 
 

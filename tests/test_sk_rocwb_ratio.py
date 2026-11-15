@@ -801,7 +801,10 @@ def test_the_source_library_is_not_readable_here():
     Stock.Indicators is a NuGet package, so no `import` could ever succeed
     and the assertion would be decoration. The third route, web access, a
     test cannot see; the module docstring says so."""
-    assert not (ROOT / "docs" / "pine").exists()
+    # `docs/pine/` holds only the one tracked file (#8): TradingView's `ta`
+    # library, which the Pine audit cites. Anything more is a vendored corpus.
+    pine = ROOT / "docs" / "pine"
+    assert not pine.exists() or {x.name for x in pine.iterdir()} <= {"RA2vGpkA-ta.pine"}
     sources = []
     stack = [ROOT]
     while stack:
@@ -811,7 +814,7 @@ def test_the_source_library_is_not_readable_here():
                     stack.append(entry)
             elif entry.suffix in (".cs", ".pine"):
                 sources.append(entry)
-    assert sources == []
+    assert [x for x in sources if x != pine / "RA2vGpkA-ta.pine"] == []
 
 
 def test_the_docstring_first_paragraph_survives_the_dictionary_cut():

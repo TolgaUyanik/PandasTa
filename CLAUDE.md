@@ -36,9 +36,9 @@ frames), so a green run does **not** mean the upstream category suites ran.
 `make init` references a `requirements.txt` that does not exist. Use pytest.
 
 **CI.** `.github/workflows/ci.yml` (job `tests`) runs the full suite on every PR and push to `dev`
-and `main`, direct dependencies pinned (pandas 2.3.3 / numpy 1.26.4), with two tests deselected by
-name: the one known break (#8) and `test_regenerating_reproduces_the_committed_rows`, which needs
-the sibling `../AlternativeRepos` checkout. `.github/workflows/gate-e-guard.yml` (job `guard`, on
+and `main`, direct dependencies pinned (pandas 2.3.3 / numpy 1.26.4), with one test deselected by
+name: `test_regenerating_reproduces_the_committed_rows`, which needs the sibling
+`../AlternativeRepos` checkout. `.github/workflows/gate-e-guard.yml` (job `guard`, on
 `pull_request_target`) runs the BASE branch's copy of `tests/test_gate_e_ledger.py` against the PR,
 so a PR cannot loosen the ledger check it needs loosened. Branch protection on `dev` and `main`
 requires the checks, **admins included**, with the branch up to date with its base: a direct push
@@ -143,8 +143,11 @@ Full protocol: `../Backtesting/docs/TVPTA6-Indicator-Porting-Process.md`. Source
 `docs/pine/` — 2,211 `.pine` files, 46MB, **untracked on purpose** (`.gitignore`). 912 of them
 carry `Mozilla Public License 2.0` / `© TradingView` and the rest state no licence at all, so
 committing them under this repo's root MIT `LICENSE` would misstate their terms. They were tracked
-until 2026-09-07; if you re-add them, add a `NOTICE` first. Summary of the gates a port must
-clear:
+until 2026-09-07. **One file is tracked again (#8, 2026-11-15):** `docs/pine/RA2vGpkA-ta.pine`,
+TradingView's `ta` library (MPL-2.0, unmodified, the `882a5f9b` copy), because it is the only file
+the audit evidence in `docs/pine_builtin_coverage.csv` cites; it is listed in `NOTICE` and
+`.gitignore` excepts exactly that path. Re-adding any other corpus file needs its own `NOTICE`
+entry first. Summary of the gates a port must clear:
 
 | Gate | Requirement |
 |---|---|
@@ -201,20 +204,13 @@ hurt to lose, with the measured numbers. Match that when adding one — see `tes
 
 ## Known breaks
 
-🔴 **One test fails on a clean checkout, and it is not flaky.**
-`tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` asserts that every
-`<path>:<n>` citation in `docs/pine_builtin_coverage.csv`'s audit evidence resolves to a real
-file. It does not: the first failing row is `supertrend`, citing `RA2vGpkA-ta.pine`. **The cause
-is `8d8f705`, which untracked the 2,211-file `docs/pine/` corpus for licensing reasons** — 912 of
-those files are MPL-2.0 under a root MIT `LICENSE`. The citations were never updated, so the
-guard now demands files this repo deliberately does not carry, and it will fail for every person
-who clones it.
-
-Full suite as of 2026-09-12: **1 failed, 3197 passed, 24 skipped**.
-
-Neither fix is small, which is why this is recorded rather than patched: re-adding the corpus
-reverses a licensing decision, and rewriting the guard to accept unresolvable citations removes
-the only thing standing between "audited" and "asserted". **Owner's call.**
+**Fixed 2026-11-15 (#8, PINECITE).** `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence`
+failed on every clean checkout from `8d8f705` (which untracked the `docs/pine/` corpus) until
+then: every `audit_evidence` citation in `docs/pine_builtin_coverage.csv` names one file,
+`RA2vGpkA-ta.pine`, and it was gone. That one MPL-2.0 file is now tracked (see *Porting a Pine
+indicator* and `NOTICE`), the test runs in CI again, and `test_regenerating_reproduces_the_committed_csv`
+skips unless the full corpus is present, not merely `docs/pine/`. Older `*Measured.md` receipts
+that list it as a pre-existing failure are historical.
 
 Separately, two indicators (`up_and_down_volume`, `volume_delta`) are **not probed** —
 they need a lower-timeframe frame the single-frame harness cannot synthesise — and the generated
