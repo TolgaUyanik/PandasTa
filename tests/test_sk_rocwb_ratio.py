@@ -67,10 +67,27 @@ What this file pins, in order of how much it would hurt to lose:
    price instead. A zero close is asserted NOT emptied the same way, and
    the `+-inf -> NaN` fold is asserted to be a no-op on every frame --
    dead code kept for fidelity with the measured prototype.
-7. **Gate E is OWED, and the test says which session owes it.** No
-   ledger row exists yet; `tests/test_gate_e_ledger.py` fails locally
-   until the launcher's run is recorded, which is expected and is not a
-   reason to hold the indicator out of `Category`.
+7. **Gate E is DISCLOSE_GAP, and whose measurement the ledger row is.**
+   `test_the_gate_e_row_is_this_ports_own_measurement` pins the row to
+   run `is109-sk_rocwb_ratio-e27491fc` (2026-11-15, on THIS module):
+   pooled **0.8537** against `compute_all`'s `zscore` at n = 396,264,
+   top-five per-frame max median **0.8535** over 89 frames, 687
+   comparators, no waiver. The column SHIPS -- DISCLOSE_GAP is not
+   STRUCK -- and both limbs are pinned as the BAND (0.80 <= rho < 0.90)
+   rather than as digits, so a re-recorded row that crossed 0.90 fails
+   here. The screen's PROTOTYPE read the same four figures on
+   2026-10-24, and item 2 asserts this module bit-equal to that
+   prototype, so the agreement is expected -- which is exactly why the
+   row's identity is pinned and not only its arithmetic.
+   `test_the_gate_e_run_closes_gate_c_on_real_data` reads Gate C's real
+   limb off the same row: 396,709 of 398,849 bars fire, the 2,140 empty
+   ones are `89 * 24 + 4` -- item 5's CONSTANT warm-up on real data,
+   pinned as `0 <= empty - n_frames * WARMUP < n_frames` so a
+   data-dependent warm-up could not pass -- and 5,820 fired bars read
+   exactly 0.0, item 5's zero-ROC regime on real prices.
+   ⚠ Not pinned, because no assertion can carry it: the 4 non-warm-up
+   blank bars are not split by reason, and 5,820 is a LOWER bound on
+   `close[T] == close[T - 20]`, not that count.
 
 ⚠ **Counts of moved bars, distinct values and Spearman digits are NOT
 pinned to the digits measured here.** The frames are built with `np.exp`
@@ -811,16 +828,93 @@ def test_the_docstring_first_paragraph_survives_the_dictionary_cut():
     assert len(paragraph) <= 150
 
 
-def test_the_gate_e_row_is_owed_and_not_yet_recorded():
-    """⚠ Gate E is run by issue-solver AFTER this session, so
-    `docs/gate_e_ledger.csv` carries no row for this indicator and
-    `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-    fails locally (it is a skip in CI, which sets `GATE_E_PENDING_OK=1`).
-    That is the expected state of this commit, and this test is the thing
-    the receipt session replaces with one pinning the recorded row's
-    identity -- the shape issue #107 and #108 used."""
+def _sk_rocwb_ratio_ledger_row():
     path = ROOT / "docs" / "gate_e_ledger.csv"
     with path.open(newline="", encoding="utf-8") as handle:
         rows = [r for r in csv.DictReader(handle)
                 if r["indicator"] == "sk_rocwb_ratio"]
-    assert rows == []
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_the_gate_e_row_is_this_ports_own_measurement():
+    """The ledger row for `sk_rocwb_ratio` must come from the run on THIS
+    module, `is109-sk_rocwb_ratio-e27491fc` (measured 2026-11-15), and
+    NOT from the catalog screen of 2026-10-24, which measured the
+    PROTOTYPE. The two agree to every digit issue #109 printed -- pooled
+    0.8537 against `compute_all`'s `zscore` at n = 396,264, top-five
+    per-frame max median 0.8535 over 89 frames, runners-up `bias_ta`
+    0.8192 and `Ret_21d_vol_adj` 0.8183 -- which is exactly why the row's
+    identity needs pinning: `tests/test_gate_e_ledger.py` re-derives a
+    row's `module_sha1` and output fingerprint from the tree and checks
+    its verdict arithmetic, but it cannot see WHOSE measurement a row
+    came from. Item 2 asserts this module bit-equal to the retyped
+    prototype on all eight frames, so the agreement is expected.
+
+    The verdict is **DISCLOSE_GAP**, the `0.80 <= rho < 0.90` band of
+    `r3-perframe-0.90`: the column SHIPS with the disclosure and the row
+    needs no waiver (only STRUCK needs one). Both limbs are asserted as
+    the BAND's bounds and not as digits -- pooled in `[0.80, 0.90)` and
+    the top-five per-frame max median in the same half-open interval --
+    so a row that moved within the band still has to stay in it, while
+    one that crossed 0.90 (STRUCK, the column would be removed) or fell
+    under 0.80 fails here.
+
+    This test replaced `test_the_gate_e_row_is_owed_and_not_yet_recorded`,
+    which asserted the row was ABSENT and so failed the moment the
+    receipt session recorded it. `docs/SkRocwbRatioMeasured.md` §E .. §E4
+    carries the result in full, including the part the band does not
+    read: the overlap with `zscore` is uniform rather than concentrated,
+    0.8278 .. 0.8871 on every one of the 89 frames."""
+    row = _sk_rocwb_ratio_ledger_row()
+    assert row["module"] == "pandas_ta.momentum.sk_rocwb_ratio"
+    assert row["column"] == "SK_ROCWB_RATIO_20_5"
+    assert row["run"] == "is109-sk_rocwb_ratio-e27491fc"
+    assert row["verdict"] == "DISCLOSE_GAP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert row["against"] == "zscore"
+    assert row["against_set"] == "compute_all"
+    assert row["perframe_max_against"] == "zscore"
+    assert (int(row["n_frames"]), int(row["n_comparators"])) == (89, 687)
+    # DISCLOSE_GAP is 0.80 <= |rho| < 0.90 on the pooled limb with no
+    # top-5 comparator's per-frame median at 0.90 or above.
+    assert 0.80 <= float(row["max_abs_rho"]) < 0.90
+    assert 0.80 <= float(row["perframe_max_median_abs_rho"]) < 0.90
+
+
+def test_the_gate_e_run_closes_gate_c_on_real_data():
+    """Gate C's real-data limb, read off the SAME ledger row rather than
+    retyped: the column fires on 396,709 of the run's 398,849 pooled bars
+    over 89 real BIST frames, so `0 < fires < n` holds there and not only
+    on the synthetic frames of item 5.
+
+    The 2,140 empty bars are the CONSTANT 24-bar warm-up on real data:
+    `89 * 24` is 2,136 of them and 4 are left over. That is asserted as
+    the relation `0 <= empty - n_frames * WARMUP < n_frames` -- a
+    data-dependent warm-up, or a warm-up of any other length, cannot
+    satisfy it -- and not as 2,140. ⚠ It assumes every frame is longer
+    than the warm-up, which the row cannot show: it carries the pooled
+    total, not per-frame lengths (4,481.4 bars per frame on average).
+    ⚠ The 4 left-over bars are NOT split by reason here, because the row
+    counts NaNs and not reasons; §C4 says the only other way this column
+    blanks is five consecutive exactly-zero ROC readings.
+
+    `non_zero` is 5,820 SHORT of `non_nan`, i.e. 5,820 fired real bars
+    read exactly 0.0 -- `close[T] == close[T - 20]` to the bit. Item 5's
+    exact readings were measured on a 2.0-tick synthetic frame at 25.04%
+    of its fired bars, and this is the same regime on real prices at
+    1.467%, where 21.17% of BIST daily bars close exactly at an extreme.
+    Asserted as `0 < non_zero < non_nan`, the structural fact, with 5,820
+    the figure measured by that run. ⚠ It is a LOWER bound on the price
+    ties themselves: a tie inside a frame's warm-up produces no 0.0 bar.
+    """
+    row = _sk_rocwb_ratio_ledger_row()
+    pooled = int(row["pooled_bars"])
+    fires = int(row["non_nan"])
+    frames = int(row["n_frames"])
+    empty = pooled - fires
+    assert 0 < fires < pooled
+    assert 0 <= empty - frames * WARMUP < frames, empty
+    # 5,820 bars read exactly 0.0 in this run; pinned as the relation.
+    assert 0 < int(row["non_zero"]) < fires

@@ -16,28 +16,32 @@ two series in the same units, which is two features where this is one.
 **Every number below except §E's and Gate F's is printed by
 `python docs/measure_sk_rocwb_ratio.py`** (one section per gate limb;
 `python docs/measure_sk_rocwb_ratio.py A1 D` for named sections). §E's figures are
-the ISSUE's, quoted from the screen's run on the prototype; Gate F's are the
-pytest runs named there. The same figures appear in the module docstring and in
+the launcher's Gate E run on THIS module, `is109-sk_rocwb_ratio-e27491fc`
+(2026-11-15), read from its `overlap_max.csv`, `perframe.csv`, `top25.csv`,
+`degenerate.csv` and `meta.json`; Gate F's are the pytest runs named there. The same figures appear in the module docstring and in
 `tests/test_sk_rocwb_ratio.py`, and this file is the only place they may come
 from. `python docs/measure_sk_rocwb_ratio_cpu.py` re-runs the test module with
 numpy's `AVX512F AVX512_SKX AVX2 FMA3` dispatch disabled.
 
 Measured 2026-11-15 on this machine: pandas 2.3.3, numpy 1.26.4, Python 3.11.
 
-⚠ **No real-data figure measured on THIS module.** Every count and range about
-this column comes from eight synthetic frames of 1,500 bars — plus §C3's 300-bar
-flat OHLCV frame, §Z's 100,000- and 400,000-bar walks, and §W2's parse of the
-generated dictionary. The only real-data numbers in the file are §E's, and they
-are the SCREEN's, measured on the prototype in October, not this port's.
+⚠ **The real-data figures are §E's, and they are the only ones.** Every other
+count and range about this column comes from eight synthetic frames of 1,500 bars
+— plus §C3's 300-bar flat OHLCV frame, §Z's 100,000- and 400,000-bar walks, and
+§W2's parse of the generated dictionary.
 
-**Gate C's real-data limb is OWED** and is listed as ASSUMPTION 5 at the foot of
-this file: the session that records the launcher's Gate E run fills in the
-fired-bar count over the 89 ALTPORT-1 BIST frames and — the figure that matters
-for this column specifically — how often `close[T] == close[T - 20]` there,
-because an exactly-zero ROC is what makes this column read 0.0, and five of them
-in a row is the only thing that makes it blank. 21.17% of real BIST daily bars
-close exactly at an extreme (`CLAUDE.md`, FVGDEAD); the 2.0-tick `coarse` frame
-below is a stand-in for that regime and not a prediction of it.
+**Gate C's real-data limb is now PAID**, in §E4, off the ledger row of the
+launcher's run: 396,709 of 398,849 pooled bars fire over the 89 ALTPORT-1 BIST
+frames, the 2,140 empty ones are `89 x 24 + 4` (the constant warm-up and at most
+4 bars blanked by anything else), and 5,820 fired bars read exactly 0.0 — the
+figure that matters for this column specifically, because an exactly-zero ROC is
+what makes it read 0.0 and five of them in a row is the only thing that makes it
+blank. 21.17% of real BIST daily bars close exactly at an extreme (`CLAUDE.md`,
+FVGDEAD); the 2.0-tick `coarse` frame below was built as a stand-in for that
+regime and §E4 measures it to be the pessimistic end of it (25.04% of fired bars
+read 0.0 there against 1.467% on real data), not a prediction. ASSUMPTION 5 at the
+foot of this file records what of the limb is still NOT measured: the count of
+`close[T] == close[T - 20]` itself, which the row bounds below rather than gives.
 
 ## The frames
 
@@ -284,9 +288,11 @@ could have rested on that one.
 
 ## Gate C — reachability
 
-⚠ **Synthetic only; the real-data limb is owed** (see the head of this file and
-ASSUMPTION 5). `CLAUDE.md` defines Gate C as "every shipped column fires on real
-data, with counts stated", and the counts below are not that.
+⚠ **The table below is SYNTHETIC; the real-data limb `CLAUDE.md` asks for — "every
+shipped column fires on real data, with counts stated" — is §E4**, measured off
+the launcher's Gate E run (396,709 of 398,849 pooled bars fire; 5,820 of them read
+exactly 0.0). Read the two together: §E4 says the warm-up and the exact-zero
+regime below hold on real prices, at a seventeenth of the `coarse` frame's rate.
 
 | frame | bars | fired | first | distinct | min | max | bars reading exactly 0.0 |
 |---|---|---|---|---|---|---|---|
@@ -373,35 +379,127 @@ it here would be wrong. A ratio of prices is not a ratio of prices-plus-a-consta
 
 Small, and not zero. Gate D's other limb, `0 < fires < n`, is Gate C's table: the
 seven firing frames fire 1,370 .. 1,476 of 1,500, and `flat` fires 0 — a reading
-about a constant price, priced in §C3.
+about a constant price, priced in §C3. On real data the same limb is §E4's
+396,709 of 398,849.
 
 ---
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
+**Measured on THIS module**, 2026-11-15, by run `is109-sk_rocwb_ratio-e27491fc`
+and recorded in `docs/gate_e_ledger.csv` with
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-15`. The run's
+own facts, read from its `meta.json`: module `pandas_ta.momentum.sk_rocwb_ratio`,
+`kwargs {}` (defaults, so the column is `SK_ROCWB_RATIO_20_5`), 89 ALTPORT-1 BIST
+frames, 398,849 pooled bars, 329 `compute_all` + 358 manifest = 687 comparators,
+canary `AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`, pandas 2.3.3 /
+numpy 1.26.4, module sha1 `65ad119d`, `pandas_ta_src_sha1` `84aca2ba`.
 
-The port is wired into `Category`, so
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails
-locally until the run is recorded (it is a skip in CI, which sets
-`GATE_E_PENDING_OK=1`). `tests/test_sk_rocwb_ratio.py::test_the_gate_e_row_is_owed_and_not_yet_recorded`
-pins that state deliberately; the receipt session replaces it with one pinning the
-recorded row's identity, the shape issues #107 and #108 used.
+| | `SK_ROCWB_RATIO_20_5` |
+|---|---|
+| pooled max \|rho\| | **0.853665329740797** vs `zscore` (`compute_all`), n = 396,264 |
+| top-5 per-frame max median | **0.8534987614315072** vs `zscore`, over 89 frames |
+| frames at or above 0.90 | **0 of 89** (`pct_frames_ge_090` 0.0) |
+| verdict | **DISCLOSE_GAP** (0.80 <= rho < 0.90), which SHIPS |
+| `verdict_pooled_only` | **DISCLOSE_GAP** — the same, so neither limb carried the other |
+| manifest-set max | 0.819170503331409 vs `bias_ta`, n = 396,620 |
+| comparators | 687, of which **1 dropped as degenerate** (`squeeze_SQZ_NO`, constant) |
+| waiver | **none**, and none is owed: only STRUCK needs one |
 
-What the 2026-10-24 screen measured **on the prototype** — a prototype is not a
-port, and these figures are the issue's, not this session's:
+The column is **not** STRUCK and nothing is removed. The disclosure the band asks
+for is §E2 and §E3 below.
+
+### §E1 the port reproduces the screen's prototype figures
+
+Every figure issue #109 printed from the 2026-10-24 screen comes back from this
+run at the digits the issue printed them to: `zscore` as the comparator,
+n = 396,264, pooled 0.8537, per-frame max median 0.8535, and the runners-up
+`bias_ta` 0.8192 and `Ret_21d_vol_adj` 0.8183. That is what §A2's bit-equality to
+the retyped prototype predicts — and an expected agreement is the easiest kind of
+row to copy over by mistake, which is why
+`tests/test_sk_rocwb_ratio.py::test_the_gate_e_row_is_this_ports_own_measurement`
+pins the row's own run id and not only its arithmetic.
+
+### §E2 the overlap with `zscore` is stable across all 89 frames
+
+Per-frame figures for the top five comparators, from the run's `perframe.csv`
+(89 frames each):
+
+| comparator | median | mean | max | min | frames >= 0.80 | frames >= 0.90 |
+|---|---|---|---|---|---|---|
+| `zscore` | 0.8535 | 0.8530 | **0.8871** | 0.8278 | **89 / 89** | **0** |
+| `bias_ta` | 0.8198 | 0.8201 | 0.8433 | 0.7962 | 88 / 89 | 0 |
+| `Ret_21d_vol_adj` | 0.8182 | 0.8160 | 0.8315 | 0.7879 | 84 / 89 | 0 |
+| `Ret_21d_pct` | 0.8122 | 0.8112 | 0.8261 | 0.7853 | 78 / 89 | 0 |
+| `zscore_Pctl` | 0.8095 | 0.8060 | 0.8401 | 0.7417 | 60 / 89 | 0 |
+
+⚠ The disclosure this table carries is not a single bad frame — it is that there
+is **no** good frame against `zscore`: every one of the 89 is at or above 0.80 and
+the weakest reads 0.8278. The sibling `sk_fcb_pos` (#108) had one frame cross 0.90
+with a median of 0.8405; this column has none above 0.8871, so the band's 0.90 line
+is not approached on any single frame, while the overlap it does have is uniform
+rather than concentrated.
+
+### §E3 what else it overlaps, and the shape of the list
+
+Eight of the 687 comparators reach 0.80 pooled, and each is a **recent return
+normalised by something**, which is this column's own construction:
+
+| rank | comparator | set | \|rho\| | n |
+|---|---|---|---|---|
+| 1 | `zscore` | compute_all | 0.8537 | 396,264 |
+| 2 | `bias_ta` | manifest | 0.8192 | 396,620 |
+| 3 | `Ret_21d_vol_adj` | manifest | 0.8183 | 396,709 |
+| 4 | `Ret_21d_pct` | manifest | 0.8118 | 396,709 |
+| 5 | `zscore_Pctl` | manifest | 0.8057 | 391,013 |
+| 6 | `cmo` | compute_all | 0.8025 | 396,709 |
+| 7 | `RSI` | compute_all | 0.8025 | 396,709 |
+| 8 | `ATR_POSITION` | compute_all | 0.8001 | 396,709 |
+
+Rank 25 of `top25.csv` is `zscore_State` at 0.7496, so the list falls under the
+0.76 ship line inside the top 25. `Ret_21d_pct` at rank 4 is the closest thing to
+this column's own NUMERATOR in the comparator set (a 21-bar return against this
+column's 20-bar ROC) and it reads 0.8118, below the ratio's 0.8537 against
+`zscore` — the band in the denominator is doing work, and what the column overlaps
+most is another normalised reading rather than the raw return.
+
+Three pairs worth naming, because a reader counting "independent comparators" would
+otherwise over-count: `cmo` and `RSI` agree to the 10th decimal
+(0.8024682111476741 / 0.8024682111282024) but are not identical; `BB_%B`
+(compute_all) and `BB_PctB` (manifest) are identical to all 16 digits at the same
+n = 396,709, so they are one measurement under two names; `ZSCORE_20` reads
+0.797041698110225 against `BB_%B`'s 0.7970416992496189, parting at the 9th decimal.
+
+### §E4 Gate C's real-data limb, read off the same run — ASSUMPTION 5 paid
+
+`CLAUDE.md` defines Gate C as "every shipped column fires on real data, with counts
+stated". The run's row carries those counts, and this closes the limb the porting
+session left owed:
 
 | | |
 |---|---|
-| pooled max \|rho\| | **0.8537** vs `zscore` (compute_all), n = 396,264 |
-| top-5 per-frame max median | 0.8535 |
-| verdict | **DISCLOSE_GAP** (0.80 <= rho < 0.90), which SHIPS |
-| next comparators | `bias_ta` 0.8192, `Ret_21d_vol_adj` 0.8183 |
-| run | `screen_r2_20261024`, 89 ALTPORT-1 frames, 398,849 bars, 687 comparators, canary bit-equal |
+| pooled bars | 398,849 over 89 frames (4,481.4 per frame on average) |
+| fired (`non_nan`) | **396,709**, so `0 < fires < n` holds on real data |
+| empty | 2,140 = **89 x 24 + 4** |
+| fired bars reading exactly 0.0 (`non_nan - non_zero`) | **5,820**, 1.467% of fired bars |
 
-§A2 asserts this module bit-equal to that prototype on all eight synthetic frames,
-so the port and the screened expression are the same column — but the figure above
-is still the prototype's, and the port's own number comes from the launcher's run.
+* **The warm-up is the constant 24 bars on real data too.** 89 frames x 24 is
+  2,136 of the 2,140 empty bars, leaving **4**. §C4 says the only other way this
+  column goes blank is five consecutive EXACTLY zero ROC readings, so at most 4
+  real bars hit it, against 106 of 1,500 on the 2.0-tick synthetic frame.
+  ⚠ The row cannot separate those 4: it counts NaNs, not reasons, and the
+  arithmetic assumes every frame is longer than the 24-bar warm-up, which the row
+  does not itself show (it carries no per-frame lengths, only the pooled total).
+* **The exact-zero regime is real, and the synthetic stand-in overstates it ~17x.**
+  5,820 fired bars read exactly 0.0, i.e. `close[T] == close[T - 20]` to the bit —
+  1.467% of fired bars, against 343 of 1,370 (25.04%) on the `coarse` frame §C4
+  built as a stand-in for it. So §C4's reading is not a synthetic artefact, and the
+  2.0-tick frame is the pessimistic end of the regime rather than a prediction of
+  it, as §C4 said it would be.
+* ⚠ **5,820 is a LOWER BOUND on `close[T] == close[T - 20]`, not the count.** The
+  row counts bars where the COLUMN reads 0.0; a price tie inside a frame's 24-bar
+  warm-up, or inside one of the 4 blanked bars, produces no such bar. Measuring the
+  tie itself needs a pass over the BIST cache, which no session here may make.
 
 ### §F — non-redundancy against the fork's own close-only columns, synthetic
 
@@ -420,8 +518,11 @@ BIST frames. Spearman on the synthetic frames:
 
 The sign is shared with `ROC_20` by construction — the band is positive — so a high
 rank correlation there is expected and is not news; what the column adds is the
-SIZE, normalised by the recent RMS. The screen's own comparator, a z-score, sits at
-0.6795 .. 0.8726 here against 0.8537 on real data.
+SIZE, normalised by the recent RMS. The fork's own z-score, `ZS_30`, sits at
+0.6795 .. 0.8726 over these seven synthetic frames, and the ENGINE's `zscore` —
+a different implementation this session never read, sharing only the idea — is
+Gate E's top comparator at 0.8537 pooled on real data, near the upper end of that
+synthetic spread, with the `trend` frame's 0.6795 dragging the lower end down.
 
 ---
 
@@ -500,7 +601,7 @@ would change the shipped column on no evidence.
 | 2 | `pandas_ta/momentum/__init__.py` | `from .sk_rocwb_ratio import sk_rocwb_ratio` |
 | 3 | `pandas_ta/__init__.py` → `Category["momentum"]` | added (momentum 86 -> **87**, Category total 347 -> **348**) |
 | 4 | `pandas_ta/core.py` → `df.ta.sk_rocwb_ratio()` | added, both lengths forwarded |
-| 5 | `tests/test_sk_rocwb_ratio.py` | **186 tests** |
+| 5 | `tests/test_sk_rocwb_ratio.py` | **187 tests** (186 in the porting session; see Gate F) |
 
 Also touched: `README.md` (348 / 356 / momentum list), `docs/IndicatorDictionary.md`
 (regenerated), `docs/MLCompanionContract.md` (692 -> 693 tagged columns,
@@ -537,28 +638,42 @@ invocations of the same section already disagree.
 
 ## Gate F — suites
 
-* `python -m pytest tests/test_sk_rocwb_ratio.py -q` → **186 passed**
-* `python docs/measure_sk_rocwb_ratio_cpu.py` → the same **186 passed** with numpy's
+Re-run in the receipt session of 2026-11-15, after the ledger row landed. The
+module's count moved 186 → 187: `test_the_gate_e_row_is_owed_and_not_yet_recorded`
+became `test_the_gate_e_row_is_this_ports_own_measurement` and
+`test_the_gate_e_run_closes_gate_c_on_real_data` was added.
+
+* `python -m pytest tests/test_sk_rocwb_ratio.py -q` → **187 passed**
+* `python docs/measure_sk_rocwb_ratio_cpu.py` → the same **187 passed** with numpy's
   `AVX512F AVX512_SKX AVX2 FMA3` dispatch disabled (numpy 1.26.4; the run prints the
   features still enabled, so the claim cannot drift from what was turned off)
-* `python -m pytest -q` (whole fork) → **3 failed, 9711 passed, 85 skipped** in 256 s.
-  The three:
+* `python -m pytest -q` (whole fork) → **3 failed, 9719 passed, 85 skipped** in 258 s.
+  The three, with `sk_rocwb_ratio` named in none of them:
   1. `tests/test_pine_coverage_csv.py::test_audited_rows_carry_their_evidence` — the
      known break of `CLAUDE.md`, a clean checkout fails it;
   2. `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
      — needs the sibling `../AlternativeRepos` checkout, deselected in CI;
   3. `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` —
-     **Gate E owed**, this port among eight indicators already on that list
-     (`arch_lm`, `diff2_acf1`, `edge`, `firstzero_ac`, `halflife`, `lumpiness`,
-     `mtd_ret`, `sk_rocwb_ratio`). A skip in CI, which sets `GATE_E_PENDING_OK=1`.
+     Gate E owed by seven OTHER indicators (`arch_lm`, `diff2_acf1`, `edge`,
+     `firstzero_ac`, `halflife`, `lumpiness`, `mtd_ret`); this port left that list
+     when its row was recorded. A skip in CI, which sets `GATE_E_PENDING_OK=1`.
 * The Backtesting suite is the launcher's to run, in a clean worktree.
 
 ## Decision
 
-**SHIP, pending the launcher's Gate E run.** The prototype measured DISCLOSE_GAP
-(0.8537 vs `zscore`), which ships, and §A2 asserts this module bit-equal to that
-prototype. If the port's own run comes back STRUCK, the revert is the usual one —
-remove the module, its wiring and its tests, keep this file as the receipt.
+**SHIP.** Gate E ran on THIS module on 2026-11-15
+(`is109-sk_rocwb_ratio-e27491fc`) and returned **DISCLOSE_GAP** on the only
+column: pooled 0.8537 against `zscore` at n = 396,264, top-five per-frame max
+median 0.8535 over 89 frames with none of them at 0.90, and the same verdict on
+the pooled limb alone. Under `r3-perframe-0.90` that is `0.80 <= rho < 0.90`, not
+STRUCK, so nothing is removed and no waiver is owed. Gates A–D were cleared in the
+porting session and Gate C's real-data limb is closed in §E4; Gate F is below.
+
+The disclosure that travels with the column is §E2's: the overlap with the
+engine's `zscore` is not one bad frame but a uniform 0.8278 .. 0.8871 across all
+89, and seven further comparators reach 0.80 — all of them recent returns
+normalised by something. A miner holding this column together with `zscore`,
+`bias_ta` or `Ret_21d_vol_adj` is weighting one idea more than once.
 
 ## ASSUMPTIONS recorded in this session
 
@@ -580,17 +695,16 @@ remove the module, its wiring and its tests, keep this file as the receipt.
 4. **The `+-inf -> NaN` fold is kept** although §G3 measures it dead, because
    removing it would change the shipped expression with no measurement behind the
    change.
-5. **Gate C's real-data limb is OWED to the receipt session**, with each number's
-   source named so the limb cannot quietly go unpaid. This session cannot touch
-   `../Backtesting`, so nothing here is measured on the 89 ALTPORT-1 BIST frames.
-   From the launcher's Gate E ledger row the receipt session can read:
-   * fired bars out of 398,849 pooled — the row's `non_nan`;
-   * bars reading exactly 0.0 — `non_nan - non_zero`.
-   ⚠ **What the row does NOT carry** is the figure peculiar to this column: how
-   often `close[T] == close[T - 20]` on those frames. The row counts NaNs and
-   zeros, not price ties, so that needs a separate pass over the BIST cache;
-   absent one, `non_nan - non_zero` is a LOWER BOUND on it, because the zero-ROC
-   bars that fall inside a blanked band window are not counted anywhere.
-   §C4's 449 / 106 / 343 are a 2.0-tick synthetic stand-in for that regime, chosen
-   because 21.17% of real BIST daily bars close exactly at an extreme
-   (`CLAUDE.md`, FVGDEAD), and they are not a prediction of the real counts.
+5. **Gate C's real-data limb was OWED to the receipt session, and is PAID in
+   §E4** — read off the ledger row of run `is109-sk_rocwb_ratio-e27491fc` exactly
+   as this assumption said it would be: 396,709 fired bars of 398,849 pooled
+   (`non_nan`), and 5,820 bars reading exactly 0.0 (`non_nan - non_zero`). The
+   porting session's prediction that §C4's regime is real rather than a 2.0-tick
+   artefact holds, at 1.467% of fired bars against the `coarse` frame's 25.04%.
+   ⚠ **What the row still does NOT carry** is the figure peculiar to this column:
+   how often `close[T] == close[T - 20]` on those frames. The row counts NaNs and
+   zeros, not price ties, so that needs a separate pass over the BIST cache, which
+   no session here may make; absent one, 5,820 is a LOWER BOUND, because a tie
+   inside a frame's 24-bar warm-up or inside one of the 4 non-warm-up blank bars
+   is counted nowhere. ⚠ The split of those 4 blank bars is also unmeasured: the
+   row counts NaNs, not reasons.
