@@ -2330,6 +2330,13 @@ class AnalysisIndicators(BasePandasObject):
                            enable_rescue_branch=enable_rescue_branch, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def bos_causal(self, swing_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = bos_causal(high=high, low=low, close=close, swing_length=swing_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def bos(self, swing_length=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))

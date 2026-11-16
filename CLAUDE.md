@@ -129,6 +129,9 @@ live package and lists every column's observed form.
   (measured: 1 / 2 / 3 / 4 at `swing_length` 4 / 5 / 7 / 9). A bug, not a design choice; fixing it
   changes column values, so **owner's call**. `swing_equilibrium` is the causal model for a fix.
   Pinned by `tests/test_bos_lookahead.py`, which fails if the reach changes in either direction.
+  `choch` has the same defect (same two lines; reach at least 1 bar, measured in
+  `docs/BosCausalMeasured.md`). Issue #332 added `bos_causal` (`BOSC_*`, causal) beside both;
+  it did not fix them in place, so both are still open.
   **Do not trust this list as a substitute for measuring.** `ssf` was found by a per-parent
   perturbation probe in MLCOL-1's companion screen, not by reading it; a hand-maintained list
   contains only the cases someone already thought of.

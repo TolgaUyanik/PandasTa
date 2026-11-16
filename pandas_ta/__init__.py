@@ -78,7 +78,7 @@ Category = {
     ],
     # Trend
     "trend": [
-        "adx", "adxr", "amat", "aroon", "atr_push", "band_cross_retest", "bdi4kewl", "bos", "choch", "chop", "cksp", "decay", "decreasing", "dtdb",
+        "adx", "adxr", "amat", "aroon", "atr_push", "band_cross_retest", "bdi4kewl", "bos", "bos_causal", "choch", "chop", "cksp", "decay", "decreasing", "dtdb",
         "dpo", "dx", "equal_highs_lows", "flag_breakout", "fvg", "fvg_sweep_magnet", "g191_069", "g191_098", "halftrend", "increasing", "inverse_fvg", "j_chandelier_dist", "j_safezone_dist", "liquidity_compression_box",
         "head_shoulders",
         "liquidity_sweep", "long_run",

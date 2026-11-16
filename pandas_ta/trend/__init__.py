@@ -7,6 +7,7 @@ from .atr_push import atr_push
 from .band_cross_retest import band_cross_retest
 from .bdi4kewl import bdi4kewl
 from .bos import bos
+from .bos_causal import bos_causal
 from .choch import choch
 from .chop import chop
 from .cksp import cksp
