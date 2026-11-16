@@ -136,10 +136,15 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    each of ten frames with IDENTICAL masks, parting company only where a
    guard fires.
 
-10. **That Gate E is still OWED.** No ledger row exists for this
-    indicator and `test_the_gate_e_row_is_still_owed` asserts there is
-    none -- the cue for the receipt session that records it after the
-    launcher's run.
+10. **The recorded Gate E row.** Run `is117-tf_iqr_ret_60-7149d122`,
+    measured 2026-11-16: SHIP, pooled |rho| 0.6730 vs `natr` over 393,509
+    bars, per-frame max median 0.6565, 89 frames, 687 comparators.
+    `test_the_gate_e_row_is_recorded_and_ships` pins the row's IDENTITY and
+    its BAND rather than its last digits, and reads its `non_nan` /
+    `non_zero` / `pooled_bars` as Gate C's real-data limb. The
+    `ts_q05_60` overlap on those 89 frames is STILL owed, and
+    `test_the_ts_q05_60_overlap_check_is_owed_from_the_gate_e_run` keeps
+    its revert rule in the receipt so the SHIP row cannot settle it.
 
 Numbers come from `python docs/measure_tf_iqr_ret_60.py`; the receipt is
 `docs/TfIqrRet60Measured.md`.
@@ -1428,9 +1433,14 @@ def test_the_volatility_warning_survives_the_dictionary_cut():
 def test_the_ts_q05_60_overlap_check_is_owed_from_the_gate_e_run():
     """`ts_q05_60` was merged three weeks after the screen that produced
     this issue's Gate E figures, so Gate E's 687 comparators may not carry
-    it and "the owner's call" needs a trigger or it is never made. This
-    asserts the owed item and its revert rule are in the receipt, so a
-    green Gate E row cannot quietly settle them."""
+    it and "the owner's call" needs a trigger or it is never made. The
+    2026-11-16 receipt session settled only half of it: no `q05` spelling
+    appears anywhere in the run's artefacts, and the run's `top25.csv`
+    floor is 0.2680 against a synthetic pooled 0.6238, so the comparator
+    set almost certainly does not carry it -- and the 89-frame measurement
+    against `TS_Q05_60` is still owed to the owner, with the revert rule
+    attached. This asserts that owed item and its rule are still in the
+    receipt, so the recorded SHIP row cannot quietly settle them."""
     doc = (ROOT / "docs" / "TfIqrRet60Measured.md").read_text(
         encoding="utf-8")
     assert "OWED from the Gate E run" in doc
@@ -1438,18 +1448,45 @@ def test_the_ts_q05_60_overlap_check_is_owed_from_the_gate_e_run():
     assert "r3-perframe-0.90" in doc
 
 
-def test_the_gate_e_row_is_still_owed():
-    """Gate E is run by the launcher after this session, so there is no
-    ledger row yet and `tests/test_gate_e_ledger.py::
-    test_every_indicator_that_needs_a_row_has_one` fails locally until the
-    receipt session records it. This test is that session's cue: it must be
-    rewritten to pin the recorded row, exactly as
-    `tests/test_tf_higuchi_30.py` was."""
+def test_the_gate_e_row_is_recorded_and_ships():
+    """The Gate E row for this port, recorded 2026-11-16 from run
+    `is117-tf_iqr_ret_60-7149d122` (89 ALTPORT-1 frames, 687 comparators,
+    canary bit-equal). This pins the row's IDENTITY and its BAND, not its
+    digits to the last place: a rho is asserted as an inequality against the
+    0.76 ship line, because a re-run on other CPUs moves the last bits.
+    Measured here: pooled 0.6730 vs `natr` (n = 393,509), per-frame max
+    median 0.6565 -- the highest of the 687 and the same comparator the
+    2026-10-24 screen found on the prototype."""
     path = ROOT / "docs" / "gate_e_ledger.csv"
     with path.open(newline="", encoding="utf-8") as handle:
         rows = [r for r in csv.DictReader(handle)
                 if r["indicator"] == "tf_iqr_ret_60"]
-    assert rows == [], rows
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["module"] == "pandas_ta.statistics.tf_iqr_ret_60"
+    assert row["column"] == f"TFIQRRET_{LENGTH}"
+    assert row["run"] == "is117-tf_iqr_ret_60-7149d122"
+    assert row["measured"] == "2026-11-16"
+    assert row["verdict"] == "SHIP"
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["waiver"] == ""
+    assert int(row["n_frames"]) == 89
+    assert int(row["n_comparators"]) == 687
+    # SHIP is `< 0.76` on both limbs of `r3-perframe-0.90`; the measured pair
+    # is 0.6730 / 0.6565, so 0.72 leaves room for a CPU to move the last bits
+    # and still fails if the column drifts toward the disclosure line.
+    assert float(row["max_abs_rho"]) < 0.72
+    assert float(row["perframe_max_median_abs_rho"]) < 0.72
+    # Gate C's real limb and Gate D's anti-constant limb, on real prices.
+    non_nan, pooled = int(row["non_nan"]), int(row["pooled_bars"])
+    assert 0 < non_nan < pooled
+    # The warm-up is one bar for the first return plus `length - 1` for the
+    # first full window -- `length` bars on each of the 89 frames, and nothing
+    # else is missing: the column fires wherever a window exists.
+    assert pooled - non_nan == 89 * LENGTH
+    # Not the constant 0.0 on real data either, and the zeros that do occur
+    # are a flat middle half of the window rather than a dead column.
+    assert 0 < int(row["non_zero"]) <= non_nan
 
 
 # ------------------------------------------------------------- the wiring
