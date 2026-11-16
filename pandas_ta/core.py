@@ -2073,6 +2073,12 @@ class AnalysisIndicators(BasePandasObject):
                                **kwargs)
         return self._post_process(result, **kwargs)
 
+    def tf_iqr_ret_60(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = tf_iqr_ret_60(close=close, length=length, offset=offset,
+                               **kwargs)
+        return self._post_process(result, **kwargs)
+
     def tf_spec_entropy_64(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = tf_spec_entropy_64(close=close, length=length, offset=offset,
