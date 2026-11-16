@@ -32,9 +32,13 @@ python docs/measure_j_safezone_dist.py A1 D         # named sections
 python docs/measure_j_safezone_dist_cpu.py D        # AVX-512/AVX2/FMA3 off
 ```
 
-with four exceptions, named here rather than left for a reader to find:
+with five exceptions, named here rather than left for a reader to find:
 
-* §E's prototype figures, which are issue #121's and were measured on the
+* §E's and §C2's measured Gate E figures, which come from the launcher's
+  run `is121-j_safezone_dist-b3666690` (`overlap_max.csv` and `meta.json`)
+  and are re-derived into `docs/gate_e_ledger.csv` by
+  `docs/gate_e_ledger.py record`;
+* §E0's prototype figures, which are issue #121's and were measured on the
   PROTOTYPE by the 2026-10-24 screen;
 * §F and §F1's suite counts, which are pytest's;
 * §C3's running-maximum count, which comes from
@@ -51,9 +55,9 @@ transcript.
 |---|---|
 | **A** correctness | **pass** — bit-equal to an independent bar-by-bar oracle on 1,475 of 1,475 fired bars of each of six frames, and bit-equal to the screen prototype on all eight |
 | **B** causality | **pass** — module caught 0 of 36 on every frame; six look-ahead mutants live and caught 3 .. 36 of 36; and the sweep's blind spot measured, with five more mutants the ORACLE catches |
-| **C** reachability | **pass on synthetic** — 1,475 of 1,500 on each of six frames, 1,471 .. 1,475 distinct values, 0 exactly 0.0. **Real-data counts OWED** with Gate E |
+| **C** reachability | **pass** — synthetic: 1,475 of 1,500 on each of six frames, 1,471 .. 1,475 distinct values, 0 exactly 0.0; real data (Gate E run, 2026-11-16): 396,606 non-NaN of 398,849 pooled bars, 396,597 of them non-zero |
 | **D** scale-free | **pass** — ×8/×64 bit-identical on all six and at three price levels; ×10/×3.7/×0.1/×1.0000001 within 4.091e-11 (6.546e-11 under reduced dispatch); `0 < fires < n`; a level shift moves every fired bar |
-| **E** attribution | **pending, run by issue-solver after this session** — see §E |
+| **E** attribution | **pass — SHIP**, measured 2026-11-16: max \|ρ\| **0.7059** vs `Dist_to_hma_pct` (manifest), n = 396,606; top-5 per-frame max median **0.7249**, 0 of 89 frames ≥ 0.90 — see §E |
 | **F** suites | PandasTa measured here (§F); the parent repo's suite is the launcher's |
 
 ---
@@ -311,12 +315,21 @@ frame has one — but every bar of `rising` MOVES. So the missingness is not
 
 Identical under reduced CPU dispatch.
 
-### §C2 real data — **OWED**
+### §C2 real data — measured by the Gate E run, 2026-11-16
 
-Gate E is run by issue-solver after this session, and its 89 ALTPORT-1 BIST
-frames are where the real-data fired/non-zero counts come from. The receipt
-session records them here together with the ledger row. Everything in this
-document is synthetic until then.
+The 89 ALTPORT-1 BIST frames of the Gate E run
+(`is121-j_safezone_dist-b3666690`, 398,849 pooled bars) are where the
+real-data counts come from, as reported by `overlap_max.csv`:
+
+| | |
+|---|---|
+| non-NaN bars | **396,606** of 398,849 pooled (99.44%) |
+| non-zero bars | **396,597** of those 396,606 |
+| `n_degenerate` | **1** — one of the 687 COMPARATORS had no variation to rank against and the harness dropped it; it is not a statement about this column |
+
+So the one shipped column fires on real data and is not constant there,
+and `0 < fires < n` holds pooled as well as on each synthetic frame
+(§D4). Every other section of this document is synthetic.
 
 ### §C3 the missingness is INFORMATIVE, and that is a consumer contract
 
@@ -431,15 +444,42 @@ the shift test.
 
 ## §E Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
+**Gate E: measured 2026-11-16 by issue-solver — SHIP.** The earlier
+"pending, run by issue-solver after this session" line is replaced by the
+numbers below; this is the port's own run, not the screen's prototype.
 
-`tests/test_j_safezone_dist.py::test_the_gate_e_row_is_owed_and_not_yet_recorded`
-asserts that `docs/gate_e_ledger.csv` has no row for `j_safezone_dist`, and
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-reports it as owed. The receipt session records the row, fills in §C2 and
-replaces that test. Until then the column is on `dev` unmeasured, under the
-owner's 2026-11-01 "owed, not failed" rule: if the run is STRUCK, it is
-reverted or waived before the release.
+| column | max \|ρ\| | against | set | n | top-5 per-frame max median | verdict |
+|---|---|---|---|---|---|---|
+| `J_SAFEZONE_DIST_22_2.5_3` | **0.7059** | `Dist_to_hma_pct` | manifest | **396,606** | **0.7249** (vs the same `Dist_to_hma_pct`) | **SHIP** |
+
+Full precision, as `overlap_max.csv` writes them: pooled
+`0.7059335691858115`, per-frame max median `0.7249249512519932`. The best
+`compute_all` comparator is `cfo` at `0.6856617215908181` over the same
+396,606 bars, so the manifest side is the binding one. **0 of 89 frames**
+carry a per-frame \|ρ\| ≥ 0.90 (`perframe_pct_frames_ge_090` 0.0), which is
+the second half of the `r3-perframe-0.90` band and the half a pooled-only
+read would miss; `verdict_pooled_only` is SHIP too.
+
+Both limbs are under the 0.76 SHIP line, so the column ships unchanged and
+nothing is removed.
+
+**Run facts** (from `meta.json` in
+`gatee/is121-j_safezone_dist-b3666690/`): module
+`pandas_ta.trend.j_safezone_dist`, `fn` `j_safezone_dist`, `kwargs` `{}`
+(defaults 22 / 2.5 / 3), 89 ALTPORT-1 frames, 398,849 pooled bars,
+329 `compute_all` + 358 manifest = **687** comparators, `n_degenerate` 1,
+canary `AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`, pandas 2.3.3 /
+numpy 1.26.4, data stamp `1be6495ef7095ff67ad8f59a2fc0311d74f02652`,
+candidate source sha1 `b96de141e11fa1479a8da0186fe03c437db9c4b9`,
+`pandas_ta_src_sha1` `36abab40f09fc335ec43733d3236e4fec33c616b`.
+
+Recorded in `docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-16`,
+which prints
+`j_safezone_dist:J_SAFEZONE_DIST_22_2.5_3 SHIP 0.7059 vs Dist_to_hma_pct`.
+`record` re-derives the verdict from the run's own CSV and refuses a tree
+whose `pandas_ta_src_sha1` differs from the one measured, so the row is not
+a transcription of this paragraph.
 
 ### §E0 what the screen measured, on the PROTOTYPE
 
@@ -466,18 +506,40 @@ defaults, 12 real frames — not Gate E) put
 per-frame max median 0.7555: not a restatement at the 0.90 line. §L
 measures the same pair on this fork's synthetic frames.
 
+### §E1 the port matched its prototype prior
+
+The screen's prototype figures and the port's own run agree to four
+digits, on the same comparator and the same n:
+
+| | prototype (screen, 2026-10-24) | port (`is121-j_safezone_dist-b3666690`, 2026-11-16) |
+|---|---|---|
+| max \|ρ\| | 0.7059 | 0.7059 |
+| against | `Dist_to_hma_pct` | `Dist_to_hma_pct` |
+| n | 396,606 | 396,606 |
+| per-frame max median | 0.7249 | 0.7249 |
+| verdict | SHIP | SHIP |
+
+§A2's bit-equality to the prototype on all eight synthetic frames is why
+that is expected rather than a coincidence. What changes with this run is
+that the agreement is now measured on the 89 real frames for the SHIPPED
+module, which it was not before. ⚠ The two runs' full-precision figures
+were not compared: issue #121 quotes the prototype to four digits only.
+
 ## §F Gate F — suites
 
-Run in this worktree, `python -m pytest -q`: **2 failed, 11,845 passed,
-86 skipped**. Both failures are expected and neither is this port's
-arithmetic — the `AlternativeRepos`-dependent talib CSV test that CI
-deselects, and the owed Gate E row, which reports `['j_safezone_dist']`
-and nothing else. §F1 has the output.
+Run in this worktree after the ledger row landed,
+`python -m pytest -q -p no:warnings`: **1 failed, 11,853 passed, 86
+skipped**. The one failure is expected and is not this port's arithmetic:
+the `AlternativeRepos`-dependent talib CSV test that CI deselects. The
+second failure the port session reported — the owed Gate E row — is GONE,
+because this session recorded it. §F1 has both outputs.
 
 The module's own suite: **203 tests**, and the same 203 under
 `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` via
 `python docs/measure_j_safezone_dist_cpu.py`, which prints the dispatchable
-features still enabled and refuses to run if any of the four survived.
+features still enabled and refuses to run if any of the four survived. Run
+again this session, after the two Gate E tests were rewritten: 203 passed
+under both dispatches.
 
 The parent repo's suite is the launcher's: it is not on this machine.
 
@@ -738,10 +800,21 @@ bars, with no Python loop.
 
 ## Verdict
 
-**SHIP, with Gate E pending.** Gates A, B and D are met on synthetic
-frames; Gate C is met on synthetic frames and its real-data limb is owed
-with Gate E; Gate F is measured here for PandasTa and is the launcher's for
-the parent repo.
+**SHIP, Gate E measured.** Gates A, B and D are met on synthetic frames;
+Gate C is met on synthetic frames and, since the Gate E run of 2026-11-16,
+on the 89 real frames too (§C2); Gate E is SHIP on both limbs of
+`r3-perframe-0.90` (§E); Gate F is measured here for PandasTa and is the
+launcher's for the parent repo. Nothing is removed and the column ships as
+built.
+
+⚠ **`pandas_ta/trend/j_safezone_dist.py` was deliberately NOT edited by
+the receipt session**, so its docstring still reads "The port's own Gate E
+run is what decides its band, and it is PENDING" (line 232). The ledger
+row records that file's sha1
+(`b96de141e11fa1479a8da0186fe03c437db9c4b9`), and
+`tests/test_gate_e_ledger.py` fails if the module moves after its run — a
+docstring touch would invalidate the measurement it describes. The band it
+anticipated is the one the run gave: SHIP at the same 0.7059.
 
 Three things a reader should carry away rather than the gate table:
 
@@ -797,7 +870,15 @@ took the smaller-scope reading and is logged rather than asked.
 
 ## §F1 suite output
 
-`python -m pytest -q`, this worktree, 2026-11-16:
+**The receipt session**, `python -m pytest -q -p no:warnings`, this
+worktree, 2026-11-16, after `gate_e_ledger.py record`:
+
+```
+FAILED tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows
+1 failed, 11853 passed, 86 skipped in 302.06s (0:05:02)
+```
+
+**The port session**, before the ledger row, same worktree and same day:
 
 ```
 FAILED tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows
@@ -805,17 +886,26 @@ FAILED tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_on
 2 failed, 11845 passed, 86 skipped, 97137 warnings in 296.60s (0:04:56)
 ```
 
-(The run after review round 2, which added ten tests to this module. The
-round-1 run read `2 failed, 11835 passed, 86 skipped`; the two failures and
-the 86 skips are the same.)
+(That was the run after review round 2, which added ten tests to this
+module. The round-1 run read `2 failed, 11835 passed, 86 skipped`; the two
+failures and the 86 skips were the same.)
 
-Both failures are expected and neither is this port's arithmetic.
+The 8 extra passes between the two runs are not this module: it has **203**
+tests in both, measured here with
+`python -m pytest -q -p no:warnings tests/test_j_safezone_dist.py`, because
+its two Gate E tests were rewritten rather than added to. Where the other 8
+come from was NOT measured — the ledger row cannot be un-recorded to
+re-count — and `tests/test_gate_e_ledger.py`, which parametrises per ledger
+row, is the obvious candidate rather than a checked one.
+
+Every failure in both runs is expected and none is this port's arithmetic.
 
 * `test_regenerating_reproduces_the_committed_rows` needs the sibling
   `../AlternativeRepos` checkout, which is not on this machine. CI
-  deselects it by name (`CLAUDE.md`, *CI*).
-* The Gate E row is OWED, and the message names this port and nothing
-  else:
+  deselects it by name (`CLAUDE.md`, *CI*). Still failing, with the same
+  message: `pandas-ta-classic not found at .../AlternativeRepos/pandas-ta-classic`.
+* The Gate E row **was** OWED in the port session, and the message named
+  this port and nothing else:
 
   ```
   no Gate E ledger row for ['j_safezone_dist'] (new to Category, or a
@@ -825,7 +915,9 @@ Both failures are expected and neither is this port's arithmetic.
   ```
 
   Under `GATE_E_PENDING_OK=1`, which `ci.yml` and `gate-e-guard.yml` set
-  for PRs into `dev`, that is a skip rather than a failure.
+  for PRs into `dev`, that was a skip rather than a failure. It is now
+  neither: the row is recorded and the test passes locally, where
+  `GATE_E_PENDING_OK` is not set.
 
 ⚠ **The 86 skips are NOT one cause**, and the first draft of this section
 said they were. Measured with `python -m pytest -q -rs`, grouped by reason:

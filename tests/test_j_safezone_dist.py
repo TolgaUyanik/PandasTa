@@ -95,19 +95,22 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    behaviour is pinned on its own, so an upgrade which stops doing it
    fails here instead of shipping an infinite feature.
 
-8. **Gate E is PENDING**, run by issue-solver after this session.
-   `test_the_gate_e_row_is_owed_and_not_yet_recorded` asserts the ledger
-   has no row for `j_safezone_dist`, which is the receipt session's cue.
-   The screen measured the PROTOTYPE at SHIP (max |rho| 0.7059 vs
-   `Dist_to_hma_pct`, n = 396,606, per-frame max median 0.7249); that is
-   issue #121's number and not this port's. Gate C's real-data limb is
-   owed from the same run.
+8. **Gate E is MEASURED and SHIP**, run by issue-solver on 2026-11-16
+   (`is121-j_safezone_dist-b3666690`): max |rho| 0.7059 vs
+   `Dist_to_hma_pct` (manifest), n = 396,606, top-five per-frame max
+   median 0.7249, 0 of 89 frames at or above 0.90 -- under the 0.76 ship
+   line on both limbs, so no column is removed.
+   `test_the_gate_e_row_is_recorded_and_says_ship` pins the ledger row and
+   `test_the_receipt_carries_the_measured_gate_e_numbers` pins the
+   receipt. The same run gives Gate C its real-data limb: 396,606 non-NaN
+   of 398,849 pooled bars, 396,597 of them non-zero.
 
 Every number above is printed by `python docs/measure_j_safezone_dist.py`
 and by `python docs/measure_j_safezone_dist_cpu.py <section>` under
 numpy's reduced CPU dispatch, EXCEPT the Gate E figures of item 8, which
-are quoted from issue #121 and were measured on the PROTOTYPE.
-`docs/JSafezoneDistMeasured.md` carries the tables.
+come from the launcher's run and are read back out of
+`docs/gate_e_ledger.csv`. `docs/JSafezoneDistMeasured.md` carries the
+tables.
 
 NOT pinned here: Gate E's own arithmetic (the launcher runs it; 687
 comparators over 89 real BIST frames, re-derived by
@@ -933,21 +936,36 @@ def test_the_docstrings_first_paragraph_survives_the_dictionary_cut():
     assert "Elder" in cut and "stop" in cut
 
 
-def test_the_receipt_states_that_gate_e_is_pending():
-    """The receipt is the deliverable issue #121 asks for, and a pending
-    Gate E has to say so in it rather than only in a commit message."""
+def test_the_receipt_carries_the_measured_gate_e_numbers():
+    """The receipt is the deliverable issue #121 asks for, and the Gate E
+    run of 2026-11-16 has to live in it rather than only in the ledger."""
     doc = (ROOT / "docs" / "JSafezoneDistMeasured.md").read_text(
         encoding="utf-8")
-    assert "Gate E: pending, run by issue-solver after this session" in doc
-    assert "0.7059" in doc          # the screen's PROTOTYPE figure
+    assert "Gate E: measured 2026-11-16 by issue-solver — SHIP" in doc
+    assert "0.7059335691858115" in doc        # the PORT's pooled max
+    assert "0.7249249512519932" in doc        # its per-frame max median
+    assert "Dist_to_hma_pct" in doc
     assert "r3-perframe-0.90" in doc
+    assert "is121-j_safezone_dist-b3666690" in doc
+    # the "pending" wording this test replaced must be gone as a claim
+    assert "Gate E: pending, run by issue-solver" not in doc
 
 
-def test_the_gate_e_row_is_owed_and_not_yet_recorded():
-    """Gate E is run by issue-solver after this session; the receipt
-    session records the row and replaces this test."""
+def test_the_gate_e_row_is_recorded_and_says_ship():
+    """The receipt session's own cue: the row exists, names the one
+    shipped column, and carries the verdict the bands give."""
     path = ROOT / "docs" / "gate_e_ledger.csv"
     with path.open(newline="", encoding="utf-8") as handle:
         rows = [r for r in csv.DictReader(handle)
                 if r["indicator"] == "j_safezone_dist"]
-    assert rows == []
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["column"] == "J_SAFEZONE_DIST_22_2.5_3"
+    assert row["module"] == "pandas_ta.trend.j_safezone_dist"
+    assert row["verdict"] == "SHIP"
+    assert float(row["max_abs_rho"]) < 0.76          # the SHIP line
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+    assert row["against"] == "Dist_to_hma_pct"
+    assert row["run"] == "is121-j_safezone_dist-b3666690"
+    assert row["measured"] == "2026-11-16"
+    assert row["waiver"] == ""                        # SHIP needs none
