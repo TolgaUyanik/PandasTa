@@ -2481,6 +2481,13 @@ class AnalysisIndicators(BasePandasObject):
                              max_ifvg=max_ifvg, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def j_chandelier_dist(self, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = j_chandelier_dist(high=high, low=low, close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def j_safezone_dist(self, offset=None, **kwargs):
         low = self._get_column(kwargs.pop("low", "low"))
         close = self._get_column(kwargs.pop("close", "close"))
