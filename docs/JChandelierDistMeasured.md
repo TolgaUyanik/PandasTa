@@ -25,14 +25,19 @@ CPU dispatches are re-printed by
 six numbered items, and the count is the number of items. The script has no
 §F section and does not read the repo's documents, so:
 
-1. §F's `254 passed` and `2 failed, 12,107 passed, 86 skipped` are
+1. §F's counts (`255 passed`, `1,353 passed`, and
+   `1 failed, 12,116 passed, 86 skipped`, plus the porting session's
+   earlier `254` and `2 failed, 12,107 passed, 86 skipped`) are
    **pytest's**, from the runs named there;
 2. §F's `701 → 702` tagged columns is **`docs/MLCompanionContract.md`'s**
    count, checked by
    `tests/test_ml_companions.py::test_the_contract_quotes_the_dictionarys_actual_ml_form_counts`;
-3. §E's universe and comparator counts (89 frames, 398,849 bars,
-   329 + 358 = 687 comparators, canary bit-equal) are **issue #122's and
-   `CLAUDE.md`'s**, not this session's — this session does not run Gate E;
+3. §E's figures are the **launcher's**, not the measurement script's: the
+   Gate E run `is122-j_chandelier_dist-976ee44b` of 2026-11-16, read by the
+   receipt session out of that run's `overlap_max.csv`, `top25.csv`,
+   `perframe.csv`, `degenerate.csv` and `meta.json` and out of
+   `docs/gate_e_ledger.csv`. Neither the porting session nor the receipt
+   session ran the harness;
 4. §L's real-data figures (0.8606 / 0.8759 / 0.8603 / 0.8656 and the run id
    `screen_r2_20261024`) are **issue #122's**, quoted;
 5. the "web access is unavailable" line below is a fact about the session,
@@ -72,9 +77,9 @@ specification, and TA-Lib's `ATR` — the conventional meaning of a bare
 |---|---|
 | A Correctness | **PASS** — matches an independent bar-by-bar oracle to 2.5e-16 absolute on 1,478 of 1,478 bars of each of six frames, and `talib.MAX - 3*talib.ATR` (the issue's two operators as TA-Lib spells them) to 2.4e-16 at Spearman 1.0000 |
 | B Causality | **PASS** — 0 of 36 sweep catches on six frames; six look-ahead mutants live and caught 11–36 of 36; three blind-spot edits caught 0 by the sweep and all three by the oracle |
-| C Reachability | **PASS (synthetic)** — 1,478 of 1,500 bars on each of six frames, 1,478 distinct values, 3,759 of 8,868 pooled bars negative, 0 exactly zero. ⚠ The real-data limb is **owed**: it comes from the launcher's Gate E run |
+| C Reachability | **PASS** — synthetic: 1,478 of 1,500 bars on each of six frames, 1,478 distinct values, 3,759 of 8,868 pooled bars negative, 0 exactly zero. Real data (the Gate E run): **396,891 non-NaN of 398,849** pooled BIST bars, **396,891 of them non-zero** |
 | D Scale-free | **PASS** — ×8/×64 bit-identical on six frames and at price levels 1e-6, 1e+6, 1e+100; ×10/×3.7/×0.1/×1.0000001 within 2.467e-11; a +10 level shift moves all 1,478 fired bars of every frame |
-| E Attribution | **pending, run by issue-solver after this session** |
+| E Attribution | **DISCLOSE_GAP — ship with a note** — run `is122-j_chandelier_dist-976ee44b`, 2026-11-16: max \|ρ\| **0.8609** vs the manifest's `Range_Pos_20` over n = 396,891, top-five per-frame max median **0.8760** over 89 frames, 687 comparators, no waiver (only STRUCK needs one) |
 | F Suites | this repo's suite run below; both repos' suites are the launcher's |
 
 **The one thing to read first.** This port does **not** reproduce the screen
@@ -85,8 +90,12 @@ what TA-Lib's `ATR` computes; the prototype's recurses from bar 0 with no
 seed. §A3 measures
 the gap — 655 … 722 of 1,478 bars disagree, by up to 2.0e-02, converging to
 bit-equality by bar 732 … 808. So the screen's Gate E figures are evidence
-about a neighbouring column, and the port's own Gate E run is what decides
-its band.
+about a neighbouring column, and the port's own Gate E run is what decided
+its band. **That run landed in the same band, DISCLOSE_GAP** (§E): max
+\|ρ\| 0.8609 against `Range_Pos_20`, the prototype's 0.8606 against the
+same comparator — agreement to three digits on a column whose warm-up is
+provably different, which §E3 reads as the warm-up washing out of 396,891
+bars rather than as the two columns being the same arithmetic.
 
 ---
 
@@ -312,12 +321,29 @@ which is what the Chandelier Exit is for.
   0.009754 … 0.009879, every reading positive — no drawdown ever puts the
   close three ATRs below its high.
 
-### ⚠ C3 the real-data limb is OWED
+### C3 the real-data limb, from the Gate E run
 
-Everything above is synthetic. The launcher's Gate E run reports the
-non-NaN count over the 89 frozen ALTPORT-1 BIST frames (398,849 bars), and a
-receipt session writes it here. Until then this receipt makes **no** claim
-about real bars.
+Everything above is synthetic. The launcher's Gate E run
+(`is122-j_chandelier_dist-976ee44b`, 2026-11-16) is where the real bars
+come from, and `overlap_max.csv` carries the two counts:
+
+| | over the 89 frozen ALTPORT-1 BIST frames |
+|---|---|
+| pooled bars | 398,849 |
+| non-NaN readings | **396,891** (99.509 %) |
+| of those, non-zero | **396,891** — every one |
+
+The 1,958 blank bars are the warm-up: 22 bars per frame × 89 frames =
+1,958, so **every** frame loses exactly its first 22 bars and nothing else
+goes missing on real data. (That identity is arithmetic on the two printed
+counts, not a per-frame scan — the run does not print per-frame NaN counts.)
+
+⚠ The `== 0` limb reads differently on real data than §C2's flat frame
+warns it might: `non_zero` equals `non_nan`, so **no** real bar reads
+exactly 0.0, even though 86,415 of 408,253 BIST daily bars close exactly at
+an extreme (`CLAUDE.md`'s FVGDEAD figure). A zero here needs the close to
+sit exactly at the 22-bar high AND the ATR to be exactly 0 — a whole flat
+window, not one tied bar.
 
 ---
 
@@ -362,29 +388,157 @@ column that reads nothing at all.
 
 ---
 
-## §E Gate E
+## §E Gate E — **DISCLOSE_GAP**, measured 2026-11-16
 
-**Gate E: pending, run by issue-solver after this session.**
+**Gate E: measured 2026-11-16 by issue-solver — DISCLOSE_GAP, the column
+ships with a note.** The earlier "pending, run by issue-solver after this
+session" line is replaced by the numbers below. The launcher ran
+`gate_e_overlap.py run --module pandas_ta.trend.j_chandelier_dist` on the
+code at commit `b47887e`; outputs `is122-j_chandelier_dist-976ee44b`,
+recorded into `docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-16`,
+which printed
+`j_chandelier_dist:J_CHANDELIER_DIST_22_3.0 DISCLOSE_GAP 0.8609 vs Range_Pos_20`.
+Every figure in §E1–§E3 is read off that run's `overlap_max.csv`,
+`top25.csv`, `perframe.csv`, `degenerate.csv` and `meta.json`. Neither this
+session nor the porting session ran the harness.
 
-No row exists in `docs/gate_e_ledger.csv` for `j_chandelier_dist` yet, and
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails on a local run until one does. That is the *owed, not failed* state
-`CLAUDE.md` describes; CI into `dev` sets `GATE_E_PENDING_OK=1` and reports
-it as a skip.
+### §E1 the verdict
 
-What is known, and it is about the **prototype**, not this module — the
-2026-10-24 library catalog screen, round 2, run `screen_r2_20261024`:
+| column | max \|ρ\| | against | set | n | top-5 per-frame max median | verdict |
+|---|---|---|---|---|---|---|
+| `J_CHANDELIER_DIST_22_3.0` | **0.8609** | `Range_Pos_20` | manifest | **396,891** | **0.8760** (vs the same `Range_Pos_20`) | **DISCLOSE_GAP** |
 
-* max \|ρ\| **0.8606** vs `Range_Pos_20` (manifest, n = 396,980);
-* top-five per-frame max median **0.8759** → **DISCLOSE_GAP**;
-* next comparators `ICHI_PRICE_VS_KIJUN` 0.8485, `bias` 0.8438;
-* 89 ALTPORT-1 frames, 398,849 bars, 329 + 358 = 687 comparators, canary
-  bit-equal.
+```
+column            J_CHANDELIER_DIST_22_3.0
+verdict           DISCLOSE_GAP           (0.80 <= rho < 0.90, r3-perframe-0.90)
+pooled max |rho|  0.860867110309758   vs Range_Pos_20         (manifest)  n = 396,891
+per-frame         0.87595405414863    vs Range_Pos_20          median over 89 frames
+                  5.617977528089887 % of the 89 frames at |rho| >= 0.90
+best in compute_all  0.8487899894432914 vs ICHI_PRICE_VS_KIJUN n = 396,624
+best in manifest     0.860867110309758  vs Range_Pos_20        n = 396,891
+comparators       687 (329 compute_all + 358 manifest), 1 dropped as degenerate
+kwargs            {} -- defaults, period 22 / mult 3.0 (module constants)
+canary            AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal
+universe          89 ALTPORT-1 frames, 398,849 pooled bars
+```
 
-⚠ Two reasons that is not this port's band. The prototype's ATR is not this
-module's (§A3), and a port is measured on its own output. The launcher runs
-`gate_e_overlap.py run --module pandas_ta.trend.j_chandelier_dist` after
-this session and a receipt session records the row.
+`verdict_pooled_only` is **also** `DISCLOSE_GAP`, so neither limb of the
+band carried the other. The one dropped comparator is `squeeze_SQZ_NO`
+(manifest), dropped as `constant` — a comparator fault, not this column's,
+and the same one `j_acosc` and `j_safezone_dist` dropped.
+
+**DISCLOSE_GAP is a ship with a note, not a strike**, so nothing is
+removed: the column stays in `Category`, in `core.py`, in the dictionary and
+in `README.md`, and the ledger row needs no waiver (only STRUCK does).
+Both limbs are under 0.90: pooled 0.8609 and the top comparator's per-frame
+median 0.8760.
+
+**Run facts** (from `meta.json`): module
+`pandas_ta.trend.j_chandelier_dist`, `fn` `j_chandelier_dist`, `kwargs`
+`{}`, no `end`, nothing excluded, pandas 2.3.3 / numpy 1.26.4, data stamp
+`1be6495ef7095ff67ad8f59a2fc0311d74f02652`, universe stamp
+`fa3060e68acef410cbc04573ac39450bd210d81d`, candidate source sha1
+`a3dbad7f12da70d4a4681196bd45301902cec018`, `pandas_ta_src_sha1`
+`7ffe3dfee7a1308b13ae101536ef6e24b6bc0127`. `record` re-derives the verdict
+from the run's own CSV and refuses a tree whose `pandas_ta_src_sha1`
+differs from the one measured, so the ledger row is not a transcription of
+this paragraph.
+
+### §E2 the five per-frame rows, and where the 0.90 line is actually touched
+
+`perframe.csv`, the top five comparators, 89 frames each:
+
+```
+against                n_frames  median    mean      max       min      >=0.90   >=0.80
+Range_Pos_20                 89  0.87595   0.86946   0.92178   0.46196   5.62 %  97.75 %
+ICHI_PRICE_VS_KIJUN          89  0.86793   0.85809   0.92390   0.35265   5.62 %  97.75 %
+bias                         89  0.85707   0.85030   0.91430   0.62340   3.37 %  95.51 %
+bias_ta                      89  0.85181   0.84304   0.91132   0.61819   2.25 %  92.13 %
+ATR_POSITION                 89  0.83882   0.83904   0.91186   0.67211   2.25 %  93.26 %
+```
+
+⚠ **Single frames DO cross 0.90 here, and the band is read on the MEDIAN.**
+All five comparators have a maximum above 0.90 (0.9119 … 0.9239) and
+5.617977528089887 % of 89 frames — **5 frames** — sit at or above 0.90 on
+each of the top two. The `r3-perframe-0.90` band strikes on a top-5
+comparator's per-frame **median** ≥ 0.90, and the worst median is 0.8760;
+so this column is DISCLOSE_GAP and not STRUCK by the rule as written. That
+is a different shape from `j_acosc`, where no single frame reached 0.90 at
+all, and closer to `j_damiani`'s, where runners-up touched 0.90 on one
+frame — except that here the medians are high (0.84 … 0.88) rather than
+0.74, and **97.75 %** of frames are above 0.80 on the top comparator. The
+agreement is broad, not driven by a handful of frames.
+
+Minimum per-frame \|ρ\| **0.46196** (`Range_Pos_20`) and 0.35265
+(`ICHI_PRICE_VS_KIJUN`): at least one frame disagrees substantially, so the
+pooled figure is not uniform across the universe either.
+
+### §E3 what the run adds that §E0 could not
+
+**It reproduced the screen's PROTOTYPE band and its top-three comparators,
+in order** — `Range_Pos_20` 0.8606 → **0.8609**, `ICHI_PRICE_VS_KIJUN`
+0.8485 → **0.8488**, `bias` 0.8438 → **0.8441**, with the per-frame max
+median 0.8759 → **0.8760** and n 396,980 → **396,891**.
+
+⚠ **That agreement was not a foregone conclusion and is not evidence that
+the two columns are the same arithmetic** — §A3 measures them disagreeing
+on 655 … 722 of 1,478 bars by up to 2.0e-02. What it shows is that the
+difference is a warm-up transient decaying at `(21/22)^k`: on the six
+synthetic frames the last bar that differs at all falls at 732 … 808 (717 …
+873 under reduced dispatch, §A3), so on a real frame of ~4,480 bars the
+transient covers a small head of it — and Spearman is a rank statistic. ⚠
+That per-frame share is an inference from the synthetic decay, not a
+measurement on the BIST frames: the run compares this column against the
+687 comparators and never against the prototype. The n differs by 89 bars — exactly one bar per
+frame — which is §A5's measured fact that the prototype fires one bar
+earlier (bar 21, no ATR seed window).
+
+Because an expected agreement is the easiest kind of row to copy over by
+mistake, `tests/test_j_chandelier_dist.py::test_the_gate_e_row_is_recorded_and_says_disclose_gap`
+pins the row's own run id `is122-j_chandelier_dist-976ee44b`, not only its
+arithmetic.
+
+### §E4 the §L prediction, priced against the run
+
+§L measured eight in-fork neighbours on six SYNTHETIC frames and said two
+things that the run can now check:
+
+| | §L, synthetic | the run, 89 real frames |
+|---|---|---|
+| retyped `Range_Pos_20` | 0.9181 (per-frame median) | **0.8760** (per-frame median), 0.8609 pooled |
+| `ichimoku_ml:ICHI_PRICE_VS_KIJUN` | 0.9115 | **0.8679** (per-frame median), 0.8488 pooled |
+| `bias:BIAS_SMA_26` | 0.9150 | `bias` **0.8571** (per-frame median), 0.8441 pooled |
+
+So §L's "six synthetic frames read HIGH" holds on all three comparators it
+could be checked on: +0.0421, +0.0436 and +0.0579 on the per-frame median.
+⚠ And §L's other warning is now a measured one rather than a conditional:
+the run DID land in DISCLOSE_GAP, so `cksp`'s family is where the redundancy
+would live, and **a `cksp` distance column must not be added without
+measuring it against this one**. The run cannot price that pair — `cksp`
+ships the price LEVEL `CKSPl_10_3_20`, which is not in the 687 comparators
+as a distance.
+
+### §E0 what the screen measured, on the PROTOTYPE
+
+⚠ **A prototype is not a port.** These are issue #122's numbers, from run
+`screen_r2_20261024` (`gate_e_overlap.py run --module ind_screen_r2 --fn
+screen`, Backtesting `main` b2d94243, 89 ALTPORT-1 frames, 398,849 bars,
+329 + 358 = 687 comparators, canary bit-equal):
+
+| | |
+|---|---|
+| max \|ρ\| | **0.8606** vs `Range_Pos_20` (manifest), n = 396,980 |
+| top-5 per-frame max median | **0.8759** → **DISCLOSE_GAP** |
+| next comparators | `ICHI_PRICE_VS_KIJUN` 0.8485, `bias` 0.8438 |
+| fork overlap (stage 2, not Gate E) | max \|ρ\| 0.8603 vs `ichimoku_ml:ICHI_PRICE_VS_KIJUN`, per-frame max median 0.8656, 12 frames |
+
+⚠ The shipped docstring of `pandas_ta/trend/j_chandelier_dist.py` still
+reads "the port's own Gate E run … is PENDING" and points here. That file is
+outside this receipt session's writable set, so the correction lives in this
+receipt and in `docs/gate_e_ledger.csv`, which are the record; the
+docstring's own prototype figures (0.8606 / 0.8759) are unaffected by the
+run and remain correct as the screen's.
 
 ---
 
@@ -544,15 +698,19 @@ Three things this table is not, each measured rather than hedged:
    retyped, not the manifest's column, which this worktree cannot read) —
    and `CLAUDE.md` records that the engine's `indicator_engine.py` calls
    this fork. Whether the engine computes any of the three *through*
-   `pandas_ta` was **not checked in this session**, so those three rows may
-   be a preview of the gate rather than something it cannot see. The other
-   five are pandas_ta ports or derived columns with no counterpart in §E's
-   list.
-2. **Six synthetic frames read HIGH.** The retyped `Range_Pos_20` analogue
-   is in the table precisely because it is the one comparator with both a
-   synthetic figure here and a real one from the screen: **0.9181 synthetic
-   vs 0.8606 over 89 BIST frames, +0.0575**. A figure in this table is an
-   upper-ish reading.
+   `pandas_ta` is **still not checked in this repo**. ⚠ But the port's own
+   run settles the other half: those three names are the run's own **top
+   three comparators** — `Range_Pos_20`, then `ICHI_PRICE_VS_KIJUN`, then
+   `bias`, which is this table's order with the last two swapped — so §L
+   previewed the gate rather than being blind to it (§E4). The other five are pandas_ta ports
+   or derived columns with no counterpart in the run's `top25.csv`.
+2. **Six synthetic frames read HIGH**, and after the port's own run this
+   can be checked on three rows rather than one. Per-frame median, synthetic
+   here against 89 real BIST frames: retyped `Range_Pos_20` **0.9181 vs
+   0.8760** (+0.0421), `ICHI_PRICE_VS_KIJUN` **0.9115 vs 0.8679** (+0.0436),
+   `bias` **0.9150 vs 0.8571** (+0.0579). Against the screen's pooled
+   prototype figure the first row read +0.0575. A figure in this table is an
+   upper-ish reading, on every row where both figures exist.
 3. **The nearest neighbour is a column the fork does not ship.** `cksp`'s
    long leg is `HH(10) − 3·ATR(10)` run through a second 20-bar maximum —
    the same family as the Chandelier Exit — but what `cksp` SHIPS is the
@@ -561,10 +719,12 @@ Three things this table is not, each measured rather than hedged:
    `docs/measure_j_chandelier_dist.py`. It belongs in the receipt anyway,
    because a consumer could build it in one line.
 
-⚠ What this does flag for the owner: if the port's own Gate E run lands in
-DISCLOSE_GAP as the screen's prototype did, the `cksp` family is where the
-redundancy would live, and a `cksp` distance column must not be added
-without measuring it against this one.
+⚠ What this flags for the owner, and the condition is now **met**: the
+port's own Gate E run landed in DISCLOSE_GAP, as the screen's prototype did
+(§E). So the `cksp` family is where the redundancy would live, and a `cksp`
+distance column must not be added without measuring it against this one.
+§E4 prices the three rows of this table that the run could check — all
+three read 0.042 … 0.058 HIGHER here than on 89 real frames.
 
 ---
 
@@ -586,20 +746,29 @@ on it.
 
 ## §F suites
 
-* `python -m pytest tests/test_j_chandelier_dist.py -q` — **254 passed**.
-* The same 254 under
+The figures of the porting session (2026-11-16) were **254 passed** for the
+module and **2 failed, 12,107 passed, 86 skipped** for the repo, the second
+failure being the owed Gate E row. The receipt session re-ran both after
+recording the row and swapping the two pending-Gate-E tests for three that
+pin it (`+1` test):
+
+* `python -m pytest tests/test_j_chandelier_dist.py -q` — **255 passed**.
+* The same 255 under
   `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` via
   `python docs/measure_j_chandelier_dist_cpu.py`, which prints the
   dispatchable features still enabled (`SSSE3 SSE41 POPCNT SSE42 AVX F16C
   AVX512CD AVX512_CLX AVX512_CNL AVX512_ICL`) and refuses to run if any of
   the four survived.
-* Full repo suite: **2 failed, 12,107 passed, 86 skipped**. The two are
-  (i) `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_
+* `python -m pytest tests/test_j_chandelier_dist.py tests/test_gate_e_ledger.py -q`
+  — **1,353 passed**, so the ledger module is green now that the row
+  exists.
+* Full repo suite: **1 failed, 12,116 passed, 86 skipped**. The one failure
+  is `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_
   committed_rows`, which needs the sibling `../AlternativeRepos` checkout
-  and which CI deselects by name, and (ii)
+  (`pandas-ta-classic not found at …`) and which CI deselects by name.
   `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_
-  one`, which reports `['j_chandelier_dist']` and nothing else — the owed
-  row of §E. The parent repo's suite is the launcher's.
+  one` passed: §E's row is recorded. The parent repo's suite is the
+  launcher's.
   ⚠ Two other tests failed on intermediate runs and are green now, and
   both are worth knowing about because neither is obvious:
   `tests/test_ml_companions.py::test_the_contract_quotes_the_dictionarys_

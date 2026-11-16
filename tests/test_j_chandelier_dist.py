@@ -125,34 +125,43 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    does not, and the pandas behaviour that absorbs it is pinned on its own
    so an upgrade that moves it fails here.
 
-8. **Gate E is OWED, not measured.** The screen measured the PROTOTYPE at
-   max |rho| 0.8606 vs `Range_Pos_20` (DISCLOSE_GAP). The port's own run
-   is the launcher's, after this session;
-   `test_no_gate_e_row_is_recorded_yet` and
-   `test_the_receipt_says_gate_e_is_pending` are the receipt session's
-   cue, and both are expected to be REPLACED then rather than to keep
-   passing.
+8. **Gate E is MEASURED and DISCLOSE_GAP**, run by issue-solver on
+   2026-11-16 (`is122-j_chandelier_dist-976ee44b`): max |rho| 0.8609 vs
+   the manifest's `Range_Pos_20`, n = 396,891, top-five per-frame max
+   median 0.8760 over 89 frames. DISCLOSE_GAP is a ship with a note, not
+   a strike, so no column is removed and the row needs no waiver.
+   ⚠ Single frames DO cross 0.90 -- 5 of the 89 on each of the top two
+   comparators, and all five top comparators have a per-frame maximum of
+   0.9119 .. 0.9239 -- but the band reads the MEDIAN, and the worst median
+   is 0.8760. `test_the_gate_e_row_is_recorded_and_says_disclose_gap` pins
+   the ledger row, including its run id, and
+   `test_the_receipt_carries_the_measured_gate_e_numbers` pins the
+   receipt. The same run gives Gate C its real-data limb, pinned by
+   `test_gate_cs_real_data_limb_is_in_the_receipt`: 396,891 non-NaN of
+   398,849 pooled bars, and all 396,891 of them non-zero.
 
 Every number above is printed by `python docs/measure_j_chandelier_dist.py`
 and by `python docs/measure_j_chandelier_dist_cpu.py <section>` under
-numpy's reduced CPU dispatch -- with the exceptions
-`docs/JChandelierDistMeasured.md` lists above its §A1, of which one matters
-here: the ASSERTED bounds quoted next to a measurement (1e-12 and 1e-9 in
-item 1, `> 300` bars and `> 1e-5` in item 7) are this file's own constants
-rather than run output. The measured figure beside each of them is a run.
-`docs/JChandelierDistMeasured.md` carries the tables.
+numpy's reduced CPU dispatch -- EXCEPT the Gate E and Gate C real-data
+figures of item 8, which come from the launcher's run and are read back out
+of `docs/gate_e_ledger.csv` and the run's own CSVs -- and with the
+exceptions `docs/JChandelierDistMeasured.md` lists above its §A1, of which
+one matters here: the ASSERTED bounds quoted next to a measurement (1e-12
+and 1e-9 in item 1, `> 300` bars and `> 1e-5` in item 7) are this file's
+own constants rather than run output. The measured figure beside each of
+them is a run. `docs/JChandelierDistMeasured.md` carries the tables.
 
-NOT pinned here: Gate E's own arithmetic (the launcher runs it; 687
+NOT pinned here: Gate E's own arithmetic (the launcher ran it; 687
 comparators over 89 real BIST frames, re-derived by
-`tests/test_gate_e_ledger.py`), and Gate C's real-data limb, which comes
-from the same run. The in-fork overlap figures of §L are SYNTHETIC and are
-disclosures, not gates -- and §L measures that six synthetic frames read
-0.0575 HIGHER than 89 real ones on the one comparator where both numbers
-exist. ⚠ They are not "columns Gate E cannot see": THREE of §L's eight --
-`ICHI_PRICE_VS_KIJUN`, `bias` and `Range_Pos_20`, the last being the
-comparator that decided the prototype's band -- carry the names of
-comparators the screen's own Gate E run listed, and whether the engine
-computes any of them through this fork was not checked in this session.
+`tests/test_gate_e_ledger.py`). The in-fork overlap figures of §L are SYNTHETIC and are
+disclosures, not gates -- and six synthetic frames read HIGH on all three
+comparators where both a synthetic and a real figure now exist: +0.0421
+(`Range_Pos_20`), +0.0436 (`ICHI_PRICE_VS_KIJUN`) and +0.0579 (`bias`) on
+the per-frame median, §E4. ⚠ Those three of §L's eight were never "columns
+Gate E cannot see": the port's own run lists all three inside its top
+three comparators, so §L previewed the gate rather than being blind to it.
+Whether the engine computes any of them through this fork was still not
+checked in this repo.
 """
 import csv
 import importlib.util
@@ -1230,24 +1239,55 @@ def test_the_docstrings_first_paragraph_survives_the_dictionary_cut():
     assert "Chandelier" in cut and "ATR" in cut
 
 
-def test_the_receipt_says_gate_e_is_pending():
-    """⚠ Expected to be REPLACED by the receipt session, not to keep
-    passing: the launcher runs Gate E after this session and a later
-    session writes the measured numbers in."""
+def test_the_receipt_carries_the_measured_gate_e_numbers():
+    """The receipt is the deliverable issue #122 asks for, and the Gate E
+    run of 2026-11-16 has to live in it rather than only in the ledger."""
     doc = (ROOT / "docs" / "JChandelierDistMeasured.md").read_text(
         encoding="utf-8")
-    assert "Gate E: pending, run by issue-solver after this session" in doc
-    assert "0.8606" in doc            # the SCREEN's figure, on the prototype
+    assert "Gate E: measured 2026-11-16 by issue-solver" in doc
+    assert "0.860867110309758" in doc         # the PORT's pooled max
+    assert "0.87595405414863" in doc          # its per-frame max median
     assert "Range_Pos_20" in doc
     assert "DISCLOSE_GAP" in doc
+    assert "r3-perframe-0.90" in doc
+    assert "is122-j_chandelier_dist-976ee44b" in doc
+    assert "0.8606" in doc              # the SCREEN's figure, still quoted
+    # the "pending" wording this test replaced must be gone as a claim
+    assert "Gate E: pending, run by issue-solver" not in doc
 
 
-def test_no_gate_e_row_is_recorded_yet():
-    """The receipt session's cue. `tests/test_gate_e_ledger.py` fails on a
-    local run until the row exists -- that is the owed-measurement state
-    CLAUDE.md describes, not a defect in this port."""
+def test_the_gate_e_row_is_recorded_and_says_disclose_gap():
+    """The receipt session's own cue: the row exists, names the one shipped
+    column, and carries the verdict the `r3-perframe-0.90` bands give.
+
+    Pins the run id as well as the arithmetic. This port's figures agree
+    with the screen's PROTOTYPE to three digits (§E3), and an expected
+    agreement is the easiest kind of row to copy over by mistake, so the
+    row has to be THIS run's."""
     path = ROOT / "docs" / "gate_e_ledger.csv"
     with path.open(newline="", encoding="utf-8") as handle:
         rows = [r for r in csv.DictReader(handle)
                 if r["indicator"] == "j_chandelier_dist"]
-    assert rows == []
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["column"] == COLUMN
+    assert row["module"] == "pandas_ta.trend.j_chandelier_dist"
+    assert row["verdict"] == "DISCLOSE_GAP"
+    # the band: 0.80 <= pooled < 0.90, and no top-5 per-frame MEDIAN at 0.90
+    assert 0.80 <= float(row["max_abs_rho"]) < 0.90
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+    assert row["against"] == "Range_Pos_20"
+    assert row["run"] == "is122-j_chandelier_dist-976ee44b"
+    assert row["measured"] == "2026-11-16"
+    assert row["waiver"] == ""                   # only STRUCK needs one
+
+
+def test_gate_cs_real_data_limb_is_in_the_receipt():
+    """Gate C's real-data counts come from the same run, and the receipt
+    has to state them: a reachability claim measured only on synthetic
+    frames is the defect CLAUDE.md names."""
+    doc = (ROOT / "docs" / "JChandelierDistMeasured.md").read_text(
+        encoding="utf-8")
+    assert "396,891" in doc       # non-NaN, and non-zero, of 398,849
+    assert "398,849" in doc
+    assert "the real-data limb is OWED" not in doc
