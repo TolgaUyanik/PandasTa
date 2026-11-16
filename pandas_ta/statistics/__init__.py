@@ -27,6 +27,8 @@ from .stdev import stdev
 from .tf_autocorr_1e_60 import tf_autocorr_1e_60
 from .tf_centroid_20 import tf_centroid_20
 from .tf_dfa_100 import tf_dfa_100
+from .tf_higuchi_30 import tf_higuchi_30
+from .tf_iqr_ret_60 import tf_iqr_ret_60
 from .tf_spec_entropy_64 import tf_spec_entropy_64
 from .tf_zero_cross_20 import tf_zero_cross_20
 from .ts_above_mean_20 import ts_above_mean_20
