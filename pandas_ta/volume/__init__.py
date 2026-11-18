@@ -39,6 +39,7 @@ from .vol_delta import vol_delta
 from .vol_sign_rev import vol_sign_rev
 from .volcv import volcv
 from .vp import vp
+from .vpci import vpci
 from .vsumd import vsumd
 from .weis_wave import weis_wave
 from .up_and_down_volume import up_and_down_volume
