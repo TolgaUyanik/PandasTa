@@ -84,5 +84,6 @@ from .wavetrend import wavetrend
 from .willr import willr
 from .pzo import pzo
 from .szo import szo
+from .tao import tao
 from .wpo import wpo
 from .stc_tv import stc_tv
