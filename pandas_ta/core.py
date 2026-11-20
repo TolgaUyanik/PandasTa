@@ -3085,6 +3085,13 @@ class AnalysisIndicators(BasePandasObject):
         result = rvi(high=high, low=low, close=close, length=length, scalar=scalar, refined=refined, thirds=thirds, mamode=mamode, drift=drift, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def inrange_count(self, length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        result = inrange_count(high=high, low=low, length=length,
+                               offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def sk_fcb_width(self, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
