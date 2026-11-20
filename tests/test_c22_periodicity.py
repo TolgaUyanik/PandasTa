@@ -80,21 +80,25 @@ order of how much it would hurt to lose:
    empties 100; and a window whose sums of squares overflow while the
    returns stay finite empties 100 -- without that last guard those bars
    read the SENTINEL 0, which is a value and not a blank.
-9. **Gate E is OWED AGAIN.** It was measured on 2026-11-20 and that run is
-   WITHDRAWN: the autocorrelation's divisor was corrected the same day
-   (item 1b), so the run's module sha1, output fingerprint and counts belong
-   to a column this tree no longer computes. The ledger row was removed,
-   `test_the_gate_e_row_is_owed` asserts there is none, and
-   `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-   fails until the launcher re-runs Gate E and a receipt session records the
-   new row. That failure is expected.
-   ⚠ The 2026-10-24 screen's figure (max |rho| 0.0413 vs `cdl_doji`, SHIP)
+9. **Gate E: SHIP, measured 2026-11-20** on the fixed column (run
+   `is126-c22_periodicity-3a893c7c`, 89 ALTPORT-1 BIST frames, 687
+   comparators). Pooled max |rho| 0.0414 vs `cdl_doji` (n = 389,949), top-5
+   per-frame max median 0.0943 vs `EMA_200`, 0 of 89 frames at 0.90. Both an
+   order of magnitude under the 0.76 ship line, so nothing is removed and no
+   waiver is needed; the tests pin the ledger row's identity and the BANDS
+   (< 0.76, < 0.90) rather than the digits. The earlier run of the same day,
+   on the PRE-FIX divisor (item 1b), had its ledger row removed and survives
+   in receipt §E2 as a comparison.
+   ⚠ The 2026-10-24 screen's figure (max |rho| 0.0413 vs the same `cdl_doji`)
    was measured on the PROTOTYPE, which is the GPL-3.0 reference's column,
    and this port is NOT bit-identical to it: 8,387 of 8,400 sampled windows
-   equal, Spearman +0.9993. So that figure is an expectation, not a result.
-10. **Gate C's real-data limb is owed too** -- every count in this file is
-    synthetic. The receipt says so in §C4, keeps the withdrawn run's figures
-    labelled as the pre-fix column's, and a test checks that it does.
+   equal, Spearman +0.9993. The two agreeing to three decimals is a result,
+   not a tautology.
+10. **Gate C's real-data limb, from the same run**: 389,949 of 398,849 pooled
+    bars non-NaN -- exactly 89 frames x the 100-bar warm-up, so no BIST bar
+    was lost to item 7's floor -- and 23 of those read the sentinel (0.0059%,
+    rarer than on any synthetic frame here). Every OTHER count in this file
+    is synthetic.
 
 Not pinned on purpose: exact counts of distinct values, exact bars-moved
 counts under an inexact rescale, and any rho to 1e-6. Those move with
@@ -891,8 +895,8 @@ def test_a_tick_rounded_penny_frame_still_fires_everywhere():
     exactly 0.00% and the column still fires on all 1,400 bars with the same
     shape as the unrounded walk (median 5 on both). Gate E answered the other
     half: the port's top real comparators ARE the rounding tells the issue
-    named -- `cdl_doji` 0.0415 and `BODY_PCT` 0.0392 pooled, price levels
-    leading the per-frame medians at 0.0950 -- at a tenth of the strike
+    named -- `cdl_doji` 0.0414 and `BODY_PCT` 0.0391 pooled, price levels
+    leading the per-frame medians at 0.0943 -- at a tenth of the strike
     line (receipt §E1)."""
     f = FRAMES["penny"]
     r = np.asarray(f, float)
@@ -1253,40 +1257,75 @@ def test_the_dictionary_row_describes_this_column():
     assert "c22_periodicity" in text
 
 
-# ------------------------------------------------------- Gate E, owed again
+# -------------------------------------------------------- Gate E, measured
 RECEIPT = ROOT / "docs" / "C22PeriodicityMeasured.md"
 
 
-def test_the_receipt_says_gate_e_is_pending():
-    """Gate E was measured on 2026-11-20 and that measurement is WITHDRAWN:
-    the autocorrelation's divisor was corrected the same day (review round 1
-    -- it divided by the residual's own sum of squares, which is not the line
-    either source spells), so the run's module sha1, output fingerprint and
-    counts belong to a column this tree no longer computes. The receipt must
-    say PENDING and keep the withdrawn digits labelled as the pre-fix
-    column's, rather than carry a number measured on something else."""
+def test_the_receipt_carries_the_measured_gate_e_numbers():
+    """The receipt is the deliverable the issue asks for, so the run of
+    2026-11-20 on the FIXED column has to live in it and not only in the
+    ledger: the pooled max, the comparator, the sample size, the per-frame
+    max median with ITS comparator, and the run id.
+
+    The PROTOTYPE's 0.0413 stays in the document too, in §E2, because the gap
+    between the runs is the point of §P1 -- but it may no longer be the only
+    Gate E figure here, which is what the `not in` limb pins. The pre-fix
+    run's digits (0.041467..., 0.09503...) must be gone from §E1 and §C4 and
+    appear only in §E2's comparison, which is why the pending line is pinned
+    absent."""
     text = RECEIPT.read_text(encoding="utf-8")
-    assert "Gate E: pending, run by issue-solver after this session" in text
-    assert "withdrawn" in text.lower()
-    assert "0.0413" in text and "cdl_doji" in text  # the PROTOTYPE figure
-    assert "prototype" in text.lower()
+    assert "Gate E: measured 2026-11-20 by issue-solver" in text
+    assert "0.041372447379077" in text          # the PORT's pooled max
+    assert "0.09428399222114192" in text        # its per-frame max median
+    assert "cdl_doji" in text and "EMA_200" in text
+    assert "is126-c22_periodicity-3a893c7c" in text
+    assert "r3-perframe-0.90" in text
+    assert "0.0413" in text and "prototype" in text.lower()
+    assert "Gate E: pending, run by issue-solver" not in text
 
 
-def test_the_gate_e_row_is_owed():
-    """The ledger has no row for this column, and
-    `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-    fails until the receipt session records one. That failure is expected and
-    this test is its mirror: if a row appears, this test fails and the two
-    pending-Gate-E tests here must be swapped for ones that pin the row.
+def test_the_gate_e_row_is_recorded_and_says_ship():
+    """The ledger carries exactly one row, for the one shipped column, and it
+    says what the `r3-perframe-0.90` bands give: SHIP removes nothing and
+    needs no waiver.
 
-    The 2026-11-20 row was recorded and then REMOVED: its run measured the
-    pre-fix autocorrelation (see the test above), and a row whose module sha1
-    has moved is a measurement that is owed, not a measurement."""
+    The run id is pinned beside the arithmetic, and it is the SECOND run of
+    2026-11-20 -- the first measured the pre-fix divisor and its row was
+    removed. This port's pooled figure agrees with the 2026-10-24 screen
+    PROTOTYPE's to three decimals (§E2), and an expected agreement is the
+    easiest kind of row to copy in from the wrong run by mistake."""
     path = ROOT / "docs" / "gate_e_ledger.csv"
     with path.open(newline="", encoding="utf-8") as fh:
         rows = [r for r in csv.DictReader(fh)
-                if r.get("indicator") == "c22_periodicity"]
-    assert rows == [], rows
+                if r["indicator"] == "c22_periodicity"]
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["column"] == f"C22PERIODICITY_{LENGTH}"
+    assert row["module"] == "pandas_ta.statistics.c22_periodicity"
+    assert row["verdict"] == "SHIP"
+    # the band: pooled < 0.76 and no top-5 per-frame MEDIAN at 0.90
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+    assert row["against"] == "cdl_doji"
+    assert row["run"] == "is126-c22_periodicity-3a893c7c"
+    assert row["measured"] == "2026-11-20"
+    assert row["waiver"] == ""                  # only STRUCK needs one
+
+
+def test_the_gate_e_row_states_the_sentinel_gap():
+    """0 is a legal reading of this column, not only a blank, so the row's
+    two counts must differ -- 389,949 non-NaN and 389,926 non-zero. The
+    sibling `c22_ami_timescale`, whose scale starts at 2, has them equal.
+    This is the one ledger field that would silently agree with a column
+    whose sentinel never fired."""
+    path = ROOT / "docs" / "gate_e_ledger.csv"
+    with path.open(newline="", encoding="utf-8") as fh:
+        row = [r for r in csv.DictReader(fh)
+               if r["indicator"] == "c22_periodicity"][0]
+    non_nan, non_zero = int(row["non_nan"]), int(row["non_zero"])
+    assert non_nan == 389949
+    assert non_zero == 389926
+    assert 0 < non_nan - non_zero < non_nan / 1000
 
 
 def test_the_receipt_discloses_the_gap_to_the_reference():
@@ -1299,14 +1338,15 @@ def test_the_receipt_discloses_the_gap_to_the_reference():
     assert "0.9993" in text
 
 
-def test_gate_cs_real_data_limb_is_owed_in_the_receipt():
-    """Every count in this file is synthetic. The receipt says the real-data
-    limb comes from the launcher's Gate E run, and names the two counts it
-    owes. The 2026-11-20 figures (389,949 non-NaN, 389,928 non-zero of
-    398,849) are kept as the PRE-FIX column's and marked as such."""
+def test_gate_cs_real_data_limb_is_in_the_receipt():
+    """Every count measured in THIS file is synthetic, which is the defect
+    CLAUDE.md names, so Gate C's real-data limb has to be stated in the
+    receipt: 389,949 of 398,849 pooled BIST bars non-NaN -- exactly 89 frames
+    x the 100-bar warm-up blank, so nothing on BIST was lost to the noise
+    floor of §G -- and 23 of those reading the sentinel."""
     text = RECEIPT.read_text(encoding="utf-8")
-    assert "owed" in text.lower()
-    assert "398,849" in text
+    assert "389,949" in text and "389,926" in text and "398,849" in text
+    assert "### C4. Real data — **OWED**" not in text
 
 
 def test_the_owed_rule_for_the_nearest_catch22_relatives():

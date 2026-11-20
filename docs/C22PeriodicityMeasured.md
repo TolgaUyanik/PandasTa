@@ -12,32 +12,34 @@ mean(y(1:N-i).*y(i+1:N))` and catch22's C reference divides by
 `size - tau`, both on a series catch22 z-scores BEFORE the detrend. The
 shipped reading is now that one (§A5), it agrees with the reference
 implementation on 2,798 of 2,802 windows where the old one agreed on 2,794
-(§P1b), and **the Gate E run of 2026-11-20 is withdrawn with the old
-column** (§E).
+(§P1b), and **Gate E was re-run on the fixed column** — SHIP, pooled
+max |ρ| 0.0414 vs `cdl_doji`, run `is126-c22_periodicity-3a893c7c` of
+2026-11-20 (§E). The first run, on the pre-fix column, is kept in §E2 as
+the comparison it now is.
 
 | | |
 |---|---|
 | module | `pandas_ta/statistics/c22_periodicity.py` |
 | column | `C22PERIODICITY_100` (`ORD`, a whole number in `{0} ∪ {2 .. 33}`) |
 | source | catch22 (Lubba et al. 2019, *Data Min. Knowl. Disc.* 33:1821), feature `PD_PeriodicityWang_th0_01` — the hctsa operation `PD_PeriodicityWang` at threshold 0.01, whose own source is Wang, Wirth and Wang, *Seventh IEEE ICDM* 351–360 (2007); reference code pycatch22 1.x, **GPL-3.0** — ported from the definitions |
-| tests | `tests/test_c22_periodicity.py` (268 tests) |
+| tests | `tests/test_c22_periodicity.py` (269 tests) |
 | harness | `docs/measure_c22_periodicity.py` (sections S, A–E, G, H, P, T, Z; **P is opt-in** and is the only one that imports the GPL-3.0 reference), `docs/measure_c22_periodicity_cpu.py` |
 | Gate A | correct against an exact rational oracle, two other spellings of the same fit and one independent B-spline implementation, 0 disagreements; the detrend's knot structure and the autocorrelation's divisor decided by measurement against the source line — §A |
 | Gate B | causal; 0 of 35 offsets leak on six frames × eight splices, and at three lengths; seven mutants — §B |
-| Gate C | fires on every bar with a full window on all six synthetic frames (11–31 distinct values on five of them, the cosine frame constant at 20 by construction, §A3); whole DETERMINISTIC frames blank by the floor (§C3, §G); the real-data limb is **OWED** with Gate E — §C |
+| Gate C | fires on every bar with a full window on all six synthetic frames (11–31 distinct values on five of them, the cosine frame constant at 20 by construction, §A3); whole DETERMINISTIC frames blank by the floor (§C3, §G); on real data **389,949 of 398,849** pooled BIST bars non-NaN and **389,926** of those non-zero — §C |
 | Gate D | ×8/×64/2^±40 bit-identical; `0 < fires < n`; not constant on five of six frames — §D |
-| Gate E | **pending, run by issue-solver after this session.** The 2026-11-20 run is withdrawn: it measured the pre-fix autocorrelation — §E |
-| Gate F | PandasTa green (268 module tests; full suite below); Backtesting's suite **pending, run by issue-solver** — §F |
+| Gate E | **SHIP** — pooled max \|ρ\| **0.0414** vs `cdl_doji` (n = 389,949), top-5 per-frame max median **0.0943** vs `EMA_200`, 0 of 89 frames ≥ 0.90; run `is126-c22_periodicity-3a893c7c`, measured 2026-11-20 — §E |
+| Gate F | PandasTa green (269 module tests; full suite below); Backtesting's suite **pending, run by issue-solver** — §F |
 
 Every number below was produced by `python docs/measure_c22_periodicity.py`
 on this machine (numpy 1.26.4, pandas 2.3.3, Python 3.11) and re-run after
 the divisor fix, with four exceptions: the §F suite counts
 (`python -m pytest -q`), §F1's no-AVX column
-(`docs/measure_c22_periodicity_cpu.py`), the 2026-10-24 screen figures,
-which are the owner's PROTOTYPE measurements, and the withdrawn Gate E run's
-figures in §E1, §E2 and §C4, which were measured by the launcher on the
-PRE-FIX column. The last two kinds are labelled wherever they appear and are
-expectations, not results for the shipped column.
+(`docs/measure_c22_periodicity_cpu.py`), the Gate E figures of §E1, §E2 and
+§C4, which the launcher measured on the 89 BIST frames, and the 2026-10-24
+screen figures, which are the owner's PROTOTYPE measurements. The screen's
+figures, and the pre-fix run's in §E2, are labelled wherever they appear:
+they are comparisons, not results for the shipped column.
 
 ---
 
@@ -401,14 +403,12 @@ A fifth of the returns being exactly 0.00% does not blank a window and does
 not move the column's shape: same median, same order of distinct values, all
 1,400 bars fired.
 
-⚠ What this does NOT settle is Gate E's question, which is **owed again**:
-the run of 2026-11-20 answered it for the PRE-FIX column and is withdrawn
-with it (§E). What that run found, on a column that agreed with this one on
-2,796 of 2,802 sampled windows, was the issue's tell PRESENT and tiny:
-`cdl_doji` leading pooled at 0.0415, two price levels at 0.0392, price
-levels taking the top three per-frame medians with `EMA_200` largest at
-0.0950, no volume column in the pooled top 25 and `mcgd` ninth at 0.0314.
-That is an EXPECTATION for the re-run, not a result for this column.
+What this does not settle by itself is Gate E's question, and the run of
+2026-11-20 on the shipped column answers it: the issue's tell is PRESENT and
+tiny — `cdl_doji` leading pooled at 0.0414, `ROLLING_LOW_250` and `BODY_PCT`
+next at 0.0392 each, price levels taking the top three per-frame medians with `EMA_200` largest at
+0.0943, no volume column in the pooled top 25 and `mcgd` ninth at 0.0313
+(§E1).
 
 ### C3. What the one blanking rule costs
 
@@ -425,30 +425,25 @@ deviations from its mean — measured on **9,800 rows** (the six frames plus
 the cubic one), **0** break it. A residual above the floor therefore implies
 a window above it.
 
-### C4. Real data — **OWED**
+### C4. Real data — measured by the launcher's Gate E run
 
-Everything in this receipt is measured on SYNTHETIC frames. The two counts
-this section needs — how many of the 89 frozen ALTPORT-1 BIST frames'
-**398,849** pooled bars are non-NaN, and how many of those are non-zero —
-come from the launcher's Gate E run, which is **owed again** (§E) because the
-2026-11-20 run measured the pre-fix autocorrelation.
+Every OTHER count in this receipt is measured on SYNTHETIC frames. The two
+counts this section needs come from the Gate E run of 2026-11-20
+(`is126-c22_periodicity-3a893c7c`, §E) over the 89 frozen ALTPORT-1 BIST
+frames and their **398,849** pooled bars:
 
-What that withdrawn run found, on a column that agrees with this one on
-2,796 of 2,802 sampled windows, is kept here as the EXPECTATION for the
-re-run and labelled as the pre-fix column's:
-
-| count (**PRE-FIX column, withdrawn**) | value | share |
+| count | value | share |
 |---|---|---|
 | `C22PERIODICITY_100` non-NaN | 389,949 of 398,849 | 97.77% |
-| of those, non-zero | 389,928 of 389,949 | 99.995% |
-| the sentinel 0 | 21 of 389,949 | 0.0054% |
+| of those, non-zero | 389,926 of 389,949 | 99.994% |
+| the sentinel 0 | 23 of 389,949 | 0.0059% |
 
-The blank 8,900 bars were the warm-up — 89 frames × 100 bars, exactly the
-`length` returns the window needs — so on that column no BIST frame lost a
-bar to the noise floor of §G or to the bad-data guards of §H, and the
-sentinel was rarer on BIST (0.0054%) than on any synthetic frame here (0.0%
-to 0.7%, §C1). Whether both still hold for the shipped column is what the
-re-run settles.
+The blank 8,900 bars are the warm-up — 89 frames × 100 bars, exactly the
+`length` returns the window needs — so **no BIST frame lost a bar** to the
+noise floor of §G or to the bad-data guards of §H, and the sentinel is rarer
+on BIST (0.0059%) than on any synthetic frame here (0.0% to 0.7%, §C1). The
+pre-fix column read 389,928 non-zero and 21 sentinels on the same universe,
+so the divisor fix moved the sentinel count by 2 bars in 389,949.
 
 ## D. Gate D — scale-free
 
@@ -506,88 +501,87 @@ tick-rounded frame's 2.63e-05, is the deciding margin of one of the four
 windows where this port and the reference disagree (§P1b) — a marginal
 window, which is a different claim from a precision problem.
 
-## E. Gate E — **pending**
+## E. Gate E — **SHIP**
 
-**Gate E: pending, run by issue-solver after this session.**
-
-It was run once, on 2026-11-20, and that run is **WITHDRAWN**: review round 1
-corrected the autocorrelation's divisor (§A5), so the run's module sha1
-(`cea7fab8e7f28c910006a5ced3e126a48c042f5e`), tree sha1
-(`e9379ea2d992902cee5ee7bf649094b292e2a8e0`) and output fingerprint
-(`500;2758.0;16516.0;1000142.0`) all belong to a column this tree no longer
-computes. Its ledger row was recorded and has been **removed** —
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails until the launcher re-runs Gate E and a receipt session records the new
-row, and that failure is expected (`GATE_E_PENDING_OK=1` makes it a "Gate E
-owed" skip on the way to `dev`).
+**Gate E: measured 2026-11-20 by issue-solver**, run
+`is126-c22_periodicity-3a893c7c`, canary bit-equal
+(AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS), module sha1
+`ede9ad6132c3a1a5e6ac6bde0666f2ba5b95ec2b`, tree sha1
+`fde30eba77fc376ed5055076695b19b1f05d4283`, output fingerprint
+`500;2759.0;16525.0;1000278.0`. Recorded in `docs/gate_e_ledger.csv`.
 
 | | |
 |---|---|
-| universe (unchanged) | the 89 frozen ALTPORT-1 BIST frames, **398,849** pooled bars |
-| comparators (unchanged) | **687** — 329 `compute_all` and 358 `ml_features` manifest `1d`; 1 dropped as degenerate (`squeeze_SQZ_NO`, constant) |
+| universe | the 89 frozen ALTPORT-1 BIST frames, **398,849** pooled bars |
+| comparators | **687** — 329 `compute_all` and 358 `ml_features` manifest `1d`; 1 dropped as degenerate (`squeeze_SQZ_NO`, constant) |
 | parameters | defaults (`kwargs` empty, so `length` 100) |
 | bands | `r3-perframe-0.90` — STRUCK at pooled \|ρ\| ≥ 0.90 or a top-5 comparator's per-frame median ≥ 0.90, DISCLOSE from 0.76, SHIP below |
 
-### E1. What the WITHDRAWN run found, as the expectation for the re-run
+An earlier run of the same day, `is126-c22_periodicity-c73140e9`, measured
+the PRE-FIX column (module sha1
+`cea7fab8e7f28c910006a5ced3e126a48c042f5e`, fingerprint
+`500;2758.0;16516.0;1000142.0`); review round 1 corrected the
+autocorrelation's divisor (§A5), its ledger row was removed, and it survives
+in §E2 as a comparison only.
 
-⚠ Every figure in this subsection was measured on the PRE-FIX column
-(run `is126-c22_periodicity-c73140e9`, canary bit-equal, 2026-11-20). That
-column agrees with the shipped one on 2,796 of 2,802 sampled windows (§A5),
-so these are a well-founded EXPECTATION and not a result for
-`C22PERIODICITY_100` as it now stands.
+### E1. The measured figure
 
-| column (**PRE-FIX, withdrawn**) | max \|ρ\| | against | set | n | per-frame max median | its comparator | frames ≥ 0.90 | verdict |
+| column | max \|ρ\| | against | set | n | per-frame max median | its comparator | frames ≥ 0.90 | verdict |
 |---|---|---|---|---|---|---|---|---|
-| `C22PERIODICITY_100` | 0.041467817149024776 | `cdl_doji` | `compute_all` | 389,949 | 0.09503141020334058 | `EMA_200` | 0 of 89 | SHIP |
+| `C22PERIODICITY_100` | 0.041372447379077 | `cdl_doji` | `compute_all` | 389,949 | 0.09428399222114192 | `EMA_200` | 0 of 89 | **SHIP** |
 
-The strongest manifest comparator was weaker than the strongest
-`compute_all` one: max |ρ| 0.0239 vs `pdist_pct` (n = 389,949). The pooled
-top three and the five comparators that run carried to the per-frame stage:
+The strongest manifest comparator is weaker than the strongest `compute_all`
+one: max |ρ| 0.0240 vs `pdist_pct` (n = 389,949). The pooled top five, which
+are also the five that carried to the per-frame stage:
 
-| comparator | pooled \|ρ\| | n | per-frame median | per-frame max cell |
+| comparator | pooled ρ | n | per-frame median | per-frame max cell |
 |---|---|---|---|---|
-| `cdl_doji` | 0.0415 | 389,949 | 0.0365 | 0.1937 |
-| `BODY_PCT` | 0.0392 | 388,703 | 0.0396 | 0.1727 |
-| `ROLLING_LOW_250` | 0.0392 | 376,599 | 0.0797 | 0.3851 |
-| `ROLLING_HIGH_250` | 0.0372 | 376,599 | 0.0926 | 0.4216 |
-| `EMA_200` | 0.0364 | 381,138 | 0.0950 | 0.4335 |
+| `cdl_doji` | **+0.0414** | 389,949 | 0.0347 | 0.1947 |
+| `ROLLING_LOW_250` | −0.0392 | 376,599 | 0.0796 | 0.3851 |
+| `BODY_PCT` | −0.0391 | 388,703 | 0.0409 | 0.1723 |
+| `ROLLING_HIGH_250` | −0.0371 | 376,599 | 0.0926 | 0.4216 |
+| `EMA_200` | −0.0364 | 381,138 | **0.0943** | 0.4335 |
 
-Read with §C2: the two comparators that led pooled are the SAME tell —
-`cdl_doji` flags a zero body and `BODY_PCT` is the body's share of the bar's
-range, so both read how small the body is, which on a low-priced BIST stock
-is tick rounding — and the price levels the issue named led the per-frame
-medians. The ranking was therefore the shape the issue warned about, and the
-magnitude is what decided it: 0.0950 against a 0.90 strike and a 0.76
-disclose line. The largest single per-frame CELL over the five was 0.4335,
-on one frame of 89, and 0 of 89 frames reached 0.90 against any of them.
-`mcgd` — the issue's other named tell — was ninth at 0.0314, and no volume
-column appeared in the pooled top 25.
+Read with §C2: the tell the issue named is there and is tiny. `cdl_doji`
+flags a zero body and `BODY_PCT` is the body's share of the bar's range, so
+those two read how small the body is, which on a low-priced BIST stock is
+tick rounding; `ROLLING_LOW_250`, `ROLLING_HIGH_250` and `EMA_200` are price
+LEVELS and they take the top three per-frame medians. The ranking is
+therefore the shape the issue warned about, and the magnitude is what
+decides it: 0.0943 against a 0.90 strike and a 0.76 disclose line. The
+largest single per-frame CELL over the five is 0.4335, on one frame of 89,
+and **0 of 89** frames reach 0.90 against any of them. `mcgd` — the issue's
+other named tell — is ninth at 0.0313, and no volume column appears in the
+pooled top 25 (the whole 25 are in the run's `top25.csv`; the smallest of
+them is 0.0303).
 
-⚠ **This is existence, not evidence**, and now also an expectation rather
-than a measurement. A pooled 0.04 says the column is not a restatement of
-anything the engine already computes; it says nothing about whether it
-predicts a BIST return. Nothing in this repository tests that.
+⚠ **This is existence, not evidence.** A pooled 0.04 says the column is not a
+restatement of anything the engine already computes; it says nothing about
+whether it predicts a BIST return. Nothing in this repository tests that.
 
-### E2. The withdrawn figure against the screen PROTOTYPE's
+### E2. The shipped figure against the PRE-FIX run's and the screen PROTOTYPE's
 
 | | pooled max \|ρ\| | against | n | top-5 per-frame max median |
 |---|---|---|---|---|
-| the PRE-FIX port, 2026-11-20 (withdrawn) | 0.0415 | `cdl_doji` | 389,949 | 0.0950 (`EMA_200`) |
+| **the SHIPPED port, 2026-11-20** | 0.041372 | `cdl_doji` | 389,949 | 0.0943 (`EMA_200`) |
+| the PRE-FIX port, same day (row removed) | 0.041468 | `cdl_doji` | 389,949 | 0.0950 (`EMA_200`) |
 | the 2026-10-24 PROTOTYPE | 0.0413 | `cdl_doji` | 389,949 | 0.0941 |
 
 The prototype IS the GPL-3.0 reference's column, and the SHIPPED port is
 **not bit-identical to it**: 8,387 of 8,400 sampled windows read the same
 value, Spearman +0.9993 (§P1) — closer than the pre-fix column's 8,376 and
-+0.9980, which is the measurement that decided the fix. The two runs above
-agreeing to three decimals on the same top comparator is a RESULT and not a
-tautology. The prototype's next two, `ROLLING_LOW_250` 0.0392 and
-`BODY_PCT` 0.0391, were the withdrawn run's third and second at 0.0392 each:
-the pair swapped order inside a gap of 1e-4.
++0.9980, which is the measurement that decided the fix. The shipped run sits
+between the other two on both figures and nearer the prototype than the
+pre-fix run was: three runs of three slightly different columns agreeing to
+three decimals on the same top comparator is a RESULT and not a tautology.
+The prototype's next two, `ROLLING_LOW_250` 0.0392 and `BODY_PCT` 0.0391, are
+the shipped run's second and third at 0.0392 each, in the prototype's order —
+the pre-fix run had that pair the other way round, inside a gap of 1e-4.
 
 The owner's stage-2 fork overlap (12 frames, scale-free `Category` outputs at
 defaults, NOT Gate E) put the prototype at max |ρ| 0.0834 vs
-`ht_dcperiod:HT_DCPERIOD`, per-frame max median 0.0879. `HT_DCPERIOD` was not
-in the withdrawn run's top 25.
+`ht_dcperiod:HT_DCPERIOD`, per-frame max median 0.0879. `HT_DCPERIOD` is not
+in the shipped run's top 25, whose smallest entry is 0.0303.
 
 ### E3. In-fork overlap, measured here (6 synthetic frames, 1,500 bars each)
 
@@ -654,22 +648,25 @@ waived. A test asserts this receipt keeps naming both issues.
 
 | run | result |
 |---|---|
-| `python -m pytest tests/test_c22_periodicity.py -q` | **261 passed** at the port's final state, **262 passed** in the receipt session, **268 passed** after the divisor fix of 2026-11-20 |
-| the same module under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_c22_periodicity_cpu.py`, which refuses to run if the environment edit did not take) | **261 passed**, **262 passed** in the receipt session, **268 passed** after the divisor fix |
+| `python -m pytest tests/test_c22_periodicity.py -q` | **261 passed** at the port's final state, **262 passed** in the first receipt session, **268 passed** after the divisor fix of 2026-11-20, **269 passed** in this receipt session (the two pending-Gate-E tests swapped for three that pin the recorded row) |
+| the same module under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_c22_periodicity_cpu.py`, which refuses to run if the environment edit did not take) | **261 passed**, **262 passed**, **268 passed** after the divisor fix, **269 passed** in this receipt session |
 | `python docs/measure_c22_periodicity_cpu.py A C D` and `… G` — sections A, C, D and G re-measured under the same disabled dispatch | ran clean; what moved is in §F1 |
 | `python -m pytest -q` (full suite), at the port's first complete state | **2 failed, 13,219 passed, 86 skipped** |
 | the same after review round 1 added three tests | **3 failed, 13,222 passed, 86 skipped** |
 | `python -m pytest tests/test_pine_coverage_csv.py -q` after fixing that third failure | **38 passed, 1 skipped** |
 | `python -m pytest -q` again, on the final tree (9 min 18 s) | **2 failed, 13,223 passed, 86 skipped** |
 | `python -m pytest -q --tb=no -p no:warnings -rf` on the committed tree, after the divisor fix (8 min 36 s) | **2 failed, 13,230 passed, 86 skipped** — the failures named by `-rf` being exactly the two expected ones below |
+| the same command in this receipt session, with the ledger row recorded (8 min 41 s) | **1 failed, 13,239 passed, 86 skipped** — `-rf` naming only `test_regenerating_reproduces_the_committed_rows`, the sibling-checkout one; the Gate E ledger failure is gone because the measurement is no longer owed |
 
-The two expected failures are
+The two expected failures of those runs were
 `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
 (needs the sibling `../AlternativeRepos` checkout; CI deselects it by name)
 and
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-reporting exactly `['c22_periodicity']` — the owed measurement of §E, which
-CI into `dev` reports as "Gate E owed" rather than a failure.
+reporting exactly `['c22_periodicity']` — the measurement of §E, which was
+owed until the launcher ran it. With the row recorded, **only the first
+remains**: see the last row of the table above, measured in this receipt
+session.
 
 ⚠ The **third** failure in the second run was this port's own, and it is worth
 recording rather than hiding: `01-c22-periodicity.md` quotes a reviewer
@@ -944,11 +941,11 @@ see it (neither does this port, §A4).
 So where a window is flat, geometric or a disguised spline, this port blanks
 and the reference returns a number. That is why §C4's real-data limb has to
 come from the port's own Gate E run rather than be inferred from the screen.
-On the PRE-FIX column that run said the difference costs nothing on BIST —
-389,949 of 398,849 bars non-NaN, the warm-up and not one bar more — so no
-BIST window in the 89 frames was flat, geometric or a disguised spline over
-all 100 returns. The blanking rule did not change with the divisor (§A5
-touches the autocorrelation only), so the re-run is expected to repeat it.
+That run says the difference costs nothing on BIST — 389,949 of 398,849 bars
+non-NaN, the warm-up and not one bar more — so no BIST window in the 89
+frames was flat, geometric or a disguised spline over all 100 returns. The
+pre-fix run read the same 389,949, as expected: §A5 touched the
+autocorrelation only, not the blanking rule.
 
 ## T. Chunking and cost
 
@@ -965,8 +962,9 @@ a band because it does not reproduce.
    `{0} ∪ {2 .. 33}`, tied on roughly nine bars in ten. Feed it as an
    ordinal or one-hot.
 2. **0 is a SENTINEL and the FLOOR** — "no peak passed Wang's three
-   conditions" — and it is RARE (0.0% to 0.7% of fired bars here), so a
-   consumer cannot learn its meaning from the data.
+   conditions" — and it is RARE (0.0% to 0.7% of fired bars on the synthetic
+   frames, 0.0059% of 389,949 BIST bars, §C4), so a consumer cannot learn its
+   meaning from the data.
 3. **A cycle longer than a third of the window is invisible**: the
    autocorrelations stop at `ceil(length / 3)`, so at the default the
    reportable range ends at 33 and an exact 40-bar cosine reads 0 (§A3).
@@ -989,10 +987,10 @@ a band because it does not reproduce.
 8. **This port is not bit-identical to the catch22 reference**: 8,387 of
    8,400 sampled windows equal, Spearman +0.9993, worst single-window gap 23
    lags (§P1). The 2026-10-24 screen's Gate E figure was measured on the
-   reference's column, so it is an expectation and not a result (§E2).
-9. **Gate E is pending** — run by issue-solver after this session; the
-   2026-11-20 run measured the pre-fix column and is withdrawn (§E). There is
-   therefore **no real BIST measurement of the shipped column in this
-   receipt**: everything here is synthetic, the withdrawn run's figures are
-   labelled as expectations, and nothing anywhere tests whether the column
-   predicts a return.
+   reference's column, so the figure that counts for THIS column is the
+   port's own run, 0.041372 against the screen's 0.0413 (§E2).
+9. **Gate E says SHIP**: pooled max |ρ| 0.0414 vs `cdl_doji` over 389,949
+   BIST bars, top-5 per-frame max median 0.0943 vs `EMA_200`, 0 of 89 frames
+   at 0.90 (§E1). That is non-redundancy against the engine's 687 columns and
+   **nothing more** — every other number in this receipt is synthetic, and
+   nothing anywhere tests whether the column predicts a return.
