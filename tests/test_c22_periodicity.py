@@ -800,7 +800,7 @@ def test_a_one_bar_mutant_can_only_move_bars_from_the_cut_backwards():
     earlier for a splice at J -- which is exactly what makes it a look-ahead
     of ONE bar. Measured: where anything pre-splice moves, the first moved
     bar is J-1 every time -- 2 of 35 offsets on the walk, which is low
-    because the column ties on 88.8% of neighbouring pairs there."""
+    because the column ties on 88.7% of neighbouring pairs there."""
     fn = mutant("write-back-dated")
     f = FRAMES["walk"]
     bad = np.asarray(fn(f), float)
@@ -855,7 +855,7 @@ def test_the_chunk_wide_demean_mutant_is_near_dead_and_that_is_measured():
 def test_the_column_ties_often_enough_to_hide_a_one_bar_shift(frame):
     """Why the mutant counts above are not 35 of 35, and why prefix
     truncation would prove nothing here: neighbouring bars carry the same
-    small integer 79.3% to 100% of the time (measured)."""
+    small integer 79.4% to 100% of the time (measured)."""
     s = base(frame).dropna().to_numpy()
     assert float(np.mean(s[1:] == s[:-1])) > 0.70
 
@@ -874,7 +874,7 @@ def test_every_bar_with_a_full_window_fires(frame):
 
 @pytest.mark.parametrize("frame", STOCHASTIC)
 def test_the_column_is_not_constant_on_a_stochastic_frame(frame):
-    """11 to 30 distinct values per frame, median 5 (14 on the AR(1) path).
+    """11 to 31 distinct values per frame, median 5 (14 on the AR(1) path).
     Pinned as a band because the exact count moves with the CPU dispatch."""
     a = base(frame).dropna().to_numpy()
     assert len(set(a.tolist())) >= 8, frame

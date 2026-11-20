@@ -2,7 +2,7 @@
 
 ⚠ **This file is a HISTORICAL record of the porting session's three review
 rounds (2026-11-20). It describes the tree at commit `34536ce` and nothing
-after it.** Two later commits changed what it says:
+after it.** Four later commits changed what it says:
 
 * `c908892` recorded the Gate E run and Gate C's real-data limb and swapped
   the two pending-Gate-E tests for three that pin the row (262 tests).
@@ -14,17 +14,36 @@ after it.** Two later commits changed what it says:
   `docs/C22PeriodicityMeasured.md`: agreement with the GPL-3.0 reference
   rose from 8,376 to **8,387 of 8,400** (Spearman +0.9980 → **+0.9993**,
   24 disagreements → **13**, and 2,794 → **2,798** of the 2,802-window
-  subsample); **Gate E and Gate C's real-data limb are OWED AGAIN**, the
+  subsample); **Gate E and Gate C's real-data limb went back to OWED**, the
   ledger row having been removed because its run measured the pre-fix
-  column; the test module is **268 tests**, green here and under the CI
+  column; the test module became **268 tests**, green here and under the CI
   dispatch.
+* `6f10278` discharged that debt. The launcher re-ran Gate E on the fixed
+  column and it is **SHIP** — pooled max |ρ| **0.041372** vs `cdl_doji`
+  (n = 389,949), top-5 per-frame max median **0.09428** vs `EMA_200`, **0 of
+  89** frames ≥ 0.90 — so the ledger row was recorded again, as run
+  `is126-c22_periodicity-3a893c7c` against this module's sha1; §C4 was
+  filled at **389,949** non-NaN and **389,926** non-zero of 398,849 pooled
+  BIST bars; the two owed-Gate-E tests were swapped for three that pin the
+  recorded row; and the module is **269 tests**.
+* the PRE-PUSH gate, round 2, moved prose and the harness only, not the
+  shipped module (editing it would move the sha1 the Gate E row is recorded
+  against). Two receipt digits (`BODY_PCT` is 0.0391, not 0.0392, in both
+  places) and three test docstring figures (31 distinct values, 88.7%,
+  79.4%) were corrected against the tables re-measured after the divisor
+  fix, and §P1b gained an **eighteenth** reading: the same two pieces with
+  the single knot offset half an index, to `floor(n / 2) / (n − 1)`, which
+  scores 2,794 of 2,802 and matches **0 of 4** of the subsample
+  disagreements. Still 269 tests; the Gate E row stands.
 
-Figures below that moved with that fix — "261 tests", "99.71%", "8,376",
-"+0.9980", "fourteen alternative readings", "the biased autocorrelations" —
-are left as written, because this is the record of what those rounds
-reviewed. The Gate E and §C4 follow-ups at the bottom, which `c908892`
-discharged, are accurate again: both are owed, and the two pending-Gate-E
-tests are back.
+Figures below that moved with the divisor fix — "261 tests", "99.71%",
+"8,376", "+0.9980", "fourteen alternative readings", "the biased
+autocorrelations" — are left as written, because this is the record of what
+those rounds reviewed. The Gate E and §C4 follow-ups at the bottom, which
+`c908892` discharged and round 1 withdrew, are **discharged again** by
+`6f10278`: the ledger row is recorded, §C4 is filled, and the three
+row-pinning tests — not the two owed-Gate-E ones — are what the module
+carries.
 
 | task | status | review rounds | files touched | follow-ups |
 |---|---|---|---|---|

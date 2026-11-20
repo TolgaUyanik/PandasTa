@@ -406,7 +406,7 @@ not move the column's shape: same median, same order of distinct values, all
 What this does not settle by itself is Gate E's question, and the run of
 2026-11-20 on the shipped column answers it: the issue's tell is PRESENT and
 tiny — `cdl_doji` leading pooled at 0.0414, `ROLLING_LOW_250` and `BODY_PCT`
-next at 0.0392 each, price levels taking the top three per-frame medians with `EMA_200` largest at
+next at 0.0392 and 0.0391, price levels taking the top three per-frame medians with `EMA_200` largest at
 0.0943, no volume column in the pooled top 25 and `mcgd` ninth at 0.0313
 (§E1).
 
@@ -575,8 +575,9 @@ between the other two on both figures and nearer the prototype than the
 pre-fix run was: three runs of three slightly different columns agreeing to
 three decimals on the same top comparator is a RESULT and not a tautology.
 The prototype's next two, `ROLLING_LOW_250` 0.0392 and `BODY_PCT` 0.0391, are
-the shipped run's second and third at 0.0392 each, in the prototype's order —
-the pre-fix run had that pair the other way round, inside a gap of 1e-4.
+the shipped run's second and third at 0.0392 and 0.0391, in the prototype's
+order — the pre-fix run had that pair the other way round, inside a gap of
+1e-4.
 
 The owner's stage-2 fork overlap (12 frames, scale-free `Category` outputs at
 defaults, NOT Gate E) put the prototype at max |ρ| 0.0834 vs
@@ -657,6 +658,7 @@ waived. A test asserts this receipt keeps naming both issues.
 | `python -m pytest -q` again, on the final tree (9 min 18 s) | **2 failed, 13,223 passed, 86 skipped** |
 | `python -m pytest -q --tb=no -p no:warnings -rf` on the committed tree, after the divisor fix (8 min 36 s) | **2 failed, 13,230 passed, 86 skipped** — the failures named by `-rf` being exactly the two expected ones below |
 | the same command in this receipt session, with the ledger row recorded (8 min 41 s) | **1 failed, 13,239 passed, 86 skipped** — `-rf` naming only `test_regenerating_reproduces_the_committed_rows`, the sibling-checkout one; the Gate E ledger failure is gone because the measurement is no longer owed |
+| `python -m pytest -q --tb=no --show-capture=no --deselect tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` after the pre-push gate's round 2 (8 min 36 s) | **13,239 passed, 86 skipped, 1 deselected** — the same totals as the row above with the sibling-checkout test deselected the way CI deselects it, so round 2's prose and harness edits moved no test |
 
 The two expected failures of those runs were
 `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
@@ -683,7 +685,8 @@ Backtesting's suite is run by issue-solver in a clean worktree.
 
 With `AVX512F AVX512_SKX AVX2 FMA3` disabled (still enabled: SSSE3, SSE41,
 POPCNT, SSE42, AVX, F16C, AVX512CD, AVX512_CLX, AVX512_CNL, AVX512_ICL), the
-test module passes — **268 passed** — and sections **A, C, D and G were
+test module passes — **269 passed**, re-run after the pre-push gate's round 2
+— and sections **A, C, D and G were
 re-run in full** rather than assumed, after the divisor fix as well as
 before. Two groups of figures move, both of them rounding:
 
@@ -823,8 +826,16 @@ bars 1082 and 1191. 24 − 14 + 3 = 13.)
 ### P1b. WHICH reading the reference implements
 
 Every third window above (2,802 windows both score), scored by this port and
-by **seventeen** other defensible readings. The count is windows where that
+by **eighteen** other defensible readings. The count is windows where that
 reading equals the reference:
+
+(The eighteenth — the half-index knot offset, added by the pre-push gate's
+round 2 — reached the harness and this receipt only. The shipped module's
+docstring still says *seventeen*, which stays true as written: each of the
+four disagreements is matched by at least one of those seventeen, and the
+eighteenth matches none. Editing that docstring would move the module's sha1
+and withdraw the Gate E ledger row recorded against it, so it is left alone
+on purpose.)
 
 | reading | equals the reference |
 |---|---|
@@ -838,6 +849,7 @@ reading equals the reference:
 | biased acf — divisor = the RESIDUAL's sum of squares (**the pre-fix reading**) | 2,794 |
 | biased acf, no demean | 2,794 |
 | `n − k` divisor but normalised on the residual | 2,794 |
+| the same two pieces, knot offset half an index to `floor(n / 2) / (n − 1)` | 2,794 (99.71%) |
 | two-limb normalisation, one mean | 2,791 |
 | lagged-pair Pearson acf | 2,788 |
 | `th = 0` | 2,772 |
@@ -850,11 +862,17 @@ reading equals the reference:
 Two conclusions, and they are different in kind:
 
 1. **The DETREND reading is pinned by measurement.** Every alternative knot
-   structure is 4.4 to 16.7 percentage points worse against the reference —
-   123 windows for the knot at ⅓, 190 for one cubic, 217 for three pieces,
-   392 for a line, 468 for no detrend at all. `spap2(2, 4, 1:N, y)` means a
-   least-squares cubic on two pieces with the knot at the middle, and that is
-   what ships.
+   COUNT or span fraction is 4.4 to 16.7 percentage points worse against the
+   reference — 123 windows for the knot at ⅓, 190 for one cubic, 217 for three
+   pieces, 392 for a line, 468 for no detrend at all. `spap2(2, 4, 1:N, y)`
+   means a least-squares cubic on two pieces with the knot at the middle, and
+   that is what ships. The one neighbouring family those rows do not reach is
+   where the single break SITS at the sub-bar scale, and it was measured too:
+   offsetting it half an index, from the midpoint `(n − 1) / 2` to grid point
+   `floor(n / 2)`, scores **2,794** — 0.14 points and 4 windows worse, two
+   orders of magnitude smaller than any change of knot count, and still not
+   what the reference does. That placement is derived from the grid, not read
+   off the reference, which is GPL-3.0 and out of bounds for this port.
 2. **The ACF's DIVISOR is pinned by the sources and corroborated here.** The
    source line is `acf(i) = mean(y(1:N-i).*y(i+1:N))` on a z-scored series
    (`acf[tau-1] /= size - tau` in catch22's C), and that reading scores
@@ -882,6 +900,7 @@ and counted:
 | biased acf (the pre-fix reading) | 1 / 4 |
 | biased acf, no demean | 1 / 4 |
 | lagged-pair Pearson acf | 1 / 4 |
+| the knot offset half an index to `floor(n / 2) / (n − 1)` | **0 / 4** |
 | **explained by NO reading tried** | **0 / 4** |
 
 Read that carefully, because it is easy to over-read:
@@ -895,6 +914,10 @@ Read that carefully, because it is easy to over-read:
   reading agrees and it does not. It is not what the reference computes
   either. The disagreements are where the detrend's details DECIDE the
   answer, not evidence that the reference fits a different structure.
+* **A sub-bar shift of the knot explains none of them**: the half-index
+  offset matches **0 of 4**. So what the four are sensitive to is the knot's
+  count and the fraction of the span it cuts, not where inside one bar the
+  single break lands.
 * **Two of the four hang on a near-boundary quantity**, measured per window:
   a rise 2.6e-05 above the 0.01 threshold (tick-rounded bar 1468, which is
   also the smallest margin in all of §D5), and a deciding peak 1.8e-04 above

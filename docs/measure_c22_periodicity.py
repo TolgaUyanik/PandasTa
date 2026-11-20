@@ -1252,6 +1252,14 @@ def section_p():
                 value_source(w, fit=lambda z: fit_resid_knots(z, knots=())),
             "detrend with the knot at 1/3":
                 value_source(w, fit=lambda z: fit_resid_knots(z, knots=(1 / 3,))),
+            # The one NEIGHBOURING family the knot-count rows above do not
+            # reach: the same two-piece cubic with the single break offset by
+            # half an index, at grid point floor(n / 2) instead of the
+            # midpoint (n - 1) / 2. Derived from the grid, not from the
+            # GPL-3.0 reference's own placement, which this port may not read.
+            "detrend with the knot at floor(n / 2) / (n - 1)":
+                value_source(w, fit=lambda z: fit_resid_knots(
+                    z, knots=(float(z.size // 2) / (z.size - 1),))),
             "detrend with three pieces":
                 value_source(w, fit=lambda z: fit_resid_knots(
                     z, knots=(1 / 3, 2 / 3))),

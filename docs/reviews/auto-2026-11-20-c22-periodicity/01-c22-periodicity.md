@@ -291,3 +291,50 @@ it ships. Consequences, each measured rather than reasoned:
 | Gate F | re-run; see the receipt's §F, which now records HEAD's own counts |
 | the review logs | `99-summary.md` and this file carry a dated note saying which tree they describe; the manifest's A2 row says it was wrong and what replaced it; its truncated quote is restored |
 
+## Pre-push review gate, round 2 of 3 (HEAD `6f10278`)
+
+⚠ **Gate E's "withdrawn" in the round-1 table above is SUPERSEDED.** Between
+round 1 and this one the launcher re-ran Gate E on the fixed column and
+`6f10278` wrote the result in: **SHIP** — pooled max |ρ| **0.041372** vs
+`cdl_doji` (n = 389,949), top-5 per-frame max median **0.09428** vs
+`EMA_200`, **0 of 89** frames ≥ 0.90. The ledger row is recorded as run
+`is126-c22_periodicity-3a893c7c` against this module's sha1, §C4 is filled
+at **389,949** non-NaN and **389,926** non-zero of 398,849 pooled BIST bars,
+and the two owed-Gate-E tests were swapped for three that pin the recorded
+row, taking the module to **269 tests**.
+
+Round 2 reconciled every one of those digits against the launcher's `gatee/`
+outputs and `tests.md`, re-derived the windowing, the spline space and
+Wang's scan, and raised nothing against the mathematics. Its two MAJOR
+findings were both paperwork. Quoted:
+
+> Both review logs carry a "what later commits changed" bridge, written
+> precisely so a reader is not misled by the fenced historical body — and
+> HEAD invalidated both bridges without touching them. … Round 1 of the
+> session's own gate already raised "the review logs still described the
+> pre-Gate-E tree" as a finding; the same defect is back, one commit later,
+> in the very paragraphs added to fix it.
+
+> "The prototype's next two, `ROLLING_LOW_250` 0.0392 and `BODY_PCT` 0.0391,
+> are the shipped run's second and third **at 0.0392 each**" — `top25.csv`
+> has `BODY_PCT` at −0.039137 … The sentence's point is that the pair sits
+> in the prototype's order inside a gap of 1e-4, and it states the second of
+> the two figures wrong at the digit that gap lives in.
+
+and three smaller ones: three test docstring figures quoting 30, 88.8% and
+79.3% where the tables re-measured after the divisor fix say 31, 88.7% and
+79.4% (MINOR); the module docstring's Gate E paragraph reading as though no
+result exists for this column (MINOR); and §P1b's seventeen alternatives all
+placing their breaks on the same normalised grid, leaving a sub-bar offset of
+the single knot as the one neighbouring family untried (NIT).
+
+**What was done.**
+
+| finding | result |
+|---|---|
+| the two stale bridges | this section, and two more preamble bullets in `99-summary.md`; its "OWED AGAIN" and "the two pending-Gate-E tests are back" sentences are gone, and this log's last word on Gate E is the SHIP row above rather than "withdrawn" |
+| `BODY_PCT` at 0.0392 | corrected to 0.0391 in **both** places it was wrong — §E2, which the finding named, and §C2's Gate E sentence, which it did not |
+| the three test docstrings | now "11 to 31", "88.7%", "79.4%". Each sits on a loose band (`>= 8`, `> 0.70`, `seen >= 1`), which is why nothing was red and why they drifted |
+| the module docstring's Gate E clause | **NOT applied, on purpose.** `docs/gate_e_ledger.py` records `module_sha1 = lf_sha1(path)` and `tests/test_gate_e_ledger.py` fails when a row's module sha1 moves after its run, so appending that clause would have withdrawn the very row this commit range recorded. Measured by making the edit and reading the ledger code, then reverting it. The receipt and the ledger carry the figure, which is the fork's convention and what the sibling `c22_ami_timescale` does |
+| the half-index knot | measured, and §P1b now scores an **eighteenth** reading: the same two pieces with the single break offset half an index, at grid point `floor(n / 2)` instead of the midpoint `(n − 1) / 2`. It equals the reference on **2,794 of 2,802** (0.14 points and 4 windows below the shipped 2,798) and matches **0 of 4** of the subsample disagreements, so sub-bar break PLACEMENT is two orders of magnitude smaller an effect than break COUNT and explains none of the four. The placement is derived from the grid, not read off the GPL-3.0 reference |
+
