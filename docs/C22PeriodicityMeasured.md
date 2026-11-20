@@ -526,6 +526,7 @@ waived. A test asserts this receipt keeps naming both issues.
 | `python -m pytest -q` (full suite), at the port's first complete state | **2 failed, 13,219 passed, 86 skipped** |
 | the same after review round 1 added three tests | **3 failed, 13,222 passed, 86 skipped** |
 | `python -m pytest tests/test_pine_coverage_csv.py -q` after fixing that third failure | **38 passed, 1 skipped** |
+| `python -m pytest -q` again, on the final tree (9 min 18 s) | **2 failed, 13,223 passed, 86 skipped** |
 
 The two expected failures are
 `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
@@ -540,9 +541,10 @@ recording rather than hiding: `01-c22-periodicity.md` quotes a reviewer
 verbatim, the quote contained five slash-joined counts, and
 `tests/test_pine_coverage_csv.py::test_no_other_document_retypes_the_split`
 reads any such run of five numbers anywhere in the fork as a retyped PINEBI
-verdict split. Spacing the numbers inside the quote fixes it; the row above is
-that module re-run, and the round-1 heading in the review log says what was
-changed and why. Nothing else fails.
+verdict split. Spacing the numbers inside the quote fixes it; the third row
+above is that module re-run and the fourth is the whole suite again on the
+final tree, back to the two expected failures and nothing else. The round-1
+heading in the review log says what was changed and why.
 Backtesting's suite is run by issue-solver in a clean worktree.
 
 ### F1. What moves under the CI CPU dispatch
