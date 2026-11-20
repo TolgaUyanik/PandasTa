@@ -23,8 +23,11 @@ column was re-printed** by
 `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` — §A1, §A2, §A3,
 §A4, §A5, §B1, §B2, §C1, §C2, §D1, §D2, §D3, §D4, §G1, §G2, §G3, §G4, §G5
 and §L, which is all 22 of the script's sections except §ENV (versions),
-§E (the screen's quoted figures, named exception 3 below) and §Z
-(wall-clock, one machine's by construction). **Eight of §D2's 24 cells
+§E (figures from the Gate E run and the screen, neither of them this
+script's — exception 3 below) and §Z (wall-clock, one machine's by
+construction). ⚠ §C1's re-print is its **synthetic** table; the real-data
+block added to that section after the Gate E run is the launcher's, also
+exception 3. **Eight of §D2's 24 cells
 moved**, listed there; every other cell of every other section reproduced
 exactly, and §D2's worst cell is the same 5.160e-14 under both dispatches.
 
@@ -39,9 +42,9 @@ were then run.
 seven numbered items, and the count is the number of items. The script has
 no §F section and does not read the repo's documents, so:
 
-1. §F's counts (`380 passed`, `1,486 passed, 1 failed` and
-   `2 failed, 12,700 passed, 86 skipped`) are **pytest's**, from the runs
-   named there;
+1. §F's counts (`381 passed`, `1,495 passed` and
+   `1 failed, 12,709 passed, 86 skipped`, plus the three pre-run figures it
+   names beside them) are **pytest's**, from the runs named there;
 2. §F's `703 → 704` tagged columns is **`docs/MLCompanionContract.md`'s**
    count, checked by
    `tests/test_ml_companions.py::test_the_contract_quotes_the_dictionarys_actual_ml_form_counts`,
@@ -49,13 +52,17 @@ no §F section and does not read the repo's documents, so:
    366 → 367 / `trend (65)`) are the **repo's**, checked by
    `tests/test_altport2_ports.py` and `tests/test_readme_counts.py`. This
    script prints none of the five;
-3. §E's real-data figures are **issue #124's and the screen's**, quoted out
-   of `docs/issues/screen/candidates_r2.csv`, `fork_overlap_r2.csv`,
+3. **every real-data figure in this receipt is the launcher's, not this
+   script's.** §E1 and §E2 and §C1's real-data block are read out of the
+   Gate E run folder `is124-j_kaufmanstop_dist-2d508b6b`
+   (`overlap_max.csv`, `top25.csv`, `perframe.csv`, `degenerate.csv`,
+   `meta.json`), recorded in `docs/gate_e_ledger.csv`; §E3's figures are
+   **issue #124's and the 2026-10-24 screen's**, quoted out of
+   `docs/issues/screen/candidates_r2.csv`, `fork_overlap_r2.csv`,
    `cand_pairs_r2.csv`, `sanity_r2.csv` and the issue text itself (the
    `Stop_2ATR_pct` / `Swing_Range_pct` row, which no CSV here carries) —
-   the tracker being a gitignored read-only copy of the owner's.
-   **Gate E on the port itself is PENDING**: the launcher runs the harness
-   after this session and a later session records the row;
+   the tracker being a gitignored read-only copy of the owner's. This
+   worktree can neither read the 89 BIST frames nor run the harness;
 4. the "web access is unavailable" line below is a fact about the session,
    not a printed measurement. The jesse-absence flag next to it **is**
    printed, by §ENV;
@@ -102,21 +109,23 @@ to this module.
 |---|---|
 | A Correctness | **PASS** — bit-equal to an independent bar-by-bar oracle on 1,479 of 1,479 bars of each of six frames with identical NaN masks, and to `(close - (low - 2*talib.SMA(high - low, 22)))/close` on all six at Spearman 1.0000; all three first fire at bar 21 |
 | B Causality | **PASS** — 0 of 36 sweep catches on six frames; six look-ahead mutants live and caught 36 of 36 on each of three frames; three blind-spot (lagging) edits caught 0 by the sweep and all three by the oracle; a prefix truncation leaves 979 of 979 later bars bit-equal |
-| C Reachability | **PASS (synthetic)** — 1,479 of 1,500 bars on each of nine frames, 1,479 distinct values on each of the six varying ones, 8,874 of 8,874 pooled bars non-zero. ⚠ **Real data is OWED**: it comes from the Gate E run, which is pending |
+| C Reachability | **PASS** — synthetic: 1,479 of 1,500 bars on each of nine frames, 1,479 distinct values on each of the six varying ones, 8,874 of 8,874 pooled bars non-zero. **Real data (the Gate E run of 2026-11-20): 396,980 of 398,849 pooled BIST bars non-NaN, the same 396,980 non-zero** |
 | D Scale-free | **PASS** — ×8/×64 bit-identical on all nine frames at a level of 100 and on all nine at each of 1e-6, 1e+6 and 1e+100 (54 cells; worst intermediate 9.776e+101, 1.839e+206 of DBL_MAX headroom); ×10/×3.7/×0.1/×1.0000001 within 5.160e-14; `0 < fires < n` on all nine; a +10 level shift moves all 1,479 fired bars of each of the six varying frames |
-| E Attribution | **Gate E: pending, run by issue-solver after this session.** The 2026-10-24 screen measured the PROTOTYPE — which §A3 measures bit-equal to this module — at max \|ρ\| **0.8776182137043917** vs the engine's `natr`, n = 396,980, per-frame max median 0.8600682984579084 → **DISCLOSE_GAP** |
+| E Attribution | **DISCLOSE_GAP — the column ships with this disclosure and no waiver.** Measured 2026-11-20 by issue-solver, run `is124-j_kaufmanstop_dist-2d508b6b`: max \|ρ\| **0.8776182137043913** vs the engine's `natr` (`compute_all`), n = 396,980, per-frame max median **0.8600682984579084** over 89 frames, 687 comparators. The 2026-10-24 screen's figure on the PROTOTYPE — which §A3 measures bit-equal to this module — was 0.8776182137043917, the same number to 15 significant digits |
 | F Suites | this repo's suite run in §F; both repos' suites are the launcher's |
 
-**The one thing to read first.** Unlike `j_chandelier_dist` (#122), this
-port **does** reproduce the screen prototype bit for bit — §A3, on all nine
-frames — and that is measured rather than inferred from the two quotes
-reading alike. The consequence is specific and limited: the screen's
-DISCLOSE_GAP figures describe **this arithmetic**, not a neighbour's, so
-the band this column is likely to land in is already visible. It is not a
-substitute for the port's own run, because those figures were taken on 89
-real BIST frames and through an engine neither readable nor runnable from
-this worktree, and because `gate_e_overlap.py` imports the shipped module
-rather than the prototype. Gate E stays **PENDING**.
+**The one thing to read first.** The port's own Gate E run landed where the
+screen said it would, to 15 significant digits: **0.8776182137043913**
+against the screen's 0.8776182137043917, same comparator (`natr`), same
+n (396,980), same verdict (**DISCLOSE_GAP**). That is not a coincidence and
+it is not a copied number — §A3 measures this module bit-equal to the
+screen prototype on all nine frames, so the two runs computed the same
+arithmetic over the same 89 frames, and the 4e-16 between them is the last
+bit of a Spearman over ~397k values. The column **ships**: 0.80 ≤ 0.8776 <
+0.90 pooled and a top-five per-frame max median of 0.8601, both inside the
+DISCLOSE_GAP band of `r3-perframe-0.90`, which needs no waiver. §E has the
+run's own figures and the four things the screen's did not settle, now
+settled.
 
 **The second thing.** This column **does not change sign**, which is where
 it parts from both sibling stop distances. The stop sits twice the average
@@ -372,9 +381,25 @@ the oracle.
 Pooled: **8,874 bars, 0.005961 … 0.014415, 0 negative, 0 exactly zero,
 8,874 positive.** Identical cell for cell under the reduced CPU dispatch.
 
-⚠ **Gate C's real-data limb is OWED.** Every frame here is synthetic; the
-real counts come from the Gate E run, which is pending. The receipt session
-fills them in, as it did for #121 and #122.
+**Gate C's real-data limb, from the Gate E run of 2026-11-20** — every
+frame in the table above is synthetic, and these are the run's own counts
+over the 89 frozen ALTPORT-1 BIST frames (`overlap_max.csv`, columns
+`non_nan` and `non_zero`):
+
+```
+pooled bars  398,849
+non-NaN      396,980
+non-zero     396,980
+```
+
+So **0 of the 396,980 fired real bars read exactly 0.0**, which is the
+real-data limb of the no-sign-change structure the section above measures
+synthetically — a zero would need `close == low` and a zero 22-bar average
+range on the same bar. ⚠ And the blanked 1,869 bars are exactly
+`89 × 21` — one warm-up per frame, §A5's `WARMUP = PERIOD - 1` — which is
+a recounted identity between two numbers of the run, not a per-frame
+measurement: this worktree cannot read the frames, so nothing here rules
+out a frame short enough to fire nothing offset by an extra bar elsewhere.
 
 ---
 
@@ -487,14 +512,125 @@ frame reads exactly 0.0 at any level.
 
 ## §E — Gate E
 
-**Gate E: pending, run by issue-solver after this session.**
+**Gate E: measured 2026-11-20 by issue-solver.** Run
+`is124-j_kaufmanstop_dist-2d508b6b`,
+`gate_e_overlap.py run --module pandas_ta.trend.j_kaufmanstop_dist` at
+default parameters, recorded into `docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record … --measured 2026-11-20`. ⚠ Every
+figure in §E1 and §E2 is the **launcher's** run output, read out of that
+folder's `overlap_max.csv`, `top25.csv`, `perframe.csv`, `degenerate.csv`
+and `meta.json` — `docs/measure_j_kaufmanstop_dist.py` prints none of them
+and this worktree can neither read the frames nor run the harness.
 
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails on a local run until the row exists. That is the owed-measurement
-state CLAUDE.md describes, not a defect in this port:
-`tests/test_j_kaufmanstop_dist.py::test_no_gate_e_row_is_recorded_yet` and
-`::test_the_receipt_says_gate_e_is_pending` are the receipt session's cue
-and are expected to be **replaced** then, not to keep passing.
+### §E1 — the verdict
+
+| figure | value |
+|---|---|
+| column | `J_KAUFMANSTOP_DIST_22_2.0` |
+| pooled max \|ρ\| | **0.8776182137043913** (positive; `rho` = `abs_rho`) |
+| against | **`natr`**, from `compute_all` |
+| n | **396,980** |
+| per-frame max median \|ρ\| | **0.8600682984579084**, against `natr`, over **89** frames |
+| verdict | **DISCLOSE_GAP** (`r3-perframe-0.90`), pooled-only verdict the same |
+| waiver | **none** — only STRUCK needs one |
+
+`0.80 ≤ 0.8776182137043913 < 0.90` and no top-five comparator's per-frame
+median reaches 0.90, so both limbs of the band give DISCLOSE_GAP and the
+column **ships with this disclosure**. Issue #124's *Done when* is met by a
+ship; a revert would have closed it equally well and is not what the
+numbers say.
+
+⚠ **`pandas_ta/trend/j_kaufmanstop_dist.py` was deliberately NOT edited in
+this session**, so its docstring still reads "Gate E … It is PENDING: the
+launcher runs it after this session". The ledger pins `module_sha1`
+`c833e200a1771241cc4bf4a910d47b8b5d85373e` to the bytes the harness
+imported, and `tests/test_gate_e_ledger.py::test_row_still_describes_its_module`
+re-derives it — so a docstring fix would invalidate the measurement it
+describes. The measured numbers live here, in `docs/gate_e_ledger.csv`, in
+`docs/MLCompanionContract.md` and in the test module. A later session that
+edits that file for any other reason should fix the paragraph then.
+
+**Run facts** (`meta.json`): 89 frames, **398,849** pooled bars, **687**
+comparators (**329** `compute_all` + **358** `ml_features` `1d`), `kwargs`
+empty, nothing excluded, canary *AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS
+bit-equal*, pandas 2.3.3 / numpy 1.26.4, data stamp
+`1be6495ef7095ff67ad8f59a2fc0311d74f02652`, engine code
+`d4b78314a2ef494d6e36f77afc13a3178536f249`, module sha1
+`c833e200a1771241cc4bf4a910d47b8b5d85373e`, tree sha1
+`e1675da3857df0f60d22571b98cfdc62c1a8970a`. **One** comparator was
+degenerate and dropped: `squeeze_SQZ_NO` (manifest), reason `constant`
+(`degenerate.csv`), so 686 carried a correlation.
+
+**The five nearest comparators** (`top25.csv`, pooled; `perframe.csv` for
+the same five):
+
+| against | set | pooled \|ρ\| | per-frame median | per-frame max | per-frame min | % frames ≥ 0.90 |
+|---|---|---|---|---|---|---|
+| `natr` | compute_all | **0.8776182137043913** | **0.8600682984579084** | 0.9150028247747078 | 0.6844900587878294 | **7.865** |
+| `Stop_2ATR_pct` | manifest | **0.8776182137043913** | **0.8600682984579084** | 0.9150028247747078 | 0.6844900587878294 | **7.865** |
+| `Swing_Range_pct` | manifest | 0.7304819207881303 | 0.7022846280734330 | 0.8162942864749327 | 0.3815025590022800 | 0.000 |
+| `pdist_pct` | manifest | 0.6585497311786223 | 0.6370641224889458 | 0.7297957180749862 | 0.5316940243826543 | 0.000 |
+| `BB_BWidth` | compute_all | 0.6120578724539920 | 0.5849460162267761 | 0.7238659256660660 | 0.2818018161181539 | 0.000 |
+
+⚠ **`natr` and `Stop_2ATR_pct` are the same measurement to every printed
+digit** — pooled, per-frame median, max, min and the frame count — which is
+what a Spearman does to two monotone transforms of one series. The ledger
+row names `natr` because it is the `compute_all` member; the pair is **one**
+comparator for reading purposes, and issue #124's "next comparators" list
+(`natr` 0.8776, `Stop_2ATR_pct` 0.8776, `Swing_Range_pct` 0.7305) said the
+same thing at four decimals before the port existed.
+
+⚠ **7.865 % of frames is 7 of 89**, and they are frames whose *per-frame*
+\|ρ\| reaches 0.90 (max 0.9150). The band reads the per-frame **median**,
+not the tail, so those 7 do not strike the column — but they are the honest
+reading of "0.8776 pooled": on the worst-overlapping frame this column and
+`natr` read \|ρ\| **0.9150**, and 92.135 % of frames (82 of 89)
+sit at 0.80 or above. The next comparator after the `natr` pair drops
+0.147 to 0.7305, so the overlap is **one** volatility-normalisation family,
+not a crowd.
+
+### §E2 — against the screen's prototype figure
+
+| figure | the PORT's run (2026-11-20) | the SCREEN's prototype (2026-10-24) |
+|---|---|---|
+| max \|ρ\| | **0.8776182137043913** | **0.8776182137043917** |
+| against | `natr` | `natr` |
+| n | 396,980 | 396,980 |
+| per-frame max median | 0.8600682984579084 | 0.8600682984579084 |
+| verdict | DISCLOSE_GAP | DISCLOSE_GAP |
+| comparator set | 687 (329 + 358) | `compute_all` alone |
+
+The two agree to **15 significant digits**, differing by 4e-16 in the last
+one, and the per-frame figure and n are equal digit for digit. §A3 measures
+the module **bit-equal** to the prototype on all nine frames, so this is
+one arithmetic measured twice rather than a number copied: what the port's
+own run adds is that it ran through `gate_e_overlap.py` importing
+`pandas_ta.trend.j_kaufmanstop_dist`, against 687 comparators rather than
+`compute_all`'s 329, under the `r3-perframe-0.90` bands.
+
+**The four things the screen's figure did not settle** (listed in the
+pre-run draft of this section), settled:
+
+1. the harness imported **this module** — `meta.json`'s
+   `candidate_source` is `pandas_ta/trend/j_kaufmanstop_dist.py` and its
+   sha1 is the committed one, which `record` re-derived from this tree —
+   and the engine's frames left 396,980 of 398,849 real bars firing, 0 of
+   them exactly zero (the run prints no infinity count, so "no infinite
+   real bar" is **not** measured; §G3's routes are synthetic);
+2. the **687**-comparator set found no closer column than the screen's own
+   `natr`: the manifest's nearest, `Stop_2ATR_pct`, ties it rather than
+   beating it, and the first non-`natr`-family comparator is 0.147 below;
+3. the **per-frame** limb reads 0.8601 as the maximum of the top five's
+   medians, 0.0175 below the pooled figure and 0.0399 below the 0.90 line,
+   with 7 of 89 frames above 0.90 individually;
+4. and `natr` is **still not read in this worktree**: that the engine's
+   `natr` and `Stop_2ATR_pct` are monotone transforms of each other is an
+   inference from their identical Spearman columns, not from their code.
+   §L's `natr` row remains this fork's `NATR_14` on synthetic frames, a
+   different measurement — and it reads 0.1092 against this run's 0.8776,
+   so §L understated by 0.77 on the one comparator it shares with Gate E.
+
+### §E3 — what the screen measured before the port existed
 
 What the 2026-10-24 library catalog screen, round 2, measured — on the
 **prototype**, which §A3 measures **bit-equal** to this module, so these
@@ -523,32 +659,15 @@ comparator, so the margin between shipping and striking here is the wick
 term plus the `×2` — which is a reason to read the port's own run
 carefully, not a reason to expect either verdict.
 
-⚠ Four things the screen's figure does **not** settle, and the port's own
-run is what settles them:
+The four things this figure did not settle are listed and settled in §E2;
+three of them the port's run answered as expected and the fourth — what the
+engine computes under the name `natr` — is **still not read here**.
 
-1. the harness imports `pandas_ta.trend.j_kaufmanstop_dist`, not the
-   prototype, and the engine's guards are not this module's — §G2 and §G4
-   measure what those guards do to the column, and a real frame with a bad
-   bar is not a synthetic one;
-2. the comparator set has grown to 687 (329 `compute_all` + 358
-   `ml_features` `1d`), and the screen's own figure came from `compute_all`
-   alone;
-3. the band reads a **top-five per-frame median** as well as the pooled
-   figure (`r3-perframe-0.90`), and the screen's per-frame figure, 0.8601,
-   is the maximum of its top five — 0.0175 below the pooled 0.8776 and
-   0.04 below the 0.90 line;
-4. and what the engine computes under the name `natr` was **not checked
-   here** — whether `compute_all`'s `natr` is this fork's
-   `pandas_ta.volatility.natr` at the same length, or another spelling of a
-   normalised ATR, is not readable from this worktree. §L's `natr` row is
-   this fork's column on synthetic frames, which is a different
-   measurement.
-
-If the port's run lands in DISCLOSE_GAP, the column ships with the note and
-no waiver (only STRUCK needs one). If it lands STRUCK, the column is
-reverted or waived before a release, and **this receipt is the deliverable
-either way** — issue #124: *a measured revert closes this exactly as well
-as a ship*.
+**The port's run landed at DISCLOSE_GAP, so the column ships with the note
+and no waiver.** Had it landed STRUCK the column would have been reverted
+or waived before a release, and **this receipt is the deliverable either
+way** — issue #124: *a measured revert closes this exactly as well as a
+ship*.
 
 ---
 
@@ -811,7 +930,20 @@ rather than a clean bill for the column.** `natr` is the one comparator with
 both a synthetic and a real figure: **0.1092 here against the screen's
 0.8611** — the six synthetic frames understate by 0.75, where #122's six
 *overstated* by 0.0575. So §L cannot stand in for Gate E in **either**
-direction.
+direction. ⚠ Against the **port's own** run (§E1) the gaps are wider still,
+and **three** of §L's rows have a real figure to compare with — the three
+names Gate E puts in its own top five:
+
+| name | §L, synthetic (retyped or fork) | §E1, the port's real run | gap |
+|---|---|---|---|
+| `natr` | 0.1092 | **0.8776** | 0.768 |
+| `Stop_2ATR_pct` | 0.1366 | **0.8776** | 0.741 |
+| `Swing_Range_pct` | 0.0094 | **0.7305** | 0.721 |
+
+(§L's are per-frame medians over six synthetic frames and §E1's are pooled
+over 89 real ones, so the gap is not one quantity measured twice; it is the
+measured size of the "synthetic frames are not evidence about overlap"
+caveat.)
 
 What this section can say about why, measured on the synthetic side only —
 the column is a wick term plus a range term:
@@ -832,7 +964,13 @@ wick and 0.574 … 0.620 against the range term, and 0.920 against 0.572 on
 the `tied` frame the table adds to them — so a range-based comparator can
 only reach so far. ⚠ **That real
 ranges vary more is NOT measured here** — no real frame is readable from
-this worktree — and the inference is left to the port's own Gate E run.
+this worktree — and what the port's Gate E run shows is only the outcome: a
+normalised-range comparator reached **0.8776** on 89 real frames against
+the 0.1092 these six give. So "a range-based comparator can only reach so
+far" is a statement about **these frames**, refuted as a statement about
+real ones. Which of the two terms carries the real overlap is **not
+measured anywhere**: the decomposition above is synthetic, and the run
+prints correlations, not a decomposition.
 
 ⚠ §L is also **not** blind to Gate E: `natr` is the screen's own top
 comparator, and `Stop_2ATR_pct` and `Swing_Range_pct` are named in issue
@@ -873,36 +1011,42 @@ Linear in bars.
 
 ## §F — Gate F: suites
 
-* `tests/test_j_kaufmanstop_dist.py` — **380 passed**: 306 as first written,
+⚠ **The three counts below are the receipt session's re-runs of 2026-11-20,
+after the Gate E row was recorded.** The pre-run session's were 380 / 1,486
+with 1 failed / 2 failed with 12,700 passed; what moved is one test (+1) and
+the owed Gate E row (now recorded, so it passes).
+
+* `tests/test_j_kaufmanstop_dist.py` — **381 passed**: 306 as first written,
   369 after round 1 of the review (+63: the extreme-level cells widened to
-  all nine frames, the 1,495 plant point, §G5's probe) and 380 after round 2
+  all nine frames, the 1,495 plant point, §G5's probe), 380 after round 2
   (+11: the bar-5 plant point, the propagating-mean premise and the
-  route-1 contingency). **Three** of the 380 read documents rather than the
-  column — `test_the_receipt_says_gate_e_is_pending` reads this file,
-  `test_no_gate_e_row_is_recorded_yet` reads the ledger and
-  `test_the_docstrings_first_paragraph_survives_the_dictionary_cut` lifts
-  `desc` out of `docs/gen_indicator_dictionary.py` (round 2 counted two) —
-  and the same **380** run under
+  route-1 contingency) and **381** in this session, where the two
+  pending-Gate-E tests became three that pin the recorded row, the
+  receipt's copy of its numbers and §C1's real-data counts. **Four** of the
+  381 read documents rather than the column —
+  `test_the_receipt_carries_the_measured_gate_e_numbers` and
+  `test_gate_cs_real_data_limb_is_in_the_receipt` read this file,
+  `test_the_gate_e_row_is_recorded_and_says_disclose_gap` reads the ledger
+  and `test_the_docstrings_first_paragraph_survives_the_dictionary_cut`
+  lifts `desc` out of `docs/gen_indicator_dictionary.py` (round 2 counted
+  two of the then three) — and the same **381** run under
   `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` via
   `python docs/measure_j_kaufmanstop_dist_cpu.py`, which prints the
   dispatchable features still enabled and refuses to run if any of the four
   survived.
 * `tests/test_j_kaufmanstop_dist.py` with `tests/test_gate_e_ledger.py` —
-  **1,486 passed, 1 failed**:
-  `test_every_indicator_that_needs_a_row_has_one`, whose message reads
-  `no Gate E ledger row for ['j_kaufmanstop_dist']` and names nothing else.
-  **Owed, not failed** — CI into `dev` sets `GATE_E_PENDING_OK=1` and skips
-  it with a reason starting "Gate E owed".
-* full suite — **2 failed, 12,700 passed, 86 skipped** in 409 s: the owed
-  Gate E row above, and `test_regenerating_reproduces_the_committed_rows`,
+  **1,495 passed, 0 failed**. ⚠ Before the row was recorded this selection
+  read 1,486 passed and 1 failed,
+  `test_every_indicator_that_needs_a_row_has_one` with the message
+  `no Gate E ledger row for ['j_kaufmanstop_dist']` — the owed-measurement
+  state, which the recorded row closes.
+* full suite — **1 failed, 12,709 passed, 86 skipped** in 417 s. The one
+  failure is `test_regenerating_reproduces_the_committed_rows`
+  (`tests/test_altrepo_talib_csv.py:145`,
+  `pandas-ta-classic not found at .../AlternativeRepos/pandas-ta-classic`),
   the `../AlternativeRepos`-dependent talib CSV test that CI deselects by
-  name.
-  These two totals are from a **re-run after the rebase onto `dev`** of
-  2026-11-20, which brought in issue #125's `c22_ami_timescale` port: the
-  review folder's copies of them (1,478 / 1 and 2 / 12,496 / 86) are the
-  pre-rebase run of the same two selections, and the two failures are the
-  same two. The module's own **380** is unchanged by the rebase, re-run
-  under the reduced CPU dispatch after it.
+  name; the owed Gate E row that was the second failure before this session
+  now passes.
   The 86 skips are the upstream correlation suite (`data/SPY_D.csv` is
   gitignored) plus the usual optional-dependency skips.
 * the five wiring touch points: `pandas_ta/trend/j_kaufmanstop_dist.py`,
@@ -920,25 +1064,37 @@ Linear in bars.
 
 ## What a later session should know
 
-1. **Gate E is owed and so is Gate C's real-data limb.** Both come from the
-   launcher's run of
-   `gate_e_overlap.py run --module pandas_ta.trend.j_kaufmanstop_dist`. The
-   receipt session records the ledger row, writes the measured numbers into
-   §E, fills §C1's real counts and replaces the two pending tests.
-2. **The screen's figure is this arithmetic's** (§A3, bit-equal), so a run
-   landing near 0.8776 vs `natr` is the expected outcome rather than a
-   surprise — which also makes it the easiest row to copy over by mistake.
-   The replacement test should pin the run id, not only the numbers.
-3. **§L is not a floor.** Six synthetic frames read 0.75 **below** the real
-   fork figure on `natr`. Do not read §L's 0.1092 as "this column is
-   independent of `natr`".
-4. **The nearest candidate of the same family was STRUCK.**
-   `lean_avgrange_14` (`SMA(H - L, 14)/close`), which paired at 0.8646 with
-   this column, measured 0.9489 vs `natr` and was dropped
-   (`candidates_r2.csv`, `dropped: Gate E STRUCK`). There is nothing to
-   measure the pair against — read it as the risk on this column's own run
-   instead, against the same comparator.
-5. **The three input finite guards are measured no-ops** (§G2) — and they
+1. **Gate E is measured and the column SHIPS on a DISCLOSE_GAP** — 0.8776
+   vs `natr`, per-frame max median 0.8601, run
+   `is124-j_kaufmanstop_dist-2d508b6b` of 2026-11-20, recorded in
+   `docs/gate_e_ledger.csv` with an empty waiver column because only STRUCK
+   needs one. §C1's real-data limb came from the same run. **The disclosure
+   is the point of the row**: this column and the engine's `natr` share
+   0.8776 pooled and 0.915 on the worst of 89 frames, so a miner given both
+   is double-weighting one volatility normalisation. ⚠ If the engine's
+   comparator set changes or the bands tighten, this is the first row in
+   `trend` to re-read.
+2. **The module file still says Gate E is PENDING and must not be edited
+   for that reason alone** — the ledger pins its sha1 to the measured
+   bytes (§E1). Fix the paragraph in the same change as any other edit to
+   that file, and re-run Gate E if the edit touches the arithmetic.
+3. **The screen's figure was this arithmetic's** (§A3, bit-equal), and the
+   run confirmed it to 15 significant digits (§E2). An expected agreement is
+   the easiest kind of row to copy over from the wrong run, which is why
+   `test_the_gate_e_row_is_recorded_and_says_disclose_gap` pins the run id
+   as well as the arithmetic.
+4. **§L is not a floor.** Six synthetic frames read 0.72 … 0.77 **below**
+   the port's own real figures on the three comparators that have both
+   (§L's table). Do not read §L's 0.1092 as "this column is independent of
+   `natr`" — the real figure is 0.8776.
+5. **The nearest candidate of the same family was STRUCK, and this column
+   came within 0.071 of it.** `lean_avgrange_14` (`SMA(H - L, 14)/close`),
+   which paired at 0.8646 with this column, measured 0.9489 vs `natr` and
+   was dropped (`candidates_r2.csv`, `dropped: Gate E STRUCK`). This
+   column's own run reads 0.8776 against the same comparator — 0.022 below
+   the 0.90 strike line, and 7 of its 89 frames are individually above it.
+   That margin is the wick term plus the `×2`, and it is thin.
+6. **The three input finite guards are measured no-ops** (§G2) — and they
    stay no-ops even with a mean that propagates an infinity (§G5), so the
    "pandas might change" story does not save them. If a later session wants
    to simplify the module, that is the honest place to look. What the

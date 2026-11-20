@@ -135,13 +135,19 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    arithmetic routes an infinity can take from FINITE inputs; the third
    route ships nothing, and that asymmetry is pinned route by route.
 
-8. **Gate E is OWED, not measured.** The screen measured the PROTOTYPE --
-   which item 2 measures bit-equal to this module -- at max |rho| 0.8776
-   vs the engine's `natr` (DISCLOSE_GAP, n = 396,980, per-frame max median
-   0.8601). The port's own run is the launcher's, after this session;
-   `test_no_gate_e_row_is_recorded_yet` and
-   `test_the_receipt_says_gate_e_is_pending` are the receipt session's cue,
-   and both are expected to be REPLACED then rather than to keep passing.
+8. **Gate E is MEASURED: DISCLOSE_GAP, so the column ships with the
+   disclosure and no waiver.** The port's own run of 2026-11-20
+   (`is124-j_kaufmanstop_dist-2d508b6b`, 89 frames, 687 comparators) reads
+   max |rho| **0.8776182137043913** vs the engine's `natr`, n = 396,980,
+   per-frame max median **0.8600682984579084** -- and the 2026-10-24 screen
+   measured the PROTOTYPE, which item 2 measures bit-equal to this module,
+   at 0.8776182137043917: the same number to 15 significant digits.
+   `test_the_gate_e_row_is_recorded_and_says_disclose_gap` pins the ledger
+   row including its run id, `test_the_receipt_carries_the_measured_gate_e_numbers`
+   pins the receipt, and `test_gate_cs_real_data_limb_is_in_the_receipt`
+   pins the real-data counts the same run gives Gate C: 396,980 of 398,849
+   pooled BIST bars non-NaN, the same 396,980 non-zero. The three replaced
+   the two pending-Gate-E tests this file carried before the run.
 
 Every number above is printed by `python docs/measure_j_kaufmanstop_dist.py`
 and by `python docs/measure_j_kaufmanstop_dist_cpu.py <section>` under
@@ -152,10 +158,11 @@ item 1, 1e-6 in item 4, 1e-9 in item 5 — those four, counted) are this
 file's own constants rather than run output. The measured figure beside each
 of them is a run.
 
-NOT pinned here: Gate E's own arithmetic (the launcher runs it; 687
+NOT pinned here: Gate E's own arithmetic (the launcher ran it; 687
 comparators over 89 real BIST frames, re-derived by
-`tests/test_gate_e_ledger.py`), and Gate C's real-data limb, which comes
-from the same run -- every frame in this file is synthetic. The in-fork
+`tests/test_gate_e_ledger.py`) -- item 8 pins its recorded row and the
+receipt's copy of its numbers, not the correlations themselves, and every
+frame computed in this file is synthetic. The in-fork
 overlap figures of §L are SYNTHETIC and are disclosures, not gates, and here
 they are **LOW rather than high**: `natr`, the one comparator with both a
 synthetic and a real figure, reads 0.1092 against the screen's 0.8611, so
@@ -1367,24 +1374,68 @@ def test_the_docstrings_first_paragraph_survives_the_dictionary_cut():
     assert "Kaufman" in cut and "range" in cut
 
 
-def test_the_receipt_says_gate_e_is_pending():
-    """⚠ Expected to be REPLACED by the receipt session, not to keep
-    passing: the launcher runs Gate E after this session and a later
-    session writes the measured numbers in."""
+def test_the_receipt_carries_the_measured_gate_e_numbers():
+    """The receipt is the deliverable issue #124 asks for, so the Gate E run
+    of 2026-11-20 has to live in it and not only in the ledger.
+
+    ⚠ The PORT's figure and the 2026-10-24 screen PROTOTYPE's are pinned
+    side by side on purpose: 0.8776182137043913 against 0.8776182137043917,
+    the same number to 15 significant digits. An expected agreement is the
+    easiest kind of row to copy over from the wrong run by mistake, which is
+    why the run id is pinned too."""
     doc = (ROOT / "docs" / "JKaufmanstopDistMeasured.md").read_text(
         encoding="utf-8")
-    assert "Gate E: pending, run by issue-solver after this session" in doc
-    assert "0.8776182137043917" in doc   # the SCREEN's figure, on the prototype
+    assert "Gate E: measured 2026-11-20 by issue-solver" in doc
+    assert "0.8776182137043913" in doc    # the PORT's pooled max
+    assert "0.8776182137043917" in doc    # the SCREEN's, on the prototype
+    assert "0.8600682984579084" in doc    # its per-frame max median
     assert "natr" in doc
+    assert "Stop_2ATR_pct" in doc
+    assert "is124-j_kaufmanstop_dist-2d508b6b" in doc
+    assert "r3-perframe-0.90" in doc
     assert "DISCLOSE_GAP" in doc
+    # the "pending" wording this test replaced must be gone as a claim
+    assert "Gate E: pending, run by issue-solver" not in doc
 
 
-def test_no_gate_e_row_is_recorded_yet():
-    """The receipt session's cue. `tests/test_gate_e_ledger.py` fails on a
-    local run until the row exists -- that is the owed-measurement state
-    CLAUDE.md describes, not a defect in this port."""
+def test_the_gate_e_row_is_recorded_and_says_disclose_gap():
+    """The row exists, names the one shipped column, and carries the verdict
+    the `r3-perframe-0.90` bands give. DISCLOSE_GAP ships with the
+    disclosure and removes nothing; only STRUCK needs a waiver, so the
+    waiver column has to stay empty."""
     path = ROOT / "docs" / "gate_e_ledger.csv"
     with path.open(newline="", encoding="utf-8") as handle:
         rows = [r for r in csv.DictReader(handle)
                 if r["indicator"] == "j_kaufmanstop_dist"]
-    assert rows == []
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["column"] == COLUMN
+    assert row["module"] == "pandas_ta.trend.j_kaufmanstop_dist"
+    assert row["verdict"] == "DISCLOSE_GAP"
+    # the band: 0.80 <= pooled < 0.90 and no top-5 per-frame MEDIAN at 0.90
+    assert 0.80 <= float(row["max_abs_rho"]) < 0.90
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+    assert row["against"] == "natr"
+    assert row["against_set"] == "compute_all"
+    assert int(row["n_comparators"]) == 687
+    assert int(row["n_frames"]) == 89
+    assert int(row["pooled_bars"]) == 398849
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["run"] == "is124-j_kaufmanstop_dist-2d508b6b"
+    assert row["measured"] == "2026-11-20"
+    assert row["waiver"] == ""             # only STRUCK needs one
+
+
+def test_gate_cs_real_data_limb_is_in_the_receipt():
+    """Gate C's real-data counts come from the same run, and the receipt has
+    to state them: a reachability claim measured only on synthetic frames is
+    the defect CLAUDE.md names.
+
+    396,980 of 398,849 pooled BIST bars are non-NaN and the SAME 396,980 are
+    non-zero -- the real-data limb of the no-sign-change structure §C1
+    measures on synthetic frames."""
+    doc = (ROOT / "docs" / "JKaufmanstopDistMeasured.md").read_text(
+        encoding="utf-8")
+    assert "396,980" in doc           # non-NaN, and non-zero, of 398,849
+    assert "398,849" in doc
+    assert "⚠ **Gate C's real-data limb is OWED.**" not in doc
