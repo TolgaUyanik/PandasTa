@@ -1224,6 +1224,11 @@ class AnalysisIndicators(BasePandasObject):
                          **kwargs)
         return self._post_process(result, **kwargs)
 
+    def j_wae(self, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = j_wae(close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def kalman_rsi(self, length=None, process_noise=None, measurement_noise=None, initial_error=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = kalman_rsi(close=close, length=length, process_noise=process_noise, measurement_noise=measurement_noise, initial_error=initial_error, offset=offset, **kwargs)
