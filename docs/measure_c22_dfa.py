@@ -25,7 +25,7 @@ import math
 import sys
 import time
 import tracemalloc
-from decimal import Decimal, getcontext
+from decimal import Decimal, localcontext
 from fractions import Fraction
 from pathlib import Path
 
@@ -45,7 +45,14 @@ MODULE = importlib.import_module("pandas_ta.statistics.c22_dfa")
 SRC = Path(MODULE.__file__).read_text(encoding="utf-8")
 LENGTH = 100
 N = 1500
-getcontext().prec = 60
+#: Significant digits the exact oracle's logarithms and straight-line fits
+#: run at, about 44 beyond a double. It is applied with `localcontext` at the
+#: one place that needs it and NOT at import: the decimal context is
+#: process-global, and `tests/test_c22_dfa.py` imports this file by path to
+#: compare the mutant tables, so a module-level `getcontext().prec = 60`
+#: would leave 60 digits behind for the rest of a pytest session (the house
+#: rule -- `tests/test_ts_cross_mean_20.py::_exact_windowed`).
+ORACLE_PREC = 60
 
 
 # --------------------------------------------------------------- frames
@@ -421,9 +428,6 @@ def value_exact(window):
     if any(v <= 0 for v in f2):
         return None
     ntt = len(taus)
-    lt = [Decimal(t).ln() for t in taus]
-    lf = [(Decimal(v.numerator) / Decimal(v.denominator)).ln() / Decimal(2)
-          for v in f2]
 
     def ss(xs, ys):
         m = len(xs)
@@ -434,12 +438,18 @@ def value_exact(window):
         b = sxy / sxx
         return sum(((v - ym) - b * (x - xm)) ** 2 for x, v in zip(xs, ys))
 
-    scores = []
-    for i in range(min_each_side(ntt), ntt - min_each_side(ntt) + 1):
-        scores.append((ss(lt[:i], lf[:i]) + ss(lt[i - 1:], lf[i - 1:]), i))
-    best = min(scores)
-    rest = min(s for s, i in scores if i != best[1])
-    margin = float((rest - best[0]) / best[0])
+    # `localcontext` and not `getcontext().prec = ...`: see ORACLE_PREC.
+    with localcontext() as ctx:
+        ctx.prec = ORACLE_PREC
+        lt = [Decimal(t).ln() for t in taus]
+        lf = [(Decimal(v.numerator) / Decimal(v.denominator)).ln() / Decimal(2)
+              for v in f2]
+        scores = []
+        for i in range(min_each_side(ntt), ntt - min_each_side(ntt) + 1):
+            scores.append((ss(lt[:i], lf[:i]) + ss(lt[i - 1:], lf[i - 1:]), i))
+        best = min(scores)
+        rest = min(s for s, i in scores if i != best[1])
+        margin = float((rest - best[0]) / best[0])
     return best[1], ntt, margin
 
 
@@ -1251,8 +1261,10 @@ def section_q7():
 
 # ------------------------------------------------------------- Gate B
 #: The mutants `tests/test_c22_dfa.py` also builds. Kept here so the receipt
-#: quotes a run of its own; the two dicts must stay identical, which
-#: `test_the_measure_script_carries_the_same_mutants` checks.
+#: quotes a run of its own; the two dicts must stay identical, and
+#: `test_the_measure_script_carries_the_same_mutants` imports this file by
+#: path and compares them WHOLE -- edit strings included -- so a drift on
+#: either side fails rather than leaving two different Gate Bs both green.
 MUTANTS = {
     "write-back-dated": ("out[length + a:length + b]",
                          "out[length - 1 + a:length - 1 + b]"),
@@ -1426,7 +1438,7 @@ def section_b():
                 sum(1 for j in m if j >= T),
                 sum(1 for j in m if (T - j) % 2 == 0))
 
-    head("B7. The column at bar T does not read close[T]")
+    head("B7. The VALUE at bar T does not read close[T] (the mask does: B7b)")
     print("That is not a bug and not a look-ahead -- it is what the lag")
     print("does. The window ending at bar T holds the returns of bars")
     print("T-99 .. T and the decimation keeps every SECOND one from the")
@@ -1438,6 +1450,30 @@ def section_b():
         g.iloc[T] = g.iloc[T] * 1.5
         got = np.asarray(c22_dfa(g), float)
         row(T, got[T] != want[T], got[T + 1] != want[T + 1])
+
+    head("B7b. The MASK does read close[T], and that is the whole of it")
+    print("The VALUE at bar T is a function of closes T-100 .. T-1. The NaN")
+    print("MASK is not: the finiteness check and the noise floor run on the")
+    print("WHOLE undecimated window, which includes the return of bar T, so")
+    print("a bad close at T blanks bar T. Both halves are below. Neither is")
+    print("a look-ahead -- every close read is at or before T.")
+    row("case", "bar T", "bar T+1")
+    for label, edit in (("close[T] x1.5 (finite)", lambda v: v * 1.5),
+                        ("close[T] = NaN", lambda v: np.nan),
+                        ("close[T] = 0", lambda v: 0.0)):
+        moved_t = moved_next = blanked_t = 0
+        for T in (200, 500, 900, 1300):
+            g = f.to_numpy(dtype=float).copy()
+            g[T] = edit(g[T])
+            got = np.asarray(c22_dfa(pd.Series(g, index=f.index)), float)
+            moved_t += int(got[T] != want[T]
+                           and not (np.isnan(got[T]) and np.isnan(want[T])))
+            blanked_t += int(np.isnan(got[T]) and not np.isnan(want[T]))
+            moved_next += int(got[T + 1] != want[T + 1]
+                              and not (np.isnan(got[T + 1])
+                                       and np.isnan(want[T + 1])))
+        row(label, f"moved {moved_t} of 4, blanked {blanked_t} of 4",
+            f"moved or blanked {moved_next} of 4")
 
     head("B8. The sweep with more splices, on the mutants that DO look ahead")
     for name in ("window-two-ahead", "window-ten-ahead"):

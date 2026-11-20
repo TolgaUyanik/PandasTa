@@ -185,9 +185,12 @@ def _prop_rows(block):
     first. Each row is z-scored (inert, see `ZSCORE_DDOF`), decimated by
     `LAG`, cumulatively summed into a profile, and the root-mean-square
     linearly-detrended fluctuation `F(tau)` is taken over every scale of
-    `scales(length)`. The two-piece straight-line fit of `log F` on
-    `log tau` that minimises the summed residual norms fixes the break, and
-    the row's value is the SHARE of scales in the first piece.
+    `scales(length)`. The break is the two-piece straight-line fit of
+    `log F` on `log tau` that minimises the sum of the two sums of SQUARED
+    residuals -- not of the two residual NORMS, which is a different column
+    and the reading this port first got wrong (section Q3: 294 of 294
+    against 202 of 294) -- and the row's value is the SHARE of scales in the
+    first piece.
 
     Comes back as NaN for a row holding a non-finite return, for a row whose
     standard deviation is at most `NOISE_FLOOR` or is not finite, and for a
@@ -365,14 +368,23 @@ fired bars. A consumer that wants a continuous DFA statistic wants
 ⚠ **The value at bar T does not read close[T].** The lag decimates
 the window keeping every SECOND return starting from the OLDEST, so
 the return of bar T itself -- the one that needs close[T] -- is
-dropped: bar T reads closes T-100 .. T-1. That is the feature's own
-parameter and not a defect, and it is measured rather than reasoned:
-perturbing close[T] alone moves bar T on 0 of 4 sampled bars and bar
-T+1 on 3 of them (`docs/measure_c22_dfa.py` section B7), and
-perturbing EVERY close of a frame one at a time moves bar T only
-from closes in `[T-100, T-1]`, never from a close at or after T
-(section B6). So the column is causal AND one bar stale, and a
-companion that expects today's return in it will be wrong.
+dropped: the VALUE at bar T is a function of closes T-100 .. T-1.
+That is the feature's own parameter and not a defect, and it is
+measured rather than reasoned: perturbing close[T] by a finite
+factor moves bar T on 0 of 4 sampled bars and bar T+1 on 3 of them
+(`docs/measure_c22_dfa.py` section B7), and perturbing EVERY close of
+a frame one at a time moves bar T only from closes in
+`[T-100, T-1]`, never from a close at or after T (section B6). So the
+column is causal AND one bar stale, and a companion that expects
+today's return in it will be wrong.
+⚠ The NaN **MASK** is the exception, and it is still causal: the
+finiteness check and the noise floor run on the WHOLE undecimated
+window, which does include the return of bar T, so a close at T that
+is NaN or zero blanks bar T -- 4 of 4 sampled bars, where the finite
+perturbation moves 0 of 4 (section B7b). That is why a single bad
+close blanks 101 bars starting AT its own bar and not 100 starting
+after it. A consumer recomputing this column on data truncated at
+T-1 gets the same values and a different mask.
 
 ⚠ **Its "no break" reading is not the middle of the range.** On 400
 INDEPENDENT windows of normal returns the median is 0.571429 and the
@@ -423,8 +435,9 @@ end-aligned reading agrees on 611 of 1,680 windows, no decimation at
 all on 21), the cumulative sum is taken AFTER the decimation (802 of
 1,680), and the ladder's top comes from the DECIMATED length (34 of
 1,680). ⚠ The ladder size is itself the evidence that the lag is
-real: the reference's values are 21sts, which only a 50-point series
-produces.
+real: the reference's values are 21sts over a 100-return window, and
+a 21-rung ladder needs a top scale of 25, which needs a series of 50
+or 51 points -- not 100.
 
 **What is INERT here, measured rather than assumed.** The whole
 feature is invariant under `a * r + b` for any `a != 0`: a constant
@@ -529,8 +542,9 @@ rising by exactly one kurus a bar has a return standard deviation of
 -- reading 0.380952, constant. A companion must not assume the four
 catch22 ports blank together.
 
-Causal: bar T reads closes T - length .. T - 1 (see the staleness
-note above). Measured by future-perturbation sweep -- 0 of 35
+Causal: the VALUE at bar T reads closes T - length .. T - 1 and its
+NaN mask also reads close[T] (see the staleness note above); nothing
+reads a close after T. Measured by future-perturbation sweep -- 0 of 35
 offsets leak on each of six frames with eight splices apiece, 0 of
 35 at `length` 83, 120 and 250, and 0 of 35 under a VIOLENT splice
 (20% daily volatility and a 3x jump at the cut) on all six frames --
@@ -538,15 +552,17 @@ by the one-close-at-a-time dependency map above, and by fifteen
 mutants read off this file, edited and exec'd in memory.
 ⚠ **Four mutants that look like look-aheads are not**, and the
 reason is the lag: a window shifted one bar forward still ends on
-the return of bar T, which the decimation drops. Back-dating the
-write, shifting the window one bar ahead, rolling the returns, and
-decimating from the newest end each move 1,098 to 1,099 of the
-1,400 fired bars of the walk frame -- so the edit lands -- and each
-leaks on 0 of 35 offsets, because each is still causal. The mutant
-that IS a one-bar look-ahead shifts the window TWO bars (its kept
-set then ends on the return of bar T+1): the gentle sweep catches it
-on 5 of 35 offsets, 7 with 32 splices, and the violent one on 28 of
-35. A ten-bar shift is caught 35 of 35 by both.
+the return the decimation THROWS AWAY. Its kept set ends on the
+return of bar T instead of bar T-1, so it reads close[T] -- causal,
+merely no longer stale. Back-dating the write, shifting the window
+one bar ahead, rolling the returns, and decimating from the newest
+end each move 1,098 to 1,099 of the 1,400 fired bars of the walk
+frame -- so the edit lands -- and each leaks on 0 of 35 offsets,
+because each is still causal. The mutant that IS a one-bar
+look-ahead shifts the window TWO bars, so its kept set ends on the
+return of bar T+1: the gentle sweep catches it on 5 of 35 offsets,
+7 with 32 splices, and the violent one on 28 of 35. A ten-bar shift
+is caught 35 of 35 by both.
 ⚠ **Four more are DEAD, each for a measured reason.** Centring or
 scaling each row by the whole CHUNK's mean or standard deviation,
 and cumulatively summing the profile ACROSS rows, are all the affine
@@ -574,6 +590,24 @@ Budgets of 100, 400, 999 and 10**9 are bit-equal to the default, so
 the chunk boundary is invisible. Wall clock is not quoted as a band
 because it does not reproduce.
 
+Every figure in this docstring that comes from sections A, B, C, D,
+E, G, H or Z of `docs/measure_c22_dfa.py` reproduces with `AVX512F`,
+`AVX512_SKX`, `AVX2` and `FMA3` disabled, which is what CI runs on:
+those eight were re-run under that dispatch and ONE digit in the
+whole receipt moves -- the geometric ladder's return standard
+deviation, 1.175e-16 against 1.119e-16, which is quoted above only
+as 1.2e-16 because it is rounding noise either way. That is the
+integer-choice structure again. ⚠ The exclusions are deliberate and
+they are exactly two: the wall clock and traced peak in the
+paragraph above come from section T and do not reproduce on EITHER
+dispatch, and the counts against the REFERENCE (8,400 of 8,400,
+3,084 of 3,084, and the 294 and 1,680 tallies) come from the
+GPL-3.0 sections P and Q, which were not re-run under it. The
+366-window tallies are NOT among them: they are section A5, this
+module against its own plain-Python spelling with no reference in
+the loop, and they are in the eight that were re-run. See
+`docs/C22DfaMeasured.md` section F1.
+
 Args:
     close (pd.Series): Series of 'close's
     length (int): RETURNS per window, so `length + 1` closes. At
@@ -587,6 +621,12 @@ Args:
         at 250, and the iid median moves 0.5294 / 0.5714 / 0.6053
         over 83 / 100 / 250 (section C4). A companion that passes a
         non-default `length` must re-derive its own centre.
+        ⚠ There is no ceiling, but the EVIDENCE has one: the
+        search-range rule is checked against the reference over
+        ladders of 16 to 47 scales, which is `length` 79 to 1,187
+        (sections Q6, Q7). Above that
+        `max(MIN_POINTS, round(scales / SCALE_SHARE))` is an
+        extrapolation.
         Default: 100
     offset (int): How many periods to offset the result. Default: 0
 

@@ -65,6 +65,7 @@ AVX2 and FMA3 dispatch disabled.
 """
 import importlib
 import math
+from decimal import Decimal, localcontext
 from fractions import Fraction
 from pathlib import Path
 
@@ -84,6 +85,11 @@ MODULE = importlib.import_module("pandas_ta.statistics.c22_dfa")
 SRC = Path(MODULE.__file__).read_text(encoding="utf-8")
 LENGTH = 100
 N = 1500
+#: Significant digits `value_exact` runs its logarithms and straight-line
+#: fits at. Pinned equal to the harness's `ORACLE_PREC` by
+#: `test_the_measure_script_carries_the_same_mutants`, so the two exact
+#: oracles cannot drift in precision.
+ORACLE_PREC = 60
 NTT = int(scales(LENGTH).size)                       # 21
 VALUES = tuple(i / NTT
                for i in range(min_each_side(NTT), NTT - min_each_side(NTT) + 1))
@@ -341,8 +347,6 @@ def value_exact(window):
     `Fraction`s. Only the logarithms and the two straight-line fits are
     inexact, and `margin` says how far the winner is from the runner-up.
     """
-    from decimal import Decimal, getcontext
-    getcontext().prec = 60
     w = [Fraction(float(v)) for v in window]
     n = len(w)
     profile, acc = [], Fraction(0)
@@ -368,9 +372,6 @@ def value_exact(window):
     if any(v <= 0 for v in f2):
         return None
     ntt = len(taus)
-    lt = [Decimal(t).ln() for t in taus]
-    lf = [(Decimal(v.numerator) / Decimal(v.denominator)).ln() / Decimal(2)
-          for v in f2]
 
     def ss(xs, ys):
         m = len(xs)
@@ -380,12 +381,21 @@ def value_exact(window):
             / sum((x - xm) ** 2 for x in xs)
         return sum(((v - ym) - b * (x - xm)) ** 2 for x, v in zip(xs, ys))
 
-    a = min_each_side(ntt)
-    scores = [(ss(lt[:i], lf[:i]) + ss(lt[i - 1:], lf[i - 1:]), i)
-              for i in range(a, ntt - a + 1)]
-    best = min(scores)
-    rest = min(s for s, i in scores if i != best[1])
-    return best[1], ntt, float((rest - best[0]) / best[0])
+    # `localcontext` and not `getcontext().prec = ...`: the decimal context
+    # is process-global, and an oracle has no business leaving 60 digits
+    # behind for whatever runs next (the house spelling --
+    # `tests/test_ts_cross_mean_20.py::_exact_windowed`).
+    with localcontext() as ctx:
+        ctx.prec = ORACLE_PREC
+        lt = [Decimal(t).ln() for t in taus]
+        lf = [(Decimal(v.numerator) / Decimal(v.denominator)).ln() / Decimal(2)
+              for v in f2]
+        a = min_each_side(ntt)
+        scores = [(ss(lt[:i], lf[:i]) + ss(lt[i - 1:], lf[i - 1:]), i)
+                  for i in range(a, ntt - a + 1)]
+        best = min(scores)
+        rest = min(s for s, i in scores if i != best[1])
+        return best[1], ntt, float((rest - best[0]) / best[0])
 
 
 # ------------------------------------------------------------- Gate A
@@ -648,12 +658,24 @@ def mutant(name):
 
 
 def test_the_measure_script_carries_the_same_mutants():
-    """The receipt quotes a run of its own, so the two mutant tables have to
-    be the same table."""
-    text = (ROOT / "docs" / "measure_c22_dfa.py").read_text(encoding="utf-8")
-    for name in MUTANTS:
-        assert f'"{name}"' in text, name
-    assert text.count('MUTANTS = {') == 1
+    """The receipt's §B2 quotes a run of the harness's own mutant table, so
+    the two tables have to be the SAME table -- not merely the same names.
+    The harness is imported by path and the dicts are compared whole, so an
+    edit string that drifts on one side fails here instead of shipping two
+    different Gate Bs that both report green."""
+    import importlib.util
+    path = ROOT / "docs" / "measure_c22_dfa.py"
+    spec = importlib.util.spec_from_file_location("_m_c22dfa", path)
+    harness = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(harness)
+    assert harness.MUTANTS == MUTANTS
+    assert len(MUTANTS) == 15, len(MUTANTS)
+    # The two exact oracles must round at the same precision for §A6's
+    # margins to be the same measurement. Both sides are NAMED constants and
+    # both are compared here, so changing either one alone fails.
+    assert harness.ORACLE_PREC == ORACLE_PREC, (harness.ORACLE_PREC,
+                                                ORACLE_PREC)
+    assert ORACLE_PREC == 60, ORACLE_PREC
 
 
 def _spliced(close, j, seed=909, vol=0.02, jump=1.0):
@@ -732,12 +754,19 @@ def test_the_dependency_map_is_the_hundred_closes_before_the_bar():
         assert len(movers) >= 30, (T, len(movers))
 
 
-def test_the_column_at_bar_T_does_not_read_close_T():
-    """The lag drops the window's newest return, so bar T reads closes
-    T-100 .. T-1 and is one bar STALE. Measured: perturbing close[T] alone
-    moves bar T on 0 of 4 sampled bars and bar T+1 on 3 of them (the fourth
-    is a tie). That is a disclosure, not a defect -- and the docstring
-    carries it."""
+def test_the_value_at_bar_T_does_not_read_close_T_but_the_mask_does():
+    """The lag drops the window's newest return, so the VALUE at bar T is a
+    function of closes T-100 .. T-1 and is one bar STALE. Measured:
+    perturbing close[T] by a finite factor moves bar T on 0 of 4 sampled
+    bars and bar T+1 on 3 of them (the fourth is a tie).
+
+    ⚠ The NaN MASK is the exception, and it is still causal: the finiteness
+    check and the noise floor run on the WHOLE undecimated window, so a
+    close at T that is NaN or zero blanks bar T -- 4 of 4. That is why a
+    single bad close blanks 101 bars starting AT its own bar and not 100
+    starting after it, and it is the half a consumer who truncates at T-1
+    would notice. Both halves are disclosures, not defects, and the
+    docstring carries both."""
     f = FRAMES["walk"]
     want = np.asarray(base("walk"), float)
     moved_T = moved_next = 0
@@ -749,7 +778,16 @@ def test_the_column_at_bar_T_does_not_read_close_T():
         moved_next += int(got[T + 1] != want[T + 1])
     assert moved_T == 0, moved_T
     assert moved_next >= 2, moved_next
+    for bad in (np.nan, 0.0):
+        blanked = 0
+        for T in (200, 500, 900, 1300):
+            g = f.to_numpy(dtype=float).copy()
+            g[T] = bad
+            got = np.asarray(c22_dfa(Series(g, index=f.index)), float)
+            blanked += int(np.isnan(got[T]) and not np.isnan(want[T]))
+        assert blanked == 4, (bad, blanked)
     assert "does not read close[T]" in c22_dfa.__doc__
+    assert "MASK" in c22_dfa.__doc__
 
 
 @pytest.mark.parametrize("name", ["window-two-ahead", "window-ten-ahead"])
@@ -783,6 +821,24 @@ def test_four_one_bar_mutants_are_wrong_but_still_causal(name):
     assert moved >= 500, (name, moved)
     assert _leaks(fn, FRAMES["walk"], _offsets(1500), splices=4, vol=0.2,
                   jump=3.0) == [], name
+
+
+def test_the_norms_mutant_changes_values_without_leaking():
+    """The fourth value mutant, so that every one of the fifteen has a test
+    of its own. Scoring the two residual NORMS instead of their sums of
+    squares is the reading this port first got wrong: it moves 391 of the
+    walk frame's 1,400 fired bars by up to 0.2381, and it leaks on 0 of the
+    12 offsets swept HERE (and 0 of 35 in the harness's §B2 sweep, which is
+    where that figure is measured) -- it is a WRONG column, not a non-causal
+    one, which is why Gate A pins it
+    (`test_every_load_bearing_reading_moves_the_column`) and Gate B does
+    not."""
+    got = mutant("norms-not-squares")(FRAMES["walk"])
+    moved, mask = diff_bars(base("walk"), got)
+    assert moved >= 200, moved
+    assert mask == 0, mask
+    assert _leaks(mutant("norms-not-squares"), FRAMES["walk"],
+                  _offsets(1500, count=12), splices=4) == []
 
 
 @pytest.mark.parametrize("name", ["chunk-wide-demean", "chunk-wide-sd",
@@ -888,18 +944,36 @@ def test_the_iid_centre_is_not_the_middle_of_the_range():
     assert "not the middle of the range" in c22_dfa.__doc__
 
 
-@pytest.mark.parametrize("length,lo,hi", [(MIN_LENGTH, 0.45, 0.55),
-                                          (100, 0.50, 0.65),
+@pytest.mark.parametrize("length,lo,hi", [(100, 0.50, 0.65),
                                           (250, 0.55, 0.70)])
 def test_the_centre_moves_with_the_length(length, lo, hi):
     """The value set is a function of `length` and so is the centre: the
-    same 400-window measurement reads a median of 0.529412 at 83, 0.571429
-    at 100 and 0.605263 at 250. Pinned as bands, because the digits are a
-    property of the sample."""
+    same 400-window measurement reads a median of 0.571429 at 100 and
+    0.605263 at 250. Pinned as bands, because the digits are a property of
+    the sample -- but bands that EXCLUDE 3 of the 6 values at 100 and most
+    of the 19 at 250, so they can fail. `MIN_LENGTH` is handled by name
+    below: a band there could not fail at all, since the column has only two
+    values."""
     rng = np.random.default_rng(4242)
     vals = _prop_rows(rng.normal(0.0, 0.01, (400, length)))
     a = vals[~np.isnan(vals)]
     assert lo <= float(np.median(a)) <= hi, (length, float(np.median(a)))
+
+
+def test_the_centre_at_the_length_floor_is_the_upper_of_its_two_values():
+    """At `MIN_LENGTH` the column takes exactly 8/17 and 9/17, so a BAND
+    would span its whole range and could never fail -- the vacuous-assertion
+    trap. The measured fact is sharper than a band anyway: of 400
+    independent normal windows, 215 read 9/17 and 185 read 8/17, so the
+    median is 9/17 = 0.529412 and the upper candidate is the commoner
+    one."""
+    rng = np.random.default_rng(4242)
+    vals = _prop_rows(rng.normal(0.0, 0.01, (400, MIN_LENGTH)))
+    a = vals[~np.isnan(vals)]
+    assert len(a) == 400
+    assert set(np.round(a, 12)) <= {round(8 / 17, 12), round(9 / 17, 12)}
+    assert float(np.median(a)) == 9 / 17, float(np.median(a))
+    assert float(np.mean(a == 9 / 17)) > 0.5
 
 
 def test_an_ar1_in_returns_does_not_read_like_the_cosine():

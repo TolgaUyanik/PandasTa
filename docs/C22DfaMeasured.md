@@ -1,8 +1,9 @@
 # C22-DFA measured — `c22_dfa`, catch22's DFA fluctuation scaling break (issue #128)
 
 Every number here was produced by `python docs/measure_c22_dfa.py` on this machine
-(numpy 1.26.4, pandas 2.3.3, pandas_ta 0.2.67b1+tu.1) during the porting session of
-2026-11-20. Section letters in brackets are the script's own, so each table can be
+(numpy 1.26.4, pandas 2.3.3, pandas_ta 0.2.67b1+tu.1) during the porting session that
+ran from 2026-11-20 into 2026-11-21 (the review folder is named for the day it
+started). Section letters in brackets are the script's own, so each table can be
 re-run on its own: `python docs/measure_c22_dfa.py A D`. The GPL-3.0 sections are
 opt-in: `python docs/measure_c22_dfa.py P Q Q2 Q3 Q4 Q5 Q6 Q7`.
 
@@ -32,8 +33,10 @@ Three properties decide how it can be used, and all three are measured below:
    0.619048 (§A1). `prop_bounds(length)` derives the set at any `length`: 2 values at
    83, 6 at 100, 11 at 120, 19 at 250.
 2. **The value at bar T does not read close[T]** (§B7). The decimation drops the
-   window's newest return, so bar T reads closes `T-100 .. T-1`: causal, and one bar
-   stale.
+   window's newest return, so the VALUE at bar T is a function of closes
+   `T-100 .. T-1`: causal, and one bar stale. ⚠ The NaN MASK is the exception and is
+   still causal — the finiteness check and the noise floor run on the whole
+   undecimated window, so a close at T that is NaN or zero blanks bar T (§B7b).
 3. **Its "no break" level is the TOP of the range, not the middle** (§C4): on 400
    independent normal windows the median is 0.571429 and the commonest value is
    0.619048, 147 of 400.
@@ -181,29 +184,43 @@ measured on the prototype, and Gate E is re-run on this port.
 
 ### P1b. Which reading the reference implements
 
-1,680 windows (every fifth), scored by 23 named readings. The count is windows where
-that reading equals the reference to 1e-12.
+1,680 windows (every fifth), scored by **23** named readings — every one the script
+prices, pasted from the run, nothing omitted. The count is windows where that reading
+equals the reference to 1e-12.
 
-| reading | agrees |
+| reading | agrees of 1,680 |
 |---|---|
-| **shipped** (decimate-first, cumsum after, SQUARES, shared break, `max(8, round(ntt/4))` each side) | **1,680 of 1,680** |
+| **shipped** (decimate-first, cumsum after, SQUARES, shared break, `max(8, round(ntt/4))` each side) | **1,680** |
 | shipped, plain-Python spelling | 1,680 |
+| the fluctuation over the box's d.o.f. (`tau - 2`) | 1,391 |
+| score: sum of NORMS | 1,271 |
 | `q = 1` | 1,264 |
+| a flat floor of 7 scales each side | 1,053 |
 | pieces disjoint at the break | 972 |
-| a flat floor of 5 scales each side | 873 |
+| a flat floor of 6 scales each side | 933 |
 | cumsum before the decimation | 802 |
 | end-aligned decimation AND cumsum before | 780 |
 | score: norm per point | 693 |
+| a flat floor of 9 scales each side | 688 |
 | ladder rounded down | 681 |
 | lag: end-aligned decimation | 611 |
+| the leftover points off the HEAD | 596 |
 | detrend order 2 | 495 |
+| the curve linearly resampled onto an even log grid | 423 |
+| the curve spline-resampled onto an even log grid | 265 |
 | ladder top from the raw length | 34 |
 | lag: no decimation | 21 |
-| output `(break-1)/ntt`, output `break/(ntt-1)` | 0 |
+| no decimation AND cumsum before | 21 |
+| output `(break-1)/ntt` | 0 |
+| output `break/(ntt-1)` | 0 |
 
-(The `score: sum of NORMS`, `remainder: head`, `divisor: tau - 2`, spline- and
-linearly-resampled-curve readings are in the same table in the script's output; each
-is priced in §A5 and §Q3 instead, where the comparison is sharper.)
+The strongest rivals are the two that change the curve's SHAPE least: dividing the
+pooled squares by the box's degrees of freedom (`tau - 2`), which shifts `log F` by
+`0.5 log(tau / (tau - 2))` — small, and shrinking with `tau` — and scoring norms
+instead of squares. Neither survives a 1,680-window sweep, and the `tau - 2` reading
+moves the fewest windows of any reading in §A5 that moves one at all (51 of 366; four
+others move 0 and are inert for the structural reasons §A5 gives). A reading can be
+nearly right and still be a different column.
 
 ### Q, Q2, Q3. How the three structural readings were pinned
 
@@ -219,10 +236,11 @@ So the readings were fitted to the reference as a black box:
 
 * **§Q — 2,304 pipelines** over how the lag is applied (decimate keeping the first
   point / the last / not at all), where the cumulative sum goes, which ladder, four
-  scoring rules, shared or disjoint pieces, five floors, two denominators and two
-  offsets. Best: 232 of 294 — and every one of the top eleven rows agrees on the data
-  pipeline (decimate-first, cumsum after, ladder from the decimated length), which is
-  how that part was settled.
+  scoring rules, shared or disjoint pieces, six floors (`mp` 4 .. 9), two
+  denominators and two offsets — 12 curves x 4 x 2 x 6 x 2 x 2 = 2,304. Best: 232 of
+  294 — and every one of the top eleven rows agrees on the data pipeline
+  (decimate-first, cumsum after, ladder from the decimated length), which is how that
+  part was settled.
 * **§Q2 — 560 pipelines** with the fluctuation's DIVISOR open (`boxes * tau`,
   `boxes * (tau - 1)`, `boxes * (tau - 2)`, `boxes * tau - 1`, `boxes`, 1, `tau`) and
   the leftover points off either end. The divisor turns out to be nearly inert:
@@ -273,6 +291,11 @@ them. 47 is the largest ladder the feature produces under `length` 1,400.)
 `lo`/`hi` only, and then the whole pipeline was run under each rule and compared with
 the reference window by window, across every ladder size. The shipped rule predicts it
 on **3,084 of 3,084** windows; every rival fails somewhere.
+
+⚠ **The evidence has a ceiling even though `length` does not.** Those 32 ladder sizes
+are 16 to 47 scales, i.e. `length` 79 to 1,187 — 47 is the largest ladder a
+1,400-bar frame can produce here. Above that the rule is an extrapolation, and the
+`length` argument's own documentation says so.
 
 ### Q5. The same reading, predicting the reference at other lengths
 
@@ -352,6 +375,22 @@ So the column is **causal and one bar stale**, and a consumer that pairs it with
 same-bar features is pairing yesterday's reading with today's. It is in the module
 docstring and in `docs/MLCompanionContract.md`.
 
+### B7b. ... but the NaN MASK does read close[T]
+
+The finiteness check and the noise floor run on the WHOLE undecimated window, which
+includes the return of bar T. So:
+
+| close[T] replaced by | bar T moves | bar T blanks | bar T+1 moves or blanks |
+|---|---|---|---|
+| x1.5 (finite) | 0 of 4 | 0 of 4 | 3 of 4 |
+| NaN | 4 of 4 | 4 of 4 | 4 of 4 |
+| 0 | 4 of 4 | 4 of 4 | 4 of 4 |
+
+Neither half is a look-ahead — every close read is at or before T — and this is why a
+single bad close blanks 101 bars starting AT its own bar (§H1) rather than 100
+starting after it. A consumer recomputing the column on data truncated at T-1 gets
+the same VALUES and a different MASK.
+
 ### B2. Fifteen mutants, read off the module's source, edited and exec'd in memory
 
 | mutant | leaks (gentle) | leaks (violent) | bars moved on the walk | max \|gap\| |
@@ -395,9 +434,12 @@ it: bit-equal on the walk, and caught on 12 of 12 offsets on a frame with one ba
 close, moving exactly bar J-1 on each.
 
 The remaining four — `norms-not-squares`, `no-floor`, `no-zero-fluctuation-guard`,
-`no-either-guard` — are not look-aheads at all: they change VALUES, each has its own
-test, and a causality sweep that caught them would mean the sweep is measuring the
-wrong thing.
+`no-either-guard` — are not look-aheads at all: they change VALUES, each has at least
+one test of its own in `tests/test_c22_dfa.py`, and a causality sweep that caught them
+would mean the sweep is measuring the wrong thing. (`norms-not-squares` is also the
+reading §A5 and §Q3 price, so it is pinned twice: once as a mutant that moves 391 bars
+and leaks on 0 of 12 offsets, and once as a plain-Python reading that disagrees with
+the kernel on 100 of 366 windows.)
 
 That is 2 + 4 + 4 + 1 + 4 = **fifteen**.
 
@@ -601,9 +643,8 @@ the answer is yes:
 
 **§G3c locates it: bar 754**, whose profile is straight inside every box of 17 of its
 21 scales — only 5, 7, 10 and 25 come out with `F > 0`. Unguarded it reads 0.380952,
-a value. The guard also
-blanks the overflowing window of §H2. On price-shaped frames it is inert: 0 moved bars
-and 0 mask differences on each of six.
+a value. The guard also blanks the overflowing window of §H2. On price-shaped frames
+it is inert: 0 moved bars and 0 mask differences on each of six.
 
 ---
 
@@ -646,23 +687,39 @@ reproduce.
 
 ## F — suites, and the other CPU dispatch
 
-* `python -m pytest tests/test_c22_dfa.py -q` — **185 passed**.
+* `python -m pytest tests/test_c22_dfa.py -q` — **186 passed**.
 * `python docs/measure_c22_dfa_cpu.py` — the same module with
   `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`, the list issue-solver
-  re-runs port test modules under: **185 passed**. The script refuses to run if the
+  re-runs port test modules under: **186 passed**. The script refuses to run if the
   environment edit did not take, and prints the dispatchable features still enabled
   (`SSSE3 SSE41 POPCNT SSE42 AVX F16C AVX512CD AVX512_CLX AVX512_CNL AVX512_ICL` on
   this machine).
-* Full suite: see the commit message.
+* `python -m pytest -q` (the whole repository) — **2 failed, 13,677 passed, 86
+  skipped** in 720.82 s, run on 2026-11-21 on the tree these review fixes produce
+  (the module at 186 tests). The two failures are the expected ones and nothing else:
+  `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` (this
+  port's Gate E row is owed, which is what the rules say happens until the launcher
+  records it) and
+  `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
+  (needs the sibling `../AlternativeRepos` checkout; CI deselects it by name).
+  An earlier run of the same command, before the review rounds and with the module at
+  184 tests, gave 2 failed / 13,675 passed / 86 skipped — the same two failures and
+  exactly two tests fewer. The launcher re-runs both repositories' suites in clean
+  worktrees regardless.
 
 ### F1. Which digits move with the dispatch
 
-Sections A, C, D and G were re-run under the disabled dispatch and compared table by
-table. **One digit moves in the whole receipt**: the standard deviation of the exactly
-geometric ladder's returns in §G1, 1.175e-16 against 1.119e-16 — a figure that is
-pure rounding noise and is quoted only to show it is below the floor. Everything else
-— every count, every value, every margin in §A6, every bit-equality in §D — is
-identical under both dispatches.
+Sections **A, B, C, D, E, G, H and Z** were re-run under the disabled dispatch and
+compared table by table — every section of this receipt except §T, whose wall clock
+and traced peak do not reproduce from one run to the next on either dispatch, and the
+GPL-3.0 sections §P and §Q, which are a comparison against a C library and not a
+reading of this module.
+
+**One digit moves in all eight**: the standard deviation of the exactly geometric
+ladder's returns in §G1, 1.175e-16 against 1.119e-16 — a figure that is pure rounding
+noise and is quoted only to show it is below the floor. Everything else — every
+count, every value, every margin in §A6, every bit-equality in §D, every leak count
+in §B, every Spearman in §E — is identical under both dispatches.
 
 That is not luck, and it is the reason this port can pin digits where its siblings
 pin bands: the output is `break / scales`, a ratio of two small INTEGERS, and every
