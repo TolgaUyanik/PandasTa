@@ -24,8 +24,8 @@ dispatches are re-printed by `python docs/measure_j_wae_cpu.py <section>`.
 ⚠ **Six exceptions, named here rather than left for a reader to find.**
 The script has no §F section and does not read the repo's documents, so:
 
-1. §F's counts (`244 passed`, `2 warnings`, and the full-suite line) are
-   **pytest's**, from the runs named there;
+1. §F's counts (`245 passed`, `2 warnings`, the collected totals and the
+   full-suite line) are **pytest's**, from the runs named there;
 2. the before/after counts quoted from other documents — §F's `704 → 705`
    tagged columns and `341 → 342` `SF` (**`docs/MLCompanionContract.md`'s**,
    checked by
@@ -33,12 +33,15 @@ The script has no §F section and does not read the repo's documents, so:
    and the Wiring table's `359 → 360` / `367 → 368` / `87 → 88`
    (**`README.md`'s**, checked by `tests/test_readme_counts.py`) — are read
    off those files' diffs;
-3. §E's and §E0's screen figures are **issue #123's**, quoted: run
+3. §E0's screen figures are **issue #123's**, quoted: run
    `screen_r2_20261024`, 89 ALTPORT-1 frames, 398,849 bars, 329 + 358
    comparators, canary bit-equal, 0.8698 / `BB_PctB_Pctl` / n = 391,907 /
    0.8715 / 0.8565 / 0.8536, and the fork-overlap stage's 0.8562 / 0.8606
    on 12 frames (§L's script prints 0.8562 as a quoted line, not as a
-   measurement). The port's own Gate E run has **not happened yet**;
+   measurement). **§E1, §E2 and §C3's real-data block are the launcher's
+   Gate E run** of 2026-11-20 (`is123-j_wae-39655747`), read out of its
+   output folder — also not this script's, and not readable from this
+   worktree;
 4. the "web access is unavailable" line below is a fact about the session,
    not a printed measurement. The jesse-absence flag next to it **is**
    printed, by §ENV;
@@ -76,9 +79,9 @@ what the 2026-10-24 screen measured.
 |---|---|
 | A Correctness | **PASS** — matches an independent bar-by-bar oracle on 1,460 of 1,460 bars of each of six frames, identical NaN masks, to 1.692e-10 absolute / 4.302e-11 relative at Spearman 1.0000; the MACD leg is BIT-EQUAL to this fork's `macd` and the width leg BIT-EQUAL to its `bbands`; `talib.EMA(20) - talib.EMA(40)` is the same leg to 1.273e-11, firing at the same bar |
 | B Causality | **PASS** — 0 of 36 sweep catches on six frames; six look-ahead mutants live and caught 36 of 36 on three frames; three blind-spot edits caught 0 by the sweep and all three by the oracle |
-| C Reachability | **PASS (synthetic)** — 1,460 of 1,500 bars on each of six frames, 1,460 distinct values each, 4,297 of 8,760 pooled bars negative, **0 exactly zero**. ⚠ Real-data counts are **OWED**: they come from the launcher's Gate E run |
+| C Reachability | **PASS** — synthetic: 1,460 of 1,500 bars on each of six frames, 1,460 distinct values each, 4,297 of 8,760 pooled bars negative, **0 exactly zero**; real (the Gate E run): **395,289 of 398,849** BIST bars fire and the same **395,289** are non-zero, so **0** real fired bar reads exactly 0.0 (§C3) |
 | D Scale-free | **PASS** — ×8/×64 bit-identical on six frames and at price levels 1e-6, 1e+6, 1e+100; ×10/×3.7/×0.1/×1.0000001 within 5.267e-10 absolute with every NaN mask matching; `0 < fires < n`. ⚠ The usual "a level shift moves it" non-vacuity limb FAILS here, because the column is affine-invariant; §D5 substitutes a one-bar nudge |
-| E Attribution | **pending** — Gate E: pending, run by issue-solver after this session |
+| E Attribution | **DISCLOSE_GAP — ships with the disclosure** — max \|ρ\| **0.8698142454259801** vs the manifest's `BB_PctB_Pctl` over n = **391,907**, top-five per-frame max median **0.8715545505700394** over **89** frames, 687 comparators; measured 2026-11-20 by issue-solver, run `is123-j_wae-39655747` (§E1). No column is removed and no waiver is needed |
 | F Suites | this repo's suite run below; both repos' suites are the launcher's |
 
 **The one thing to read first.** This port does **not** reproduce the screen
@@ -89,9 +92,18 @@ with no seed and uses the algebraic width `4σ`. §A4 measures the gap:
 **1,399 … 1,435 of the 1,460 shared bars disagree**, by up to **2.664e+00**,
 and unlike `j_chandelier_dist`'s warm-up transient it **does not wash out** —
 the last disagreement falls at bar 1,499 of 1,500 on all six. The prototype
-also fires 21 bars earlier. So the screen's DISCLOSE_GAP figures are
-evidence about a **neighbouring column**, and the port's own Gate E run is
-what decides this one's band.
+also fires 21 bars earlier. So the screen's DISCLOSE_GAP figures were
+evidence about a **neighbouring column**, and the port's own Gate E run of
+2026-11-20 is what decided this one's band.
+
+**And it landed on the same band and the same comparator.** Max \|ρ\|
+**0.8698142454259801** vs `BB_PctB_Pctl` over n = 391,907, per-frame max
+median 0.8715545505700394 — the leading figure, the comparator and n to
+every digit issue #123 prints, while the 2nd and 3rd comparators moved in
+the fourth decimal (`MACD_Hist_ATR` 0.8568 against 0.8565,
+`MACD_Hist_ATR_Pctl` 0.8535 against 0.8536). Two columns 2.664e+00 apart at
+Spearman 0.9983 … 1.0000 is exactly the shape that moves a **rank**
+correlation by ~1e-4 and leaves the band where it was. §E2 reads it out.
 
 **The second thing.** This column is **affine-invariant**, not merely
 scale-free: every EMA of `close + k` is that EMA plus `k`, so the MACD
@@ -334,12 +346,33 @@ holes (pinned by `test_reachability_on_the_varying_frames`).
 Both are why "not a constant column" is asserted on the VARYING frames
 only.
 
-### C3 the real-data limb — **OWED**
+### C3 the real-data limb — **MEASURED** (the Gate E run, 2026-11-20)
 
-Gate C's real-data counts come from the launcher's Gate E run over the 89
-BIST frames and are **not in this receipt yet**. The receipt session fills
-them in, as it did for `j_chandelier_dist` (`docs/JChandelierDistMeasured.md`
-§C3).
+From `overlap_max.csv` of run `is123-j_wae-39655747`, over the 89 frozen
+ALTPORT-1 BIST frames:
+
+| figure | value |
+|---|---|
+| pooled bars | **398,849** |
+| non-NaN (fired) | **395,289** |
+| non-zero | **395,289** |
+
+So the column fires on **395,289 of 398,849** real bars, and the **same
+395,289** are non-zero: **0** real fired bar reads exactly 0.0, which is the
+real-data limb of the `== 0` column §C1 measures on synthetic frames (0 on
+each of the six, 0 pooled).
+
+`398,849 − 395,289 = 3,560 = 89 × 40` — the 40-bar warm-up §C1 measures,
+recounted here as an identity between two of the run's own numbers. ⚠ It is
+**not** a per-frame measurement: the run prints no per-frame fired count, so
+"every frame loses exactly its leading 40 bars" is consistent with these two
+totals and is **not** measured. Nor is any infinity count printed, so "no
+real bar is infinite" is **not** measured either — §G2 and §G3's routes are
+synthetic.
+
+The comparator the band reads, `BB_PctB_Pctl`, overlaps on n = **391,907**
+of those 395,289 bars, 3,382 fewer: the comparator's own missing bars, not
+this column's.
 
 ---
 
@@ -431,17 +464,164 @@ reason.
 
 ## §E Gate E
 
-**Gate E: pending, run by issue-solver after this session.**
+**Gate E: measured 2026-11-20 by issue-solver.** Run
+`is123-j_wae-39655747`,
+`gate_e_overlap.py run --module pandas_ta.momentum.j_wae` at default
+parameters, recorded into `docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record … --measured 2026-11-20`, which printed
+`j_wae:J_WAE_150_20_40_20_2.0 DISCLOSE_GAP 0.8698 vs BB_PctB_Pctl`.
 
-Nothing in this worktree reads `../Backtesting`; the launcher runs
-`gate_e_overlap.py run --module pandas_ta.momentum.j_wae` after the porting
-session, records the row with `docs/gate_e_ledger.py record`, and a later
-receipt session writes the measured numbers into this section.
-`tests/test_j_wae.py::test_no_gate_e_row_is_recorded_yet` asserts the row
-is absent and is the cue; until it is recorded,
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails on a local run, which is the **owed-measurement** state `CLAUDE.md`
-describes rather than a defect in this port.
+⚠ Every figure in §E1 and §E2 is the **launcher's** run output, read out of
+that folder's `overlap_max.csv`, `top25.csv`, `perframe.csv`,
+`degenerate.csv` and `meta.json`. `docs/measure_j_wae.py` prints none of
+them, and this worktree can neither read the 89 frames nor run the harness;
+`python docs/measure_j_wae_contract.py` prints the ledger row the documents
+have to agree with.
+
+### §E1 the verdict
+
+| figure | value |
+|---|---|
+| column | `J_WAE_150_20_40_20_2.0` |
+| pooled max \|ρ\| | **0.8698142454259801** (positive; `rho` = `abs_rho`) |
+| against | **`BB_PctB_Pctl`**, from the `ml_features` manifest |
+| n | **391,907** |
+| per-frame max median \|ρ\| | **0.8715545505700394**, against `BB_PctB_Pctl`, over **89** frames |
+| verdict | **DISCLOSE_GAP** (`r3-perframe-0.90`), pooled-only verdict the same |
+| waiver | **none** — only STRUCK needs one |
+
+`0.80 ≤ 0.8698142454259801 < 0.90`, and the largest per-frame median among
+the top five is the same comparator's **0.8715545505700394**, **0.0284**
+under the 0.90 line. Both limbs of the band therefore give DISCLOSE_GAP and
+the column **ships with this disclosure**: nothing is removed and no waiver
+is needed. Issue #123's *Done when* is met by a ship; a measured revert
+would have closed it equally well and is not what the numbers say.
+
+**Run facts** (`meta.json`): 89 frames, **398,849** pooled bars, **687**
+comparators (**329** `compute_all` + **358** `ml_features` `1d`), `kwargs`
+empty, nothing excluded, canary *AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS
+bit-equal*, pandas 2.3.3 / numpy 1.26.4, data stamp
+`1be6495ef7095ff67ad8f59a2fc0311d74f02652`, engine code
+`d4b78314a2ef494d6e36f77afc13a3178536f249`, module sha1
+`159e58f3809dd1b0b58458d021f0b12e513e525e`, tree sha1
+`3ca1107edd5d7125b33631bab4176cb4e2713b2d`. **One** comparator was
+degenerate and dropped — `squeeze_SQZ_NO` (manifest), reason `constant`
+(`degenerate.csv`) — so **686** carried a correlation.
+
+**The five nearest comparators** (`top25.csv`, pooled; `perframe.csv` for
+the same five). Every one of the five is a manifest column:
+
+| against | pooled \|ρ\| | n | per-frame median | per-frame max | per-frame min | frames ≥ 0.90 | frames ≥ 0.80 |
+|---|---|---|---|---|---|---|---|
+| `BB_PctB_Pctl` | **0.8698142454259801** | 391,907 | **0.8715545505700394** | 0.9092969602639043 | 0.7743634318430944 | **5 of 89** | 88 of 89 |
+| `MACD_Hist_ATR` | 0.8568217256216852 | 395,289 | 0.8579333539156462 | 0.8773466790492896 | 0.8349883108456296 | 0 of 89 | **89 of 89** |
+| `MACD_Hist_ATR_Pctl` | 0.8535455693627491 | 390,661 | 0.8541426746054753 | 0.8720899829235261 | 0.8342468606676526 | 0 of 89 | **89 of 89** |
+| `pgo` | 0.8457405769244867 | 395,289 | 0.8470283057074977 | 0.8945869848848321 | 0.7459982362665182 | 0 of 89 | 85 of 89 |
+| `CCI_Pctl` | 0.8454301122353177 | 391,907 | 0.8498918947335661 | 0.8853546079062564 | 0.7484827699980081 | 0 of 89 | 85 of 89 |
+
+The frame counts are recounted from `perframe.csv`'s percentages against
+its own `n_frames` 89: 5.617977528089887 % is **5** frames,
+98.87640449438202 % is **88**, 95.50561797752809 % is **85**, 100.0 % is
+**89**.
+
+**What the disclosure actually is**, read off that table rather than
+asserted:
+
+1. **two families, not one.** `BB_PctB_Pctl` is where the Bollinger
+   denominator shows up and `MACD_Hist_ATR` / `MACD_Hist_ATR_Pctl` are where
+   the MACD numerator does, and they sit 0.0130 apart (0.8698 against
+   0.8568). A miner fed this column together with a percentile-ranked %B
+   **or** with a MACD histogram over an ATR double-weights one of the two
+   halves, which is the note the ML companion contract now carries.
+2. **the MACD family is the steadier of the two.** `MACD_Hist_ATR` reaches
+   0.80 on **all 89** frames (min 0.8350, max 0.8773) while `BB_PctB_Pctl`
+   spreads 0.7744 … 0.9093 — so the lower pooled figure comes with the
+   tighter spread, and 0.8568 is the more reliable of the two overlaps even
+   though 0.8698 is the number the band reads.
+3. **5 of 89 frames cross 0.90 against `BB_PctB_Pctl` individually**, up to
+   0.9093. The band reads the per-frame **median**, not the tail, so they do
+   not strike the column — but they are the honest reading of "0.8698
+   pooled", and 88 of 89 frames sit at 0.80 or above.
+4. **the pooled and per-frame limbs do not agree on the order.** `CCI_Pctl`
+   is 5th pooled (0.8454) and 4th per-frame (median 0.8499), overtaking
+   `pgo` (0.8457 pooled, 0.8470 per-frame). Both stay far under the line, so
+   the swap changes no verdict; it is recorded because the two limbs are
+   different measurements and reading one as a proxy for the other is how a
+   band gets misquoted.
+
+**`compute_all`'s own nearest is lower**: `ZSCORE_20` at
+**0.8305331047713075** over n = 395,289, **0.0393** below the manifest's
+best. `BB_%B` (compute_all) and `BB_PctB` (manifest) both read
+**0.8305331037748611** — the same figure to 9 digits as `ZSCORE_20`,
+differing by 1.0e-9, which is what a Spearman does to three monotone
+transforms of one quantity.
+
+⚠ **The percentile-ranked %B overlaps MORE than %B itself** — 0.8698 against
+0.8305, a 0.0393 gap on what the engine presumably computes from the same
+band. A rolling percentile is not a monotone transform of the whole series,
+so it is free to move a rank correlation in either direction; **why it moves
+it UP here is not measured** — this worktree cannot read either column's
+code.
+
+### §E2 against the screen's prototype figure
+
+| figure | the PORT's run (2026-11-20) | the SCREEN's prototype (2026-10-24) |
+|---|---|---|
+| max \|ρ\| | **0.8698142454259801** | **0.8698** (4 decimals, as issue #123 prints it) |
+| against | `BB_PctB_Pctl` (manifest) | `BB_PctB_Pctl` (manifest) |
+| n | **391,907** | **391,907** |
+| per-frame max median | **0.8715545505700394** | **0.8715** |
+| verdict | **DISCLOSE_GAP** | **DISCLOSE_GAP** |
+| 2nd comparator | `MACD_Hist_ATR` **0.8568** | `MACD_Hist_ATR` **0.8565** |
+| 3rd comparator | `MACD_Hist_ATR_Pctl` **0.8535** | `MACD_Hist_ATR_Pctl` **0.8536** |
+| comparator set | 687 (329 + 358) | 329 + 358 |
+
+The leading figure, its comparator, its n and the per-frame figure agree to
+**every digit issue #123 prints**. The 2nd and 3rd comparators **moved**:
+0.8568 against 0.8565 (+0.0003) and 0.8535 against 0.8536 (−0.0001). So the
+run is not the screen's run restated — it is a **different column** measured
+through the same harness, and the two columns' Spearman ranks differ by
+roughly 1e-4 where their values differ by up to 2.664e+00.
+
+That is the reading §A4 predicts and §E0's warning did not: §A4 measures the
+prototype **1,399 … 1,435 of 1,460 shared bars apart** from this module,
+without converging, yet at Spearman **0.9983 … 1.0000** — and Spearman is
+what Gate E measures. The pre-run draft of this receipt said the screen's
+figures "describe a neighbouring column", which stays literally true; what
+the run adds is that **the neighbour's band is this column's band too**, to
+four decimals on the top comparator and to the fourth decimal on the next
+two.
+
+**The three things the screen's figure did not settle, settled:**
+
+1. the harness imported **this module** — `meta.json`'s `candidate_source`
+   is `pandas_ta/momentum/j_wae.py` with sha1
+   `159e58f3809dd1b0b58458d021f0b12e513e525e`, which `record` re-derived
+   from this tree — and the engine's frames left **395,289 of 398,849** real
+   bars firing, **0** of them exactly zero (§C3);
+2. the **687**-comparator set found nothing closer than the screen's own
+   `BB_PctB_Pctl`, and `compute_all`'s nearest (`ZSCORE_20`, 0.8305) is
+   0.0393 below it;
+3. the **per-frame** limb reads 0.8716 as the maximum of the top five's
+   medians, 0.0017 ABOVE the pooled figure and 0.0284 below the 0.90 line,
+   with 5 of 89 frames above 0.90 individually.
+
+⚠ **What is still not read here**: what the engine computes under the names
+`BB_PctB_Pctl`, `MACD_Hist_ATR`, `MACD_Hist_ATR_Pctl` or `pgo`. §L's
+`MACD_Hist_ATR` was this session's **invented retyping**, and it came within
+**0.0037** of the engine's real figure (0.8531 synthetic median against
+0.8568) — the closest §L got on any row, and still a guess rather than a
+reading of the engine's code.
+
+⚠ **`pandas_ta/momentum/j_wae.py` was deliberately NOT edited in this
+session**, so its docstring still reads "The port's own Gate E run is what
+decides its band, and it is PENDING". The ledger pins `module_sha1`
+`159e58f3809dd1b0b58458d021f0b12e513e525e` to the bytes the harness
+imported, and `tests/test_gate_e_ledger.py::test_row_still_describes_its_module`
+re-derives it — so a docstring fix would invalidate the measurement it
+describes. The measured numbers live here, in `docs/gate_e_ledger.csv`, in
+`docs/MLCompanionContract.md` and in `tests/test_j_wae.py`. A later session
+that edits that module for any other reason should fix the paragraph then.
 
 ### §E0 what the screen measured, on the PROTOTYPE
 
@@ -461,7 +641,9 @@ not Gate E): max \|ρ\| **0.8562** vs `pgo:PGO_14`, per-frame max median
 ⚠ **Those figures describe a different column.** §A4 measures the
 prototype disagreeing with the shipped one on 1,399 … 1,435 of 1,460 bars
 by up to 2.664e+00, without converging. They are quoted as the prior, not
-as this port's result.
+as this port's result — and §E2 is where the port's own run is read against
+them. It agrees with the leading figure to every digit the issue prints and
+moves the next two comparators in the fourth decimal.
 
 ---
 
@@ -608,23 +790,50 @@ frames:
 
 Three things keep this from being a verdict:
 
-1. six synthetic frames are not 89 real ones. On the one comparator where
-   both figures exist — `pgo:PGO_14` — the synthetic median is 0.8580
-   against the screen's real **0.8562**, so here the synthetic frames read
-   **high by 0.0018**, not low;
+1. six synthetic frames are not 89 real ones. ⚠ **Re-read against the port's
+   own Gate E run (2026-11-20), this table reads HIGH on two of its three
+   measurable rows and low on the third:**
+
+   | this table's comparator | synthetic median | the Gate E run's pooled \|ρ\| | gap |
+   |---|---|---|---|
+   | `pgo:PGO_14` | 0.8580 | `pgo` **0.8457405769244867** | synthetic **high by 0.0123** |
+   | `bbands` %B (20, 2) | 0.8473 | `BB_%B` / `BB_PctB` **0.8305331037748611** | synthetic **high by 0.0168** |
+   | `MACD_Hist_ATR` (retyped) | 0.8531 | `MACD_Hist_ATR` **0.8568217256216852** | synthetic **low by 0.0037** |
+
+   The pre-run draft of this point compared the 0.8580 with the screen's
+   stage-2 figure 0.8562 and called the synthetic frames "high by 0.0018";
+   against the port's own 89-frame Gate E figure for `pgo` the gap is
+   **0.0123**, which is the number to use. Worst of the three is 0.0168, so
+   this table was within 0.017 of the run on every row it could be checked
+   against — and `MACDh_12_26_9 / close` and the two rows below `roc` have
+   no counterpart in the run's output and remain **unchecked**;
+
+   ⚠ The synthetic TAIL was worse than the real one, not better: this
+   table's `pgo:PGO_14` maximum over six frames is **0.9519**, while the Gate
+   E run's per-frame maximum against `pgo` over 89 real frames is
+   **0.8945869848848321** — no real frame reached 0.90 on that comparator;
+
 2. `MACD_Hist_ATR` is **retyped and invented**: the engine's column of that
    name is not readable from this repo, so what is measured is
    `macd(close)["MACDh_12_26_9"] / atr(high, low, close, 14)`, this
    session's guess at it. It is labelled as such in the script's own
    output. The engine's `MACD_Hist_ATR` is also one of the screen's top
-   three comparators (0.8565), which is why the guess is worth printing;
+   three comparators (0.8565), which is why the guess is worth printing —
+   and the Gate E run measured the engine's own column at **0.8568**, so the
+   guess was out by 0.0037 and is **still not a reading of the engine's
+   code**;
 3. a single frame crosses 0.90 on `pgo:PGO_14` (0.9519) and on %B (0.9401).
    The band rule reads a MEDIAN, and both medians sit in DISCLOSE_GAP.
 
 ⚠ The family is the point: `PGO_14` is `(close − SMA) / EMA(TR)` — a price
 displacement over a volatility — and this column is a MACD displacement
 over a volatility. They answer a neighbouring question, and the port's own
-Gate E run is what prices that.
+Gate E run priced it: the manifest's `pgo` — its column of that name, not
+this fork's `PGO_14`, which is **not** what the harness compared against —
+is the **4th** nearest of the 686 comparators that carried a correlation, at
+0.8457 pooled and 0.8470 per-frame median, under the 0.90 line and under
+`BB_PctB_Pctl` (0.8698) and `MACD_Hist_ATR` (0.8568). So the family §L
+points at is real and is **not** where this column's largest overlap sits.
 
 ---
 
@@ -641,27 +850,46 @@ Nothing else in this repo cites these two numbers.
 
 ## §F suites
 
-* `python -m pytest tests/test_j_wae.py -q` — **244 passed, 2 warnings**.
-* `python docs/measure_j_wae_cpu.py` — the same **244 passed, 2 warnings**
+⚠ Re-run by the **receipt session** of 2026-11-20, after the Gate E row was
+recorded. The porting session's figures are given beside each one.
+
+* `python -m pytest tests/test_j_wae.py -q` — **245 passed, 2 warnings**
+  (244 before: the two pending-Gate-E tests were replaced by the three
+  §E1 names).
+* `python docs/measure_j_wae_cpu.py` — the same **245 passed, 2 warnings**
   under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`, which the
   script refuses to run unless all four are actually disabled. It prints
   the dispatchable features still enabled: `SSSE3`, `SSE41`, `POPCNT`,
   `SSE42`, `AVX`, `F16C`, `AVX512CD`, `AVX512_CLX`, `AVX512_CNL`,
   `AVX512_ICL`.
-* Count and wiring tests: `python -m pytest -q tests/test_altport2_ports.py
-  tests/test_readme_counts.py tests/test_ml_companions.py
-  tests/test_indicator_list_tables.py` — **40 passed, 7 skipped, 2
-  warnings** (the
-  seven need `../AlternativeRepos`, the sibling repo's `IndicatorList.md`
-  or the parent repo's parquet cache).
-* Full suite: `python -m pytest -q` — **2 failed, 12953 passed, 86
-  skipped** (re-run 2026-11-20 after the rebase onto `dev`; before it, on
-  the pre-rebase tree, 2 failed, 12360 passed, 86 skipped). The two are
+* `python -m pytest -q tests/test_j_wae.py tests/test_gate_e_ledger.py
+  tests/test_ml_companions.py` — **1,381 passed**, so the owed-row failure
+  is gone and the contract's new Gate E paragraph does not break
+  `tests/test_ml_companions.py`.
+* Count and wiring tests, porting session: `python -m pytest -q
+  tests/test_altport2_ports.py tests/test_readme_counts.py
+  tests/test_ml_companions.py tests/test_indicator_list_tables.py` — **40
+  passed, 7 skipped, 2 warnings** (the seven need `../AlternativeRepos`, the
+  sibling repo's `IndicatorList.md` or the parent repo's parquet cache). Not
+  re-run by the receipt session, which touched none of the counts.
+* Full suite: `python -m pytest -q` — **1 failed, 12962 passed, 86 skipped**
+  in 419 s. The one is
   `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`,
-  the `AlternativeRepos`-dependent test CI deselects by name, and
-  `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-  which reports `['j_wae']` and nothing else — the **owed Gate E row** §E
-  describes, not a defect.
+  the `AlternativeRepos`-dependent test CI deselects by name, and nothing
+  else. The porting session read **2 failed, 12953 passed, 86 skipped**
+  (and 2 failed, 12360 passed, 86 skipped before its rebase onto `dev`); the
+  second failure was
+  `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+  reporting `['j_wae']`, the **owed Gate E row**, which this session's
+  `record` closed. The code under test did not change between the two runs,
+  and the **9 further passes** are accounted for: the collected total moved
+  **13,041 → 13,049** (+8), of which **+1** is this session's net test swap
+  and **+7** are `tests/test_gate_e_ledger.py` tests the new row
+  parametrises — it matches **8** of them
+  (`python -m pytest tests/test_gate_e_ledger.py --collect-only -k j_wae`),
+  one of which, `test_every_new_indicator_has_gate_b_and_d_tests[j_wae]`,
+  was already collected from `Category` before the row existed. The ninth
+  pass is the owed test itself, moving from failed to passed.
 * `docs/MLCompanionContract.md`: 704 → 705 tagged columns, 341 → 342 `SF`.
 * The parent repo's suite is the launcher's.
 
@@ -681,3 +909,13 @@ and the documents that count it: `README.md` (359 → 360 registered, 367 →
 368 callable, momentum 87 → 88), `docs/IndicatorDictionary.md`
 (regenerated), `docs/MLCompanionContract.md`, and
 `tests/test_altport2_ports.py`'s `CATEGORY_TOTAL`.
+
+The receipt session of 2026-11-20 added `docs/gate_e_ledger.csv`'s row and
+`docs/measure_j_wae_contract.py`, which prints every mention of
+`J_WAE_150_20_40_20_2.0` in the documents that name it next to the ledger
+row they have to agree with. It exists because
+`docs/MLCompanionContract.md` keeps its column inventory on one line long
+enough that this repo's reading tools refuse to print it in context, so the
+one sentence that had to stop saying "pending" could not be read any other
+way. It changed **no** shipped code: `pandas_ta/momentum/j_wae.py` is
+byte-for-byte the file the harness imported (§E2).

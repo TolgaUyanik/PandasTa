@@ -111,23 +111,39 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    both guards off, so the finite mask's own load-bearing case is
    UNPROVEN here and this file says so instead of implying a measurement.
 
-8. **Gate E is PENDING.** The launcher runs it after the porting session;
-   `test_no_gate_e_row_is_recorded_yet` is the receipt session's cue and
-   is expected to be REPLACED, not to keep passing. The screen's
-   DISCLOSE_GAP figures (0.8698 vs `BB_PctB_Pctl`, n = 391,907) describe
-   the PROTOTYPE, which item 2 measures as a different column.
+8. **Gate E is MEASURED: DISCLOSE_GAP, so the column ships.** Run
+   `is123-j_wae-39655747` of 2026-11-20, pooled max |rho|
+   0.8698142454259801 vs the manifest's `BB_PctB_Pctl` over n = 391,907,
+   top-five per-frame max median 0.8715545505700394 over 89 frames,
+   recorded in `docs/gate_e_ledger.csv`. Three tests pin it:
+   `test_the_gate_e_row_is_recorded_and_says_disclose_gap` (the row, the
+   band's two limbs, the empty waiver),
+   `test_the_receipt_carries_the_measured_gate_e_numbers` (the receipt
+   repeats them, and no longer claims "pending") and
+   `test_gate_cs_real_data_limb_is_in_the_receipt` (395,289 of 398,849
+   real bars fire and the same 395,289 are non-zero). They replaced the
+   two pending-Gate-E tests of the porting session.
+   ⚠ The run agrees with the SCREEN's figures (which item 2 measures as a
+   different column) to every digit issue #123 prints on the leading
+   comparator, and moves the next two in the fourth decimal -- 0.8568
+   against 0.8565, 0.8535 against 0.8536. Spearman is a RANK correlation,
+   and item 2's two columns sit at Spearman 0.9983 .. 1.0000.
 
 Every number above is printed by `python docs/measure_j_wae.py` and by
 `python docs/measure_j_wae_cpu.py <section>` under numpy's reduced CPU
 dispatch, with the exceptions `docs/JWaeMeasured.md` lists above its §A1 --
-of which one matters here: an ASSERTED bound quoted next to a measurement
-(1e-7 in items 1 and 5) is this file's own constant, not run output. The
-measured figure beside it is a run.
+of which two matter here: an ASSERTED bound quoted next to a measurement
+(1e-7 in items 1 and 5) is this file's own constant, not run output, and
+item 8's figures are the LAUNCHER's Gate E run, which this worktree can
+neither reproduce nor read the frames of. The measured figure beside an
+asserted bound is a run.
 
-NOT pinned here: Gate E's own arithmetic. The in-fork overlap figures of
-§L are SYNTHETIC and are a disclosure, not a gate -- `pgo`'s `PGO_14` at a
-per-frame median 0.8580 over six frames against the screen's 0.8562 over
-12 real ones.
+NOT pinned here: Gate E's own arithmetic -- the three tests above check
+that the recorded row and the receipt agree, not that the correlation is
+right. The in-fork overlap figures of §L are SYNTHETIC and are a
+disclosure, not a gate: `pgo`'s `PGO_14` at a per-frame median 0.8580 over
+six frames against the Gate E run's 0.8457 pooled for the manifest's `pgo`
+over 89 real ones, so those six frames read HIGH by 0.0123 there.
 """
 import csv
 import importlib.util
@@ -1092,22 +1108,75 @@ def test_the_docstrings_first_paragraph_survives_the_dictionary_cut():
     assert "MACD" in cut and "Bollinger" in cut
 
 
-def test_the_receipt_says_gate_e_is_pending():
-    """⚠ Expected to be REPLACED by the receipt session, not to keep
-    passing: the launcher runs Gate E after this session and a later
-    session writes the measured numbers in."""
+def test_the_receipt_carries_the_measured_gate_e_numbers():
+    """The receipt is the deliverable issue #123 asks for, so the Gate E run
+    of 2026-11-20 has to live in it and not only in the ledger.
+
+    ⚠ The PORT's figures and the 2026-10-24 screen PROTOTYPE's are pinned
+    side by side on purpose. They agree to every digit the issue prints on
+    the leading comparator (0.8698, `BB_PctB_Pctl`, n = 391,907, per-frame
+    0.8715) although `test_the_screen_prototypes_ema_is_a_different_column`
+    measures the two columns up to 2.664e+00 apart -- Spearman is a RANK
+    correlation. The run id is pinned too, because an expected agreement is
+    the easiest kind of row to copy over from the wrong run by mistake, and
+    so are the two comparators that MOVED: the engine's `MACD_Hist_ATR`
+    reads 0.8568217256216852 against the screen's 0.8565, and
+    `MACD_Hist_ATR_Pctl` 0.8535455693627491 against 0.8536."""
     doc = (ROOT / "docs" / "JWaeMeasured.md").read_text(encoding="utf-8")
-    assert "Gate E: pending, run by issue-solver after this session" in doc
-    assert "0.8698" in doc             # the SCREEN's figure, on the prototype
+    assert "Gate E: measured 2026-11-20 by issue-solver" in doc
+    assert "0.8698142454259801" in doc     # the PORT's pooled max
+    assert "0.8715545505700394" in doc     # its per-frame max median
+    assert "0.8568217256216852" in doc     # 2nd comparator, the PORT's
+    assert "0.8535455693627491" in doc     # 3rd comparator, the PORT's
+    assert "0.8565" in doc                 # the SCREEN's 2nd, on the prototype
+    assert "0.8536" in doc                 # the SCREEN's 3rd
     assert "BB_PctB_Pctl" in doc
+    assert "is123-j_wae-39655747" in doc
+    assert "r3-perframe-0.90" in doc
     assert "DISCLOSE_GAP" in doc
+    # the "pending" wording this test replaced must be gone as a claim
+    assert "Gate E: pending, run by issue-solver" not in doc
 
 
-def test_no_gate_e_row_is_recorded_yet():
-    """The receipt session's cue. `tests/test_gate_e_ledger.py` fails on a
-    local run until the row exists -- that is the owed-measurement state
-    CLAUDE.md describes, not a defect in this port."""
+def test_the_gate_e_row_is_recorded_and_says_disclose_gap():
+    """The row exists, names the one shipped column, and carries the verdict
+    the `r3-perframe-0.90` bands give. DISCLOSE_GAP ships with the
+    disclosure and removes nothing; only STRUCK needs a waiver, so the
+    waiver column has to stay empty."""
     path = ROOT / "docs" / "gate_e_ledger.csv"
     with path.open(newline="", encoding="utf-8") as handle:
         rows = [r for r in csv.DictReader(handle) if r["indicator"] == "j_wae"]
-    assert rows == []
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["column"] == COLUMN
+    assert row["module"] == "pandas_ta.momentum.j_wae"
+    assert row["verdict"] == "DISCLOSE_GAP"
+    # the band: 0.80 <= pooled < 0.90 and no top-5 per-frame MEDIAN at 0.90
+    assert 0.80 <= float(row["max_abs_rho"]) < 0.90
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+    assert row["against"] == "BB_PctB_Pctl"
+    assert row["against_set"] == "manifest"
+    assert int(row["n_comparators"]) == 687
+    assert int(row["n_frames"]) == 89
+    assert int(row["pooled_bars"]) == 398849
+    assert row["verdict_schema"] == "r3-perframe-0.90"
+    assert row["run"] == "is123-j_wae-39655747"
+    assert row["measured"] == "2026-11-20"
+    assert row["waiver"] == ""             # only STRUCK needs one
+
+
+def test_gate_cs_real_data_limb_is_in_the_receipt():
+    """Gate C's real-data counts come from the same run, and the receipt has
+    to state them: a reachability claim measured only on synthetic frames is
+    the defect CLAUDE.md names.
+
+    395,289 of 398,849 pooled BIST bars are non-NaN and the SAME 395,289 are
+    non-zero -- the real-data limb of the `== 0` column
+    `test_reachability_on_the_varying_frames` measures synthetically. The
+    missing 3,560 are 89 x the 40-bar warm-up."""
+    doc = (ROOT / "docs" / "JWaeMeasured.md").read_text(encoding="utf-8")
+    assert "395,289" in doc           # non-NaN, and non-zero, of 398,849
+    assert "398,849" in doc
+    assert "3,560" in doc             # 89 x the 40-bar warm-up
+    assert 89 * SLOW == 3560          # recounted from the module's constant
+    assert "### C3 the real-data limb — **OWED**" not in doc
