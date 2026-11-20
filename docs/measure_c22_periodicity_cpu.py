@@ -18,10 +18,11 @@ rather than a flag.
 Why it matters here. Every shipped value is a LAG: an integer decided by the
 SIGNS of two autocorrelation slopes and by one comparison against 0.01. Both
 come out of reductions -- a 5-column matrix product for the spline fit, then
-`sum(D[:-k] * D[k:])` per lag -- that a vectorised kernel may reassociate,
-moving them in the last bits. They are not nearly tied: the measured minimum
-slope at the reported peak is 2.0e-05 and the minimum rise above the
-threshold 3.3e-04 (`docs/C22PeriodicityMeasured.md` section D5), eleven
+`sum(D[:-k] * D[k:])` per lag, plus the window's variance -- that a
+vectorised kernel may reassociate, moving them in the last bits. They are not
+nearly tied: the measured minimum slope at the reported peak is 7.1e-05 and
+the minimum rise above the
+threshold 2.6e-05 (`docs/C22PeriodicityMeasured.md` section D5), ten
 orders of magnitude above a last-bit question, which is why the tests pin
 bounds and bands rather than digits -- and why this run is worth doing anyway
 rather than assumed.

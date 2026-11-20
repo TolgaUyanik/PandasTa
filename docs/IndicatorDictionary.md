@@ -230,7 +230,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 |---|---|---|---|---|---|
 | `arch_lm` | C | `length=None` | `ARCHLM_100` SF | 100 | Engle's Lagrange-multiplier test for autoregressive conditional heteroskedasticity, over a rolling window of one-bar returns: regress the squared… |
 | `c22_ami_timescale` | C | `length=None` | `C22AMITIMESCALE_100` ORD | 100 | How soon the last `length` daily returns stop looking like their own lagged copy: for each lag 1 .. 40, correlate the window with itself shifted by… |
-| `c22_periodicity` | C | `length=None` | `C22PERIODICITY_100` ORD | 100 | The period of the last `length` daily returns, read the way Wang, Wirth and Wang (2007) read one: detrend the window with a single-knot cubic… |
+| `c22_periodicity` | C | `length=None` | `C22PERIODICITY_100` ORD | 100 | The period of the last `length` daily returns, read the way Wang, Wirth and Wang (2007) read one: z-score the window, detrend it with a single-knot… |
 | `covariance` | C | `other=None`, `length=None`, `ddof=None` | `COV_30_1` SF | 30 | The trailing covariance of two series over `length` bars. The two-series counterpart of `variance`, and the unnormalised counterpart of `correlation`. |
 | `cusum` | C | `length=None` | `CUSUM_100` SF | 100 | The largest standardised rise of log price over any earlier reference bar in a rolling window: for each reference bar n, the log change from n to the… |
 | `diff2_acf1` | C | `length=None` | `DIFF2ACF1_100` SF | 99 | The lag-1 autocorrelation of the twice-differenced log close over a rolling window: difference log price once to get log returns, again to get the… |

@@ -231,3 +231,63 @@ above contained a slash-joined list of five counts, which
 reads as a PINEBI verdict split and failed on. The quote now carries spaces
 inside that list, and the round-1 heading says so.
 
+⚠ **Everything above describes the tree at commit `34536ce`.** Two later
+commits moved it: `c908892` (the Gate E numbers, Gate C's real-data limb,
+the test swap) and the round below, which changed shipped values. The
+figures quoted above — 261 tests, 8,376 of 8,400, Spearman +0.9980, 24
+disagreements, 2,794 of 2,802, "the biased autocorrelations" — are the ones
+those three rounds reviewed.
+
+## Pre-push review gate, round 1 of 3 (HEAD `c908892`)
+
+Not a Fletcher subagent: the launcher's own pre-push gate, run by the
+issue-solver harness against the committed tree. It reconciled every Gate E
+digit and the ledger row with the launcher's `gatee/` outputs, re-derived
+the windowing as prefix-causal, and confirmed Wang's scan, the `ceil(n/3)`
+ceiling and the spline space. It raised two MAJOR findings. Quoted:
+
+> The autocorrelation departs from the cited source formula, and the
+> justification given for the departure misstates the source. The module
+> computes `acf(k) = Σ d_i d_{i+k} / Σ d²` (biased, normalised by the
+> *residual's* own sum of squares). hctsa's `PD_PeriodicityWang` — the
+> operation the feature name points at — does not call `CO_AutoCorr`; it
+> spells the autocorrelations inline as `acf(i) = mean(y(1:N-i).*y(i+1:N))`,
+> and catch22's C reference divides the same products by `size - tau`. That
+> is the ADJUSTED divisor, on a series whose unit variance comes from
+> catch22's *global z-score applied before the detrend*. … None of the
+> fourteen alternatives tried is the faithful spelling, so the harness has
+> not priced the source's own reading.
+
+> Gate F's record does not match the suite at HEAD and contradicts §E of the
+> same file. … HEAD's own commit wrote that ledger row, so that failure no
+> longer exists.
+
+and two smaller ones: the review logs still described the pre-Gate-E tree
+(MINOR), and the manifest's quoted issue text was truncated mid-sentence
+(NIT).
+
+**What was done.** The faithful spelling was implemented as a harness
+variant first, in three conventions, and SCORED against the GPL-3.0
+reference before anything shipped — the gate's own instruction, and the
+only way to answer it with a measurement instead of an argument:
+
+| reading | equals the reference, of 2,802 |
+|---|---|
+| source spelling: z-score (`ddof` 1), `n − k` divisor | **2,798** |
+| the same, population z-score (`ddof` 0) | 2,798 |
+| the same, residual re-demeaned | 2,798 |
+| the shipped biased divisor | 2,794 |
+
+So the faithful reading is also the better-measured one, by 4 windows, and
+it ships. Consequences, each measured rather than reasoned:
+
+| what | result |
+|---|---|
+| the module | z-score before the detrend, spelled as one division by `(n − k) · var` at the end; `ZSCORE_DDOF = 1`; the overflow limb split onto its own line and the window's variance added to it |
+| the harness | `value_source` added with the full knob set; every ablation in §A1, §A5b, §A6, §A6b, §A7, §A8, §D5, §G and §P1b rebased onto it, so each prices ONE change; the exact rational oracle updated (the z-score's square root cancels); §P1b now scores 18 readings |
+| agreement with the reference | 8,376 → **8,387 of 8,400**, Spearman +0.9980 → **+0.9993**, 24 → **13** disagreements (14 of the old ones gone, 3 new) |
+| every other receipt figure | re-measured: §A3's cosine law now exact at P = 30 too, §A5b's detrend table, §A6, §A6b, §B2's mutant catches, §B4's tie density, §C1's distinct values, §D5's margins, §G's unguarded sets, §T's cost |
+| Gate E | **withdrawn.** The run measured the pre-fix column, so the ledger row was removed, §E and §C4 went back to owed with the withdrawn digits kept and labelled, and the three row-pinning tests were swapped back for two that assert the row is owed |
+| Gate F | re-run; see the receipt's §F, which now records HEAD's own counts |
+| the review logs | `99-summary.md` and this file carry a dated note saying which tree they describe; the manifest's A2 row says it was wrong and what replaced it; its truncated quote is restored |
+

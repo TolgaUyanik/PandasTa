@@ -1,5 +1,31 @@
 # Run summary — auto-2026-11-20-c22-periodicity
 
+⚠ **This file is a HISTORICAL record of the porting session's three review
+rounds (2026-11-20). It describes the tree at commit `34536ce` and nothing
+after it.** Two later commits changed what it says:
+
+* `c908892` recorded the Gate E run and Gate C's real-data limb and swapped
+  the two pending-Gate-E tests for three that pin the row (262 tests).
+* the PRE-PUSH review gate, round 1, found that the autocorrelation's
+  divisor was not the one the sources spell, and the fix changed shipped
+  values. `PD_PeriodicityWang` writes `acf(i) = mean(y(1:N-i).*y(i+1:N))`
+  and catch22's C divides by `size - tau`, both on a window z-scored BEFORE
+  the detrend; the module now does that. Consequences, all in
+  `docs/C22PeriodicityMeasured.md`: agreement with the GPL-3.0 reference
+  rose from 8,376 to **8,387 of 8,400** (Spearman +0.9980 → **+0.9993**,
+  24 disagreements → **13**, and 2,794 → **2,798** of the 2,802-window
+  subsample); **Gate E and Gate C's real-data limb are OWED AGAIN**, the
+  ledger row having been removed because its run measured the pre-fix
+  column; the test module is **268 tests**, green here and under the CI
+  dispatch.
+
+Figures below that moved with that fix — "261 tests", "99.71%", "8,376",
+"+0.9980", "fourteen alternative readings", "the biased autocorrelations" —
+are left as written, because this is the record of what those rounds
+reviewed. The Gate E and §C4 follow-ups at the bottom, which `c908892`
+discharged, are accurate again: both are owed, and the two pending-Gate-E
+tests are back.
+
 | task | status | review rounds | files touched | follow-ups |
 |---|---|---|---|---|
 | `c22-periodicity` (issue #126) | **PASS** at round 3 | 3 (REVISE, REVISE, PASS) | 7 new, 7 modified — see below | Gate E and Gate C's real-data limb are the launcher's; both repos' suites are the launcher's; the OWED RULE for issues #130 and #137 |

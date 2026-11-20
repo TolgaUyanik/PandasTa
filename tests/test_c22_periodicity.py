@@ -10,40 +10,52 @@ order of how much it would hurt to lose:
    qualifying peak of the autocorrelations of what a single-knot cubic
    REGRESSION SPLINE leaves behind, and that spline is not decoration: over
    467 windows of each STOCHASTIC frame (the constant cosine frame is immune
-   to all of these and moves 0), dropping it moves 50 to 202 bars, a straight
-   line 37 to 177, one cubic with no knot 18 to 107, the knot at a third
-   instead of the middle 12 to 70, and three pieces 26 to 119. The shipped
+   to all of these and moves 0), dropping it moves 52 to 202 bars, a straight
+   line 41 to 175, one cubic with no knot 19 to 105, the knot at a third
+   instead of the middle 12 to 69, and three pieces 26 to 110. The shipped
    structure is also the one the GPL-3.0 reference measurably agrees with --
-   99.71% of 8,400 windows, against 83.2% to 95.5% for those five on the
+   99.85% of 8,400 windows, against 83.2% to 95.5% for those five on the
    2,802-window subsample both were scored on -- which is the evidence that
    `spap2(2, 4, 1:N, y)` was read correctly. Wang's three CONDITIONS are
    ablated the same way: dropping (a) "a trough before it" moves 124 to 190
    bars of 467 on four frames (and 0 on the AR(1) one, named rather than
    averaged in), allowing a negative peak -- (c) -- moves 106 to 190 on those
-   same four frames and **319** on the AR(1) one, and (b)'s threshold at
-   th = 0.1 moves up to 91.
+   same four frames and **316** on the AR(1) one, and (b)'s threshold at
+   th = 0.1 moves up to 90.
+1b. **THE AUTOCORRELATION'S DIVISOR, which the sources PIN.**
+   `PD_PeriodicityWang` spells the line `acf(i) = mean(y(1:N-i).*y(i+1:N))`
+   and catch22's C divides the same products by `size - tau`, both on a
+   series catch22 z-scores BEFORE the detrend -- so the divisor is
+   `(n - k) * var(window)` and condition (b)'s absolute 0.01 lives in
+   pre-detrend z-scored units. ⚠ This module shipped the BIASED reading
+   (the products over the RESIDUAL's own sum of squares) until 2026-11-20,
+   and that deviation is priced here, not described: it moves 6 bars of
+   2,802 and agrees with the reference on 2,794 of 2,802 where the shipped
+   reading agrees on 2,798. The two conventions the source line does NOT fix
+   -- the z-score's divisor (`ZSCORE_DDOF`) and whether the residual is
+   re-centred -- move 0 of those 2,802 each.
 2. **The exact rational oracle agrees.** An oracle that rounds ZERO times
    (input doubles, spline basis, least-squares coefficients,
-   autocorrelations and all three Wang conditions as exact `Fraction`s)
+   autocorrelations and all three Wang conditions as exact `Fraction`s --
+   the z-score's square root cancels, since only `var` is needed)
    disagrees on 0 of 648 windows. Two more spellings of the same fit
    (`np.linalg.lstsq`, the normal equations) and one independent
    implementation of the same spline (`scipy.interpolate.LSQUnivariateSpline`,
    a B-spline basis) move 0 of 1,200 windows each.
 3. **The cosine law is exact.** Returns that are an exact cosine of period P
-   read exactly P on every fired bar at P = 8, 10, 12, 15, 20 and 25 -- a
+   read exactly P on every fired bar at P = 8, 10, 12, 15, 20, 25 and 30 -- a
    CONSTANT column by construction, which is the feature working rather than
    a dead column. Past the lag ceiling `ceil(length / 3) - 1` = 33 the
-   measure goes blind: at P = 40 and 60 every fired bar reads the sentinel 0,
-   and at P = 34, the first period over the ceiling, the column reads 0 on
-   the median bar and 33 on the rest (values {0, 33}).
+   measure goes blind: at P = 34, 40 and 60 every fired bar reads the
+   sentinel 0.
 4. **0 is a SENTINEL and the FLOOR**, "no qualifying peak", not a short
    period. It is rare on the frames here (0 of 5,600 bars on the four
    stochastic non-AR frames, 10 of 1,400 on the AR(1) one), which is exactly
    why a consumer must not learn its meaning from the data.
 5. **Causality.** 0 of 35 offsets leak on each of six frames with eight
-   splices apiece, and 0 of 35 at `length` 30, 120 and 250. Six mutants are
+   splices apiece, and 0 of 35 at `length` 30, 120 and 250. Seven mutants are
    read off this module's own source, edited and exec'd in memory.
-   ⚠ A ONE-BAR look-ahead is only detectable on 8 of 35 offsets (walk) and 9
+   ⚠ A ONE-BAR look-ahead is only detectable on 8 of 35 offsets (walk) and 8
    of 35 (tick-rounded): the column is a small integer that ties on 79% to
    100% of neighbouring bar pairs, so most splices cannot witness the shift.
    The ten-bar mutant is caught 33 to 35 of 35. Prefix truncation would prove
@@ -55,7 +67,7 @@ order of how much it would hurt to lose:
    x10, x3.7, x0.1 and x1.0000001 moved 0 bars of 8,400 here -- which the
    arithmetic does not promise for an integer decided by float comparisons;
    what makes it hold is the measured margin, the smallest deciding slope
-   being 2.0e-05 and the smallest rise-above-threshold 3.3e-04.
+   being 7.1e-05 and the smallest rise-above-threshold 2.6e-05.
 7. **One blanking rule with a real cost.** A window is NaN unless its
    DETRENDED root mean square clears 9.09e-13. It is inert on anything with
    noise in it (0 bars differ from the unguarded spelling on each of six
@@ -65,26 +77,24 @@ order of how much it would hurt to lose:
    `c22_ami_timescale` fires on all 1,400 bars and this column on none.
 8. **Bad data.** A close that is NaN, infinite, zero, negative or subnormal
    empties exactly its own 101 windows; a close PAIR whose ratio overflows
-   empties 100; and a window whose residual sums of squares overflow while
-   the returns stay finite empties 100 -- without that last guard those bars
+   empties 100; and a window whose sums of squares overflow while the
+   returns stay finite empties 100 -- without that last guard those bars
    read the SENTINEL 0, which is a value and not a blank.
-9. **Gate E: SHIP, measured 2026-11-20** (run `is126-c22_periodicity-c73140e9`,
-   89 ALTPORT-1 BIST frames, 687 comparators). Pooled max |rho| 0.0415 vs
-   `cdl_doji` (n = 389,949), top-5 per-frame max median 0.0950 vs `EMA_200`,
-   0 of 89 frames at 0.90. Both an order of magnitude under the 0.76 ship
-   line, so nothing is removed and no waiver is needed; the tests pin the
-   ledger row's identity and the BANDS (< 0.76, < 0.90) rather than the
-   digits.
-   ⚠ The 2026-10-24 screen's figure (max |rho| 0.0413 vs the same `cdl_doji`)
+9. **Gate E is OWED AGAIN.** It was measured on 2026-11-20 and that run is
+   WITHDRAWN: the autocorrelation's divisor was corrected the same day
+   (item 1b), so the run's module sha1, output fingerprint and counts belong
+   to a column this tree no longer computes. The ledger row was removed,
+   `test_the_gate_e_row_is_owed` asserts there is none, and
+   `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+   fails until the launcher re-runs Gate E and a receipt session records the
+   new row. That failure is expected.
+   ⚠ The 2026-10-24 screen's figure (max |rho| 0.0413 vs `cdl_doji`, SHIP)
    was measured on the PROTOTYPE, which is the GPL-3.0 reference's column,
-   and this port is NOT bit-identical to it: 8,376 of 8,400 sampled windows
-   equal, Spearman +0.9980. The two agreeing to three decimals is a result,
-   not a tautology.
-10. **Gate C's real-data limb, from the same run**: 389,949 of 398,849 pooled
-    bars non-NaN -- exactly 89 frames x the 100-bar warm-up, so no BIST bar
-    was lost to item 7's floor -- and 21 of those read the sentinel (0.0054%,
-    rarer than on any synthetic frame here). Every OTHER count in this file
-    is synthetic.
+   and this port is NOT bit-identical to it: 8,387 of 8,400 sampled windows
+   equal, Spearman +0.9993. So that figure is an expectation, not a result.
+10. **Gate C's real-data limb is owed too** -- every count in this file is
+    synthetic. The receipt says so in §C4, keeps the withdrawn run's figures
+    labelled as the pre-fix column's, and a test checks that it does.
 
 Not pinned on purpose: exact counts of distinct values, exact bars-moved
 counts under an inexact rescale, and any rho to 1e-6. Those move with
@@ -105,7 +115,7 @@ from pandas import DataFrame, Series
 from .context import pandas_ta
 from pandas_ta.statistics.c22_periodicity import (
     CHUNK_VALUES, MIN_LENGTH, NOISE_FLOOR, NO_PERIOD, SPLINE_DIM, TH,
-    _spline_basis, c22_periodicity)
+    ZSCORE_DDOF, _spline_basis, c22_periodicity)
 
 ROOT = Path(__file__).resolve().parent.parent
 MODULE = importlib.import_module("pandas_ta.statistics.c22_periodicity")
@@ -277,25 +287,68 @@ def resid_scipy(window):
     return w - LSQUnivariateSpline(x, w, t=[(w.size - 1) / 2.0], k=3)(x)
 
 
-def value_of(resid, th=TH, demean=True, adjusted=False, strict=True,
-             acmax=None, need_trough=True, need_positive=True):
-    r = np.asarray(resid, float)
-    n = r.size
-    d = r - r.mean() if demean else r
-    ss = float((d * d).sum())
-    if not ss > 0.0:
+def value_src(window, th=TH, ddof=ZSCORE_DDOF, fit=None, demean=True,
+              strict=True, acmax=None, need_trough=True, need_positive=True):
+    """The SOURCE spelling of the quantity, written without the module.
+
+    catch22 z-scores the series BEFORE the detrend, and both
+    `PD_PeriodicityWang` (`acf(i) = mean(y(1:N-i).*y(i+1:N))`) and catch22's
+    C reference (`acf[tau-1] /= size - tau`) average each lag's products over
+    the `n - k` pairs that exist. So: z-score, detrend, average, scan. The
+    module divides one sum by `(n - k) * var` instead of dividing the series
+    by `sd` first, which is the same quantity rounded differently.
+
+    `fit` takes the z-scored window and returns its residual.
+    """
+    w = np.asarray(window, float)
+    n = w.size
+    sd = float(w.std(ddof=ddof))
+    if not (np.isfinite(sd) and sd > 0.0):
         return float("nan")
+    z = (w - w.mean()) / sd
+    r = (fit or resid_qr)(z)
+    d = r - r.mean() if demean else r
     m = acmax or -(-n // 3)
-    acf = []
-    for k in range(1, m + 1):
-        num = float((d[:n - k] * d[k:]).sum())
-        acf.append(num / (ss * (n - k) / n) if adjusted else num / ss)
+    acf = [float((d[:n - k] * d[k:]).sum()) / (n - k) for k in range(1, m + 1)]
+    if not np.isfinite(acf).all():
+        return float("nan")
     return float(_scan(acf, th=th, strict=strict, need_trough=need_trough,
                        need_positive=need_positive))
 
 
+def value_biased(resid, th=TH):
+    """The reading this module shipped until 2026-11-20 and no longer does:
+    the lagged products over the RESIDUAL's own sum of squares. Kept so the
+    deviation from the source line can be priced rather than asserted."""
+    r = np.asarray(resid, float)
+    n = r.size
+    d = r - r.mean()
+    ss = float((d * d).sum())
+    if not ss > 0.0:
+        return float("nan")
+    acf = [float((d[:n - k] * d[k:]).sum()) / ss
+           for k in range(1, -(-n // 3) + 1)]
+    return float(_scan(acf, th=th))
+
+
+def src_acf(window):
+    """The autocorrelations the shipped scan reads, spelled as the module
+    spells them: products of the spline residual over `(n - k) * var`, `var`
+    taken on the window BEFORE the detrend."""
+    w = np.asarray(window, float)
+    n = w.size
+    d = resid_qr(w)
+    d = d - d.mean()
+    var = float(w.var(ddof=ZSCORE_DDOF))
+    return np.array([float((d[:n - k] * d[k:]).sum()) / ((n - k) * var)
+                     for k in range(1, -(-n // 3) + 1)])
+
+
 def value_exact(window):
-    """The definition in exact rational arithmetic -- zero roundings."""
+    """The definition in exact rational arithmetic -- zero roundings.
+
+    The z-score's `sd` is irrational and never needed: the quantity divides
+    by `(n - k) * var`, and `var` is rational."""
     y = [Fraction(float(v)) for v in window]
     n = len(y)
     t = [Fraction(i, n - 1) for i in range(n)]
@@ -324,9 +377,11 @@ def value_exact(window):
     mean = sum(resid, Fraction(0)) / n
     d = [v - mean for v in resid]
     ss = sum(v * v for v in d)
-    if ss == 0:
+    wmean = sum(y, Fraction(0)) / n
+    var = sum((v - wmean) ** 2 for v in y) / (n - ZSCORE_DDOF)
+    if ss == 0 or var == 0:
         return float("nan")
-    acf = [sum(d[i] * d[i + k] for i in range(n - k)) / ss
+    acf = [sum(d[i] * d[i + k] for i in range(n - k)) / ((n - k) * var)
            for k in range(1, -(-n // 3) + 1)]
     return float(_scan(acf, th=Fraction(1, 100)))
 
@@ -371,7 +426,7 @@ def test_the_same_spline_space_fitted_another_way_agrees(how, frame):
     moved = ran = 0
     for i in range(0, win.shape[0], WINDOW_STRIDE):
         mine = float(base(frame).iloc[int(bars[i])])
-        other = value_of(fit(win[i]))
+        other = value_src(win[i], fit=fit)
         moved += int(not (mine == other
                           or (math.isnan(mine) and math.isnan(other))))
         ran += 1
@@ -379,7 +434,7 @@ def test_the_same_spline_space_fitted_another_way_agrees(how, frame):
     assert moved == 0, (how, frame, moved)
 
 
-@pytest.mark.parametrize("period", [8, 10, 12, 15, 20, 25])
+@pytest.mark.parametrize("period", [8, 10, 12, 15, 20, 25, 30])
 def test_a_cosine_in_returns_reads_its_own_period(period):
     """The deterministic scale: a return series that is an exact cosine of
     period P reads exactly P, on every fired bar. This is the law that says
@@ -412,8 +467,10 @@ def test_the_lag_ceiling_is_a_ceil_and_its_top_lag_is_reachable():
 def test_a_period_past_the_lag_ceiling_reads_the_sentinel(period):
     """The autocorrelations stop at `ceil(length / 3)` and a peak needs a
     neighbour on each side, so no period above 33 can be reported at
-    `length` 100. Measured: every fired bar reads the sentinel at P = 40 and
-    60, and P = 34 reads it on the median bar."""
+    `length` 100. Measured: every fired bar reads the sentinel at P = 34, 40
+    and 60. Only the median is pinned at P = 34, the first period over the
+    ceiling, where a peak can still sit on the ceiling itself and the exact
+    set is a rounding question."""
     s = c22_periodicity(cosine_returns(period=float(period))).dropna()
     assert float(s.median()) == float(NO_PERIOD)
     if period >= 40:
@@ -431,13 +488,14 @@ def test_the_detrend_structure_is_load_bearing(knots, degree, floor_moved,
                                                frame):
     """A later "simplification" of the spline would change shipped values.
     Measured over 467 windows of each stochastic frame: a straight line moves
-    37 to 177 bars, one cubic 18 to 107, the knot at a third 12 to 70, three
-    pieces 26 to 119. The bounds here are well under the smallest of those,
+    41 to 175 bars, one cubic 19 to 105, the knot at a third 12 to 69, three
+    pieces 26 to 110. The bounds here are well under the smallest of those,
     because the exact count moves with numpy's CPU dispatch."""
     win, bars = windows(FRAMES[frame])
     idx = list(range(0, win.shape[0], 3))
     mine = [float(base(frame).iloc[int(bars[i])]) for i in idx]
-    other = [value_of(resid_qr(win[i], knots=knots, degree=degree))
+    other = [value_src(win[i],
+                       fit=lambda z: resid_qr(z, knots=knots, degree=degree))
              for i in idx]
     moved = diff_bars(mine, other)[0]
     assert moved >= floor_moved, (frame, knots, degree, moved)
@@ -445,34 +503,67 @@ def test_the_detrend_structure_is_load_bearing(knots, degree, floor_moved,
 
 @pytest.mark.parametrize("frame", STOCHASTIC)
 def test_dropping_the_detrend_is_the_biggest_change_of_all(frame):
-    """Not detrending at all moves 50 to 202 bars of 467 and drops the rank
-    correlation to +0.47 .. +0.86 -- so the spline is the step that makes
+    """Not detrending at all moves 52 to 202 bars of 467 and drops the rank
+    correlation to +0.49 .. +0.85 -- so the spline is the step that makes
     this column what it is."""
     win, bars = windows(FRAMES[frame])
     idx = list(range(0, win.shape[0], 3))
     mine = [float(base(frame).iloc[int(bars[i])]) for i in idx]
-    other = [value_of(win[i]) for i in idx]
+    other = [value_src(win[i], fit=lambda z: z) for i in idx]
     assert diff_bars(mine, other)[0] >= 30, frame
     assert spearman(mine, other) < 0.95
 
 
-def test_the_adjusted_autocorrelation_is_a_different_column():
-    """The sources name "the autocorrelations" without pinning the divisor.
-    This module ships the BIASED reading (hctsa's `CO_AutoCorr(.., 'Fourier')`
-    -- the products that exist over all `n` deviations); the ADJUSTED one
-    (divided by the `n - k` pairs) is a real alternative and it moves values:
-    2, 5 and 1 bars of 467 on the tick-rounded, AR(1) and Student-t frames,
-    0 on the walk, the penny and the cosine. The count is POOLED over the
-    three (measured 8, bound 3) because one of them moves a single bar, and
-    one bar of CPU-dispatch drift must not turn a true statement red."""
+def test_the_shipped_autocorrelation_is_the_source_line_not_the_biased_one():
+    """The divisor is PINNED by the sources, and it is not the biased one.
+
+    `PD_PeriodicityWang` does not call `CO_AutoCorr`: it spells the line
+    `acf(i) = mean(y(1:N-i).*y(i+1:N))`, and catch22's C reference divides
+    the same products by `size - tau` -- the ADJUSTED divisor, on a series
+    catch22 z-scores BEFORE the detrend, which is what makes condition (b)'s
+    absolute 0.01 dimensionless. This module shipped the BIASED reading (the
+    products over the residual's own sum of squares) until 2026-11-20 and
+    attributed it to `CO_AutoCorr(.., 'Fourier')`; that was wrong, and the
+    deviation is priced here rather than described.
+
+    Measured: the biased reading moves 6 bars of 2,802 windows of six frames
+    (1 tick-rounded, 4 AR(1), 1 Student-t; 0 on the walk, the penny and the
+    cosine) and it agrees with the GPL-3.0 reference on 2,794 of 2,802 where
+    the shipped reading agrees on 2,798 (receipt §P1b). The count is POOLED
+    over the three frames that move (measured 6, bound 3) because two of
+    them move a single bar and one bar of CPU-dispatch drift must not turn a
+    true statement red.
+    """
     moved = 0
     for frame in ("tick-rounded", "ar1", "student-t"):
         win, bars = windows(FRAMES[frame])
         idx = list(range(0, win.shape[0], 3))
         mine = [float(base(frame).iloc[int(bars[i])]) for i in idx]
-        other = [value_of(resid_qr(win[i]), adjusted=True) for i in idx]
+        other = [value_biased(resid_qr(win[i])) for i in idx]
         moved += diff_bars(mine, other)[0]
     assert moved >= 3, moved
+    # and the module says so where a reader will look
+    doc = c22_periodicity.__doc__
+    assert "mean(y(1:N-i).*y(i+1:N))" in doc
+    assert "size - tau" in doc
+
+
+@pytest.mark.parametrize("frame", list(FRAMES))
+def test_the_two_conventions_the_source_line_leaves_open_move_nothing(frame):
+    """The source line fixes neither the z-score's divisor nor whether the
+    spline residual is re-centred before the products, so both are measured
+    rather than argued: 0 bars of 467 on each of six frames for each, and
+    both readings agree with the reference on the same 2,798 of 2,802
+    windows (receipt §P1b). `ZSCORE_DDOF` is 1 because that is MATLAB
+    `zscore`'s divisor and so hctsa's."""
+    win, bars = windows(FRAMES[frame])
+    idx = list(range(0, win.shape[0], 3))
+    mine = [float(base(frame).iloc[int(bars[i])]) for i in idx]
+    pop = [value_src(win[i], ddof=0) for i in idx]
+    raw = [value_src(win[i], demean=False) for i in idx]
+    assert diff_bars(mine, pop)[0] == 0, frame
+    assert diff_bars(mine, raw)[0] == 0, frame
+    assert ZSCORE_DDOF == 1
 
 
 @pytest.mark.parametrize("frame", list(FRAMES))
@@ -480,11 +571,20 @@ def test_demeaning_the_residual_moves_nothing(frame):
     """The spline's span contains the constant function, so its residual
     already sums to zero: the demean inside the autocorrelation is there
     because that is what an autocorrelation IS, not because it moves a
-    value. Measured: 0 bars of 467 on each frame."""
+    value. Measured: 0 bars of 467 on each frame, spelled here through the
+    module's own normalisation rather than through `value_src`'s."""
     win, bars = windows(FRAMES[frame])
     idx = list(range(0, win.shape[0], 3))
     mine = [float(base(frame).iloc[int(bars[i])]) for i in idx]
-    other = [value_of(resid_qr(win[i]), demean=False) for i in idx]
+    other = []
+    for i in idx:
+        w = win[i]
+        r = resid_qr(w)
+        var = float(w.var(ddof=ZSCORE_DDOF))
+        n = w.size
+        acf = [float((r[:n - k] * r[k:]).sum()) / ((n - k) * var)
+               for k in range(1, ACMAX + 1)]
+        other.append(float(_scan(acf)) if var > 0 else float("nan"))
     assert diff_bars(mine, other)[0] == 0, frame
 
 
@@ -492,12 +592,12 @@ def test_demeaning_the_residual_moves_nothing(frame):
 def test_the_threshold_is_load_bearing(frame):
     """Wang's third condition -- the peak must stand `th` above the trough
     before it -- is the 0.01 in the feature's own name. At th = 0.1 between
-    38 and 91 bars of 467 move on the stochastic frames; at th = 0 between 0
+    38 and 90 bars of 467 move on the stochastic frames; at th = 0 between 0
     and 15 do."""
     win, bars = windows(FRAMES[frame])
     idx = list(range(0, win.shape[0], 3))
     mine = [float(base(frame).iloc[int(bars[i])]) for i in idx]
-    ten = [value_of(resid_qr(win[i]), th=0.1) for i in idx]
+    ten = [value_src(win[i], th=0.1) for i in idx]
     assert diff_bars(mine, ten)[0] >= 20, frame
 
 
@@ -508,7 +608,7 @@ def test_wangs_other_two_conditions_are_load_bearing(frame):
     the two the scan's bookkeeping could most easily get wrong, so they are
     ablated rather than trusted. Over 467 windows per frame, dropping (a)
     moves 124 to 190 bars on these four frames and allowing a negative peak
-    moves 106 to 190 on them -- and 319 on the AR(1) frame, which the next
+    moves 106 to 190 on them -- and 316 on the AR(1) frame, which the next
     test covers for (a) and §A6b tabulates for both.
     ⚠ Two frames are excluded BY NAME rather than averaged in: on the AR(1)
     frame dropping (a) moves 0 (its autocorrelation always dips before the
@@ -516,8 +616,8 @@ def test_wangs_other_two_conditions_are_load_bearing(frame):
     win, bars = windows(FRAMES[frame])
     idx = list(range(0, win.shape[0], 3))
     mine = [float(base(frame).iloc[int(bars[i])]) for i in idx]
-    no_trough = [value_of(resid_qr(win[i]), need_trough=False) for i in idx]
-    any_sign = [value_of(resid_qr(win[i]), need_positive=False) for i in idx]
+    no_trough = [value_src(win[i], need_trough=False) for i in idx]
+    any_sign = [value_src(win[i], need_positive=False) for i in idx]
     assert diff_bars(mine, no_trough)[0] >= 50, frame
     assert diff_bars(mine, any_sign)[0] >= 50, frame
 
@@ -530,7 +630,7 @@ def test_dropping_the_trough_condition_is_inert_on_the_ar1_frame():
     win, bars = windows(FRAMES["ar1"])
     idx = list(range(0, win.shape[0], 3))
     mine = [float(base("ar1").iloc[int(bars[i])]) for i in idx]
-    other = [value_of(resid_qr(win[i]), need_trough=False) for i in idx]
+    other = [value_src(win[i], need_trough=False) for i in idx]
     assert diff_bars(mine, other)[0] == 0
 
 
@@ -546,32 +646,28 @@ def test_the_strictness_of_the_extremum_test_is_unreached_on_every_frame_measure
     win, bars = windows(FRAMES[frame])
     idx = list(range(0, win.shape[0], 3))
     mine = [float(base(frame).iloc[int(bars[i])]) for i in idx]
-    other = [value_of(resid_qr(win[i]), strict=False) for i in idx]
+    other = [value_src(win[i], strict=False) for i in idx]
     assert diff_bars(mine, other)[0] == 0, frame
     flat = 0
     for i in idx[::7]:
-        d = resid_qr(win[i])
-        d = d - d.mean()
-        ss = float((d * d).sum())
-        acf = np.array([float((d[:LENGTH - k] * d[k:]).sum()) / ss
-                        for k in range(1, ACMAX + 1)])
-        flat += int(np.sum(np.diff(acf) == 0.0))
+        flat += int(np.sum(np.diff(src_acf(win[i])) == 0.0))
     assert flat == 0, (frame, flat)
 
 
 @pytest.mark.parametrize("frame", list(FRAMES))
 def test_z_scoring_the_window_changes_nothing(frame):
-    """catch22 z-scores its input; this module does not, because the measure
-    cannot see it -- the spline fit is equivariant, and the
-    autocorrelations are normalised by the residual's own variance.
-    Measured on 200 windows per frame: 0 moved. It is also true of the
-    reference (61 of 61 windows)."""
+    """The module z-scores the window itself, as catch22 does, so z-scoring
+    the INPUT must be inert: the spline fit is equivariant and the z-score of
+    a z-score is itself up to rounding. Measured on 200 windows per frame: 0
+    moved -- which also means a caller handing this column pre-normalised
+    returns gets the same values. It is true of the reference too (61 of 61
+    windows, receipt §P2)."""
     win, bars = windows(FRAMES[frame])
     for i in range(0, win.shape[0], WINDOW_STRIDE):
         w = win[i]
         z = (w - w.mean()) / w.std()
-        a = value_of(resid_qr(w))
-        b = value_of(resid_qr(z))
+        a = float(base(frame).iloc[int(bars[i])])
+        b = value_src(z)
         assert a == b or (math.isnan(a) and math.isnan(b)), (frame, i, a, b)
 
 
@@ -626,8 +722,8 @@ MUTANTS = {
                         "r = np.where(np.isfinite(np.roll(r, -1)), r, np.nan)"),
     "chunk-wide-demean": ("d = resid - resid.mean(axis=1, keepdims=True)",
                           "d = resid - resid.mean()"),
-    "no-overflow-guard": ("bad |= ~np.isfinite(ss) | ~(rms > NOISE_FLOOR)",
-                          "bad |= ~(rms > NOISE_FLOOR)"),
+    "no-overflow-guard": ("bad |= ~np.isfinite(ss) | ~np.isfinite(var)",
+                          "bad |= np.zeros_like(bad)"),
 }
 
 
@@ -840,14 +936,14 @@ def test_an_exact_geometric_ladder_never_fires_and_the_floor_is_why(step):
     -- under the 9.09e-13 floor. Unguarded it fires all 1,400 bars and reads
     inside [3, 11], values a reader could not tell from a real frame's. The
     bound below is wider than that on purpose: the frame IS rounding noise,
-    so the exact set moves with the CPU dispatch (measured {3 .. 10} and
-    {3 .. 11} on two)."""
+    so the exact set moves with the CPU dispatch ({3 .. 10} by default,
+    {3 .. 11} with AVX-512 / AVX2 / FMA3 off)."""
     f = ladder(step=step)
     assert int(c22_periodicity(f).notna().sum()) == 0
     win, _ = windows(f)
     assert float(win.std(axis=1).max()) < NOISE_FLOOR
     assert len(set(win[0].tolist())) <= 6
-    unguarded = [value_of(resid_qr(win[i])) for i in range(0, 1400, 199)]
+    unguarded = [value_src(win[i]) for i in range(0, 1400, 199)]
     assert all(2.0 <= v <= ACMAX - 1 for v in unguarded), unguarded
 
 
@@ -856,8 +952,8 @@ def test_a_cubic_in_the_returns_never_fires_and_the_window_is_not_flat():
     cubic in the bar index vary (window sd 2.81e-05 .. 1.15e-03, at least
     30 million times the floor) but the spline fits them to 1.4e-16, so the
     autocorrelations would be the shape of the fit's rounding. Unguarded:
-    1,400 bars reading inside [3, 13] (the exact set moves with the CPU
-    dispatch -- the frame is rounding noise)."""
+    1,400 bars, every one reading the SENTINEL 0 -- a legal value of this
+    column, and a claim about a window there is nothing to read in."""
     f = cubic_returns()
     assert int(c22_periodicity(f).notna().sum()) == 0
     win, _ = windows(f)
@@ -924,9 +1020,9 @@ def test_an_inexact_rescale_moves_almost_nothing(frame, factor):
 @pytest.mark.parametrize("frame", list(FRAMES))
 def test_the_deciding_comparisons_never_run_near_a_rounding_flip(frame):
     """Why the cell above comes out 0, and why no test here pins a rho to
-    1e-6: the smallest slope at the reported peak is 2.0e-05 and the
-    smallest rise above the trough-plus-threshold is 3.3e-04 -- more than
-    ten orders of magnitude above a last-bit question."""
+    1e-6: the smallest slope at the reported peak is 7.1e-05 and the
+    smallest rise above the trough-plus-threshold is 2.6e-05 -- still ten
+    orders of magnitude above a last-bit question."""
     win, bars = windows(FRAMES[frame])
     worst = math.inf
     worst_th = math.inf
@@ -934,11 +1030,7 @@ def test_the_deciding_comparisons_never_run_near_a_rounding_flip(frame):
         v = float(base(frame).iloc[int(bars[i])])
         if not v > 0:
             continue
-        d = resid_qr(win[i])
-        d = d - d.mean()
-        ss = float((d * d).sum())
-        acf = np.array([float((d[:LENGTH - k] * d[k:]).sum()) / ss
-                        for k in range(1, ACMAX + 1)])
+        acf = src_acf(win[i])
         p = int(v) - 1
         worst = min(worst, abs(acf[p] - acf[p - 1]), abs(acf[p + 1] - acf[p]))
         slopes = np.diff(acf)
@@ -957,7 +1049,7 @@ def test_it_is_blind_to_the_amplitude_of_the_returns(factor):
     win, bars = windows(FRAMES["walk"])
     idx = list(range(0, win.shape[0], 3))
     mine = [float(base("walk").iloc[int(bars[i])]) for i in idx]
-    other = [value_of(resid_qr(win[i] * factor)) for i in idx]
+    other = [value_src(win[i] * factor) for i in idx]
     assert diff_bars(mine, other)[0] == 0, factor
 
 
@@ -968,7 +1060,7 @@ def test_it_is_not_blind_to_the_order_of_the_returns():
     idx = list(range(0, win.shape[0], 3))
     mine = [float(base("walk").iloc[int(bars[i])]) for i in idx]
     rng = np.random.default_rng(5)
-    other = [value_of(resid_qr(rng.permutation(win[i]))) for i in idx]
+    other = [value_src(rng.permutation(win[i])) for i in idx]
     assert diff_bars(mine, other)[0] >= 200
 
 
@@ -986,20 +1078,21 @@ def test_the_floor_is_inert_on_anything_price_shaped(frame):
     win, _ = windows(FRAMES[frame])
     mine = base(frame).dropna().to_numpy()
     for i in range(0, win.shape[0], 23):
-        assert mine[i] == value_of(resid_qr(win[i])), (frame, i)
+        assert mine[i] == value_src(win[i]), (frame, i)
 
 
 def test_what_the_floor_buys_on_a_single_ulp_step():
     """A price flat at 1e6 except for ONE 1-ulp step reads values inside the
-    scale unguarded -- 100 bars, reading 0 and every value from 19 to 33,
-    identical under both CPU dispatches measured -- which a reader could not
-    tell from a real reading. Guarded: 0 bars fire."""
+    scale unguarded -- 100 bars, reading 0 and values from 16 to 33 here --
+    which a reader could not tell from a real reading. The exact set is
+    rounding noise and moves with numpy's CPU dispatch, so only "some window
+    reads a value" is pinned. Guarded: 0 bars fire."""
     c = np.full(1500, 1e6)
     c[700:] = np.nextafter(1e6, 2e6)
     f = Series(c)
     assert int(c22_periodicity(f).notna().sum()) == 0
     win, _ = windows(f)
-    live = [value_of(resid_qr(win[i])) for i in range(600, 700, 7)]
+    live = [value_src(win[i]) for i in range(600, 700, 7)]
     assert sum(not math.isnan(v) for v in live) > 0
 
 
@@ -1045,10 +1138,11 @@ def test_a_close_pair_whose_ratio_overflows_empties_its_windows():
 
 def test_a_finite_but_enormous_return_blanks_rather_than_reading_the_sentinel():
     """`1e-100` followed by `1e100` is a FINITE return of 1e200, so the
-    return filter does not catch it; what does is `~isfinite(ss)`, because
-    the residual's sum of squares overflows. Without that limb those 100
-    bars read the SENTINEL 0 -- "no periodicity", a value and not a blank --
-    which is measured here by exec'ing the module without the guard."""
+    return filter does not catch it; what does is the `~isfinite` limb,
+    because both the residual's sum of squares and the window's variance
+    overflow. Without that limb those 100 bars read the SENTINEL 0 -- "no
+    periodicity", a value and not a blank -- which is measured here by
+    exec'ing the module without the guard."""
     f = FRAMES["walk"].copy()
     f.iloc[700] = 1e-100
     f.iloc[701] = 1e100
@@ -1159,92 +1253,60 @@ def test_the_dictionary_row_describes_this_column():
     assert "c22_periodicity" in text
 
 
-# ------------------------------------------------------- Gate E, measured
+# ------------------------------------------------------- Gate E, owed again
 RECEIPT = ROOT / "docs" / "C22PeriodicityMeasured.md"
 
 
-def test_the_receipt_carries_the_measured_gate_e_numbers():
-    """The receipt is the deliverable the issue asks for, so the run of
-    2026-11-20 has to live in it and not only in the ledger: the pooled max,
-    the comparator, the sample size, the per-frame max median with ITS
-    comparator, and the run id.
-
-    The PROTOTYPE's 0.0413 stays in the document too, in §E2, because the
-    gap between the two runs is the point of §P1 -- but it may no longer be
-    the only Gate E figure here, which is what the `not in` limb pins."""
+def test_the_receipt_says_gate_e_is_pending():
+    """Gate E was measured on 2026-11-20 and that measurement is WITHDRAWN:
+    the autocorrelation's divisor was corrected the same day (review round 1
+    -- it divided by the residual's own sum of squares, which is not the line
+    either source spells), so the run's module sha1, output fingerprint and
+    counts belong to a column this tree no longer computes. The receipt must
+    say PENDING and keep the withdrawn digits labelled as the pre-fix
+    column's, rather than carry a number measured on something else."""
     text = RECEIPT.read_text(encoding="utf-8")
-    assert "Gate E: measured 2026-11-20 by issue-solver" in text
-    assert "0.041467817149024776" in text       # the PORT's pooled max
-    assert "0.09503141020334058" in text        # its per-frame max median
-    assert "cdl_doji" in text and "EMA_200" in text
-    assert "is126-c22_periodicity-c73140e9" in text
-    assert "r3-perframe-0.90" in text
-    assert "0.0413" in text and "prototype" in text.lower()
-    assert "Gate E: pending, run by issue-solver" not in text
+    assert "Gate E: pending, run by issue-solver after this session" in text
+    assert "withdrawn" in text.lower()
+    assert "0.0413" in text and "cdl_doji" in text  # the PROTOTYPE figure
+    assert "prototype" in text.lower()
 
 
-def test_the_gate_e_row_is_recorded_and_says_ship():
-    """The ledger carries exactly one row, for the one shipped column, and it
-    says what the `r3-perframe-0.90` bands give: SHIP removes nothing and
-    needs no waiver.
+def test_the_gate_e_row_is_owed():
+    """The ledger has no row for this column, and
+    `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+    fails until the receipt session records one. That failure is expected and
+    this test is its mirror: if a row appears, this test fails and the two
+    pending-Gate-E tests here must be swapped for ones that pin the row.
 
-    The run id is pinned beside the arithmetic. This port's pooled figure
-    agrees with the 2026-10-24 screen PROTOTYPE's to three decimals (§E2),
-    and an expected agreement is the easiest kind of row to copy in from the
-    wrong run by mistake."""
+    The 2026-11-20 row was recorded and then REMOVED: its run measured the
+    pre-fix autocorrelation (see the test above), and a row whose module sha1
+    has moved is a measurement that is owed, not a measurement."""
     path = ROOT / "docs" / "gate_e_ledger.csv"
     with path.open(newline="", encoding="utf-8") as fh:
         rows = [r for r in csv.DictReader(fh)
-                if r["indicator"] == "c22_periodicity"]
-    assert len(rows) == 1, rows
-    row = rows[0]
-    assert row["column"] == f"C22PERIODICITY_{LENGTH}"
-    assert row["module"] == "pandas_ta.statistics.c22_periodicity"
-    assert row["verdict"] == "SHIP"
-    # the band: pooled < 0.76 and no top-5 per-frame MEDIAN at 0.90
-    assert float(row["max_abs_rho"]) < 0.76
-    assert float(row["perframe_max_median_abs_rho"]) < 0.90
-    assert row["against"] == "cdl_doji"
-    assert row["run"] == "is126-c22_periodicity-c73140e9"
-    assert row["measured"] == "2026-11-20"
-    assert row["waiver"] == ""                  # only STRUCK needs one
-
-
-def test_the_gate_e_row_states_the_sentinel_gap():
-    """0 is a legal reading of this column, not only a blank, so the row's
-    two counts must differ -- 389,949 non-NaN and 389,928 non-zero. The
-    sibling `c22_ami_timescale`, whose scale starts at 2, has them equal.
-    This is the one ledger field that would silently agree with a column
-    whose sentinel never fired."""
-    path = ROOT / "docs" / "gate_e_ledger.csv"
-    with path.open(newline="", encoding="utf-8") as fh:
-        row = [r for r in csv.DictReader(fh)
-               if r["indicator"] == "c22_periodicity"][0]
-    non_nan, non_zero = int(row["non_nan"]), int(row["non_zero"])
-    assert non_nan == 389949
-    assert non_zero == 389928
-    assert 0 < non_nan - non_zero < non_nan / 1000
+                if r.get("indicator") == "c22_periodicity"]
+    assert rows == [], rows
 
 
 def test_the_receipt_discloses_the_gap_to_the_reference():
     """The screen's Gate E figure was measured on the GPL-3.0 reference's
-    column and this port is not bit-identical to it (8,376 of 8,400 windows
-    equal, Spearman +0.9980). The receipt has to say so, because otherwise
+    column and this port is not bit-identical to it (8,387 of 8,400 windows
+    equal, Spearman +0.9993). The receipt has to say so, because otherwise
     the prototype's number reads as a result for this column."""
     text = RECEIPT.read_text(encoding="utf-8")
-    assert "8,376" in text and "8,400" in text
-    assert "0.9980" in text
+    assert "8,387" in text and "8,400" in text
+    assert "0.9993" in text
 
 
-def test_gate_cs_real_data_limb_is_in_the_receipt():
-    """Every count measured in THIS file is synthetic, which is the defect
-    CLAUDE.md names, so Gate C's real-data limb has to be stated in the
-    receipt: 389,949 of 398,849 pooled BIST bars non-NaN -- exactly 89 frames
-    x the 100-bar warm-up blank, so nothing on BIST was lost to the noise
-    floor of §G -- and 21 of those reading the sentinel."""
+def test_gate_cs_real_data_limb_is_owed_in_the_receipt():
+    """Every count in this file is synthetic. The receipt says the real-data
+    limb comes from the launcher's Gate E run, and names the two counts it
+    owes. The 2026-11-20 figures (389,949 non-NaN, 389,928 non-zero of
+    398,849) are kept as the PRE-FIX column's and marked as such."""
     text = RECEIPT.read_text(encoding="utf-8")
-    assert "389,949" in text and "389,928" in text and "398,849" in text
-    assert "### C4. Real data — **OWED**" not in text
+    assert "owed" in text.lower()
+    assert "398,849" in text
 
 
 def test_the_owed_rule_for_the_nearest_catch22_relatives():

@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas_ta as ta  # noqa: E402
 from pandas_ta.statistics.c22_periodicity import (  # noqa: E402
     CHUNK_VALUES, MIN_LENGTH, NOISE_FLOOR, NO_PERIOD, SPLINE_DIM, TH,
-    _periodicity_rows, _spline_basis, c22_periodicity)
+    ZSCORE_DDOF, _periodicity_rows, _spline_basis, c22_periodicity)
 
 ROOT = Path(__file__).resolve().parent.parent
 MODULE = importlib.import_module("pandas_ta.statistics.c22_periodicity")
@@ -242,12 +242,15 @@ def fit_resid_scipy(window):
 
 
 def acf_of(resid, demean=True, kind="biased", acmax=None):
-    """The autocorrelations of one detrended window, four ways.
+    """The autocorrelations of one detrended window, four ways -- every one
+    of them a DEVIATION from the source line, which `value_source` spells.
 
-    `biased` is the shipped reading -- the `n - k` products that exist over
-    the sum of squares of all `n` deviations, which is what hctsa's
-    `CO_AutoCorr(y, k, 'Fourier')` computes. `adjusted` averages those
-    products over the `n - k` pairs instead. `pearson` demeans and normalises
+    `biased` is the reading this module shipped until 2026-11-20: the `n - k`
+    products that exist over the sum of squares of all `n` deviations of the
+    RESIDUAL. It was attributed to hctsa's `CO_AutoCorr(y, k, 'Fourier')`,
+    which `PD_PeriodicityWang` does not call. `adjusted` averages those
+    products over the `n - k` pairs but still normalises on the residual, so
+    it is not the source reading either. `pearson` demeans and normalises
     each LIMB by its own mean and sum of squares. `halfmean` keeps one mean
     but normalises by the two limbs' sums of squares.
     """
@@ -288,9 +291,78 @@ def value_from_resid(resid, th=TH, demean=True, adjusted=False,
                           need_positive=need_positive))
 
 
+def value_source(window, th=TH, ddof=ZSCORE_DDOF, demean=False, fit=None,
+                 acmax=None, strict=True, need_trough=True,
+                 need_positive=True):
+    """The SOURCE spelling of the whole quantity, z-score included.
+
+    hctsa's `PD_PeriodicityWang` does not call `CO_AutoCorr`: it spells the
+    autocorrelations inline as `acf(i) = mean(y(1:N-i).*y(i+1:N))`, and
+    catch22's C reference divides the same products by `size - tau`. That is
+    the ADJUSTED divisor, and what makes those averages dimensionless is that
+    catch22 Z-SCORES THE SERIES BEFORE the detrend -- so condition (b)'s
+    absolute 0.01 lives in PRE-DETREND z-scored units, not in units of the
+    residual's own variance. This function is that reading end to end:
+    z-score the window, detrend it with the same spline, average the lagged
+    products over the `n - k` pairs that exist, scan.
+
+    This is the reading the module SHIPS since 2026-11-20, spelled
+    independently of it: the module divides one sum by `(n - k) * var` where
+    this divides the series by `sd` first, and the module re-centres the
+    residual where the source line does not. Both are the same quantity
+    rounded differently (measured in A5: 0 of 2,802 windows move under
+    either). The pre-2026-11-20 reading divided by the RESIDUAL's own sum of
+    squares instead, which differs from this quantity by the lag-dependent
+    factor `(n - 1) / (n - k)` and by `resid_ss / window_ss` -- two
+    deviations, both of which condition (b)'s absolute 0.01 can see. It is
+    kept in the tables below as a deviation.
+
+    `ddof` is the z-score's divisor convention -- 1 is MATLAB `zscore`'s, 0
+    the population one -- and `ddof = 0` multiplies every autocorrelation by
+    `n / (n - 1)`, which condition (b) can see in principle and does not
+    here. `demean` re-centres the residual before the products, which the
+    source line does not do (the residual of a fit whose span holds the
+    constant function already sums to zero). `fit` is applied to the Z-SCORED
+    window and returns its residual.
+    """
+    w = np.asarray(window, float)
+    n = w.size
+    sd = float(w.std(ddof=ddof))
+    if not (np.isfinite(sd) and sd > 0.0):
+        return float("nan")
+    z = (w - w.mean()) / sd
+    if fit is not None:
+        resid = fit(z)
+    else:
+        q = _spline_basis(n)
+        resid = z - (z @ q) @ q.T
+    d = resid - resid.mean() if demean else resid
+    m = acmax if acmax is not None else acmax_of(n)
+    acf = [float((d[:n - k] * d[k:]).sum()) / (n - k) for k in range(1, m + 1)]
+    if not np.isfinite(acf).all():
+        return float("nan")
+    return float(scan_acf(acf, th=th, strict=strict, need_trough=need_trough,
+                          need_positive=need_positive))
+
+
 def shipped_on(window):
     """The shipped kernel on a single window, as a float."""
     return float(_periodicity_rows(np.asarray(window, float)[None, :])[0])
+
+
+def shipped_acf(window):
+    """The autocorrelations the SHIPPED kernel scans, spelled its way: the
+    lagged products of the spline residual, over `(n - k) * var` where `var`
+    is the window's PRE-DETREND variance at `ZSCORE_DDOF`. Used wherever a
+    section has to read the quantity a decision turned on."""
+    w = np.asarray(window, float)
+    n = w.size
+    q = _spline_basis(n)
+    r = w - (w @ q) @ q.T
+    d = r - r.mean()
+    var = float(w.var(ddof=ZSCORE_DDOF))
+    return np.array([float((d[:n - k] * d[k:]).sum()) / ((n - k) * var)
+                     for k in range(1, acmax_of(n) + 1)])
 
 
 # ------------------------------------------------------- exact oracle
@@ -320,6 +392,11 @@ def value_exact(window, th=Fraction(1, 100)):
     least-squares coefficients are the exact solution of the (exact) normal
     equations, and both the autocorrelations and the three Wang conditions
     are compared as exact rationals. Nothing in this function rounds.
+
+    The z-score's `sd` is irrational, but the quantity never needs it: the
+    autocorrelation of the z-scored window's residual is
+    `sum(d_i d_{i+k}) / ((n - k) * var)`, and `var` -- a sum of squares over
+    `n - ZSCORE_DDOF` -- is rational. The square root cancels.
     """
     y = [Fraction(float(v)) for v in window]
     n = len(y)
@@ -340,7 +417,11 @@ def value_exact(window, th=Fraction(1, 100)):
     ss = sum(v * v for v in d)
     if ss == 0:
         return float("nan")
-    acf = [sum(d[i] * d[i + k] for i in range(n - k)) / ss
+    wmean = sum(y, Fraction(0)) / n
+    var = sum((v - wmean) ** 2 for v in y) / (n - ZSCORE_DDOF)
+    if var == 0:
+        return float("nan")
+    acf = [sum(d[i] * d[i + k] for i in range(n - k)) / ((n - k) * var)
            for k in range(1, acmax_of(n) + 1)]
     return float(scan_acf(acf, th=th))
 
@@ -389,7 +470,7 @@ def section_a():
                 worst[key] = max(worst[key],
                                  float(np.abs(r2 - rmine).max()
                                        / max(np.abs(rmine).max(), 1e-300)))
-                if value_from_resid(r2) != mine:
+                if value_source(w, fit=fn) != mine:
                     moved[key] += 1
             ran += 1
         row(name, f"windows {ran}",
@@ -436,21 +517,41 @@ def section_a():
             ran += 1
         row(name, f"windows {ran}", f"moved {moved}")
 
-    head("A5. The ACF spelling: biased (shipped) vs adjusted vs no demean")
+    head("A5. The ACF spelling: the SOURCE one is what ships, and what the"
+         " deviations from it cost")
+    print("The source line is `acf(i) = mean(y(1:N-i).*y(i+1:N))`"
+          " (PD_PeriodicityWang,")
+    print("which does NOT call CO_AutoCorr) and `acf[tau-1] /= size - tau`")
+    print("(catch22's C), on a series catch22 z-scores BEFORE the detrend.")
+    print("Shipped: that quantity, with the z-score spelled as one division")
+    print("by `var` at the end. Column 1 is the LITERAL spelling (divide the")
+    print("series by `sd` first, project again); column 2 the population")
+    print("z-score; column 3 re-centring the residual, which the source line")
+    print("does not do; columns 4-5 the pre-2026-11-20 reading, which")
+    print("normalised by the RESIDUAL's own sum of squares.")
+    row("frame", "windows", "literal z-score first", "z-score ddof 0",
+        "residual re-demeaned", "biased (resid sum of squares)",
+        "n - k but normalised on the residual")
     for name in FRAMES:
         win, _ = windows(FRAMES[name])
         idx = list(range(0, win.shape[0], 3))
-        mine, adj, nodem = [], [], []
+        mine, src, src0, srcd, biased, adj = [], [], [], [], [], []
         for i in idx:
             q = _spline_basis(win[i].size)
             r = win[i] - (win[i] @ q) @ q.T
             mine.append(shipped_on(win[i]))
+            src.append(value_source(win[i]))
+            src0.append(value_source(win[i], ddof=0))
+            srcd.append(value_source(win[i], demean=True))
+            biased.append(value_from_resid(r))
             adj.append(value_from_resid(r, adjusted=True))
-            nodem.append(value_from_resid(r, demean=False))
-        row(name, f"windows {len(idx)}",
-            f"adjusted: {diff_bars(mine, adj)[0]} moved,"
-            f" rho {spearman(mine, adj):+.4f}",
-            f"no-demean: {diff_bars(mine, nodem)[0]} moved")
+        row(name, len(idx),
+            f"{diff_bars(mine, src)[0]} moved, rho {spearman(mine, src):+.4f}",
+            f"{diff_bars(mine, src0)[0]} moved",
+            f"{diff_bars(mine, srcd)[0]} moved",
+            f"{diff_bars(mine, biased)[0]} moved,"
+            f" rho {spearman(mine, biased):+.4f}",
+            f"{diff_bars(mine, adj)[0]} moved")
 
     head("A5b. The DETREND is load-bearing: four other knot structures")
     row("frame", "no detrend", "straight line", "one cubic (no knot)",
@@ -465,10 +566,11 @@ def section_a():
                           ("1/3", dict(knots=(1 / 3,))),
                           ("three", dict(knots=(1 / 3, 2 / 3)))):
             if kw is None:
-                other = [value_from_resid(win[i]) for i in idx]
+                other = [value_source(win[i], fit=lambda z: z) for i in idx]
             else:
-                other = [value_from_resid(fit_resid_knots(win[i], **kw))
-                         for i in idx]
+                other = [value_source(
+                    win[i], fit=lambda z, kw=kw: fit_resid_knots(z, **kw))
+                    for i in idx]
             cells.append(f"{diff_bars(mine, other)[0]} moved,"
                          f" rho {spearman(mine, other):+.3f}")
         row(name, f"windows {len(idx)}", *cells)
@@ -479,11 +581,9 @@ def section_a():
         idx = list(range(0, win.shape[0], 3))
         mine, zero, ten = [], [], []
         for i in idx:
-            q = _spline_basis(win[i].size)
-            r = win[i] - (win[i] @ q) @ q.T
             mine.append(shipped_on(win[i]))
-            zero.append(value_from_resid(r, th=0.0))
-            ten.append(value_from_resid(r, th=0.1))
+            zero.append(value_source(win[i], th=0.0))
+            ten.append(value_source(win[i], th=0.1))
         row(name, f"windows {len(idx)}",
             f"th=0: {diff_bars(mine, zero)[0]} moved",
             f"th=0.1: {diff_bars(mine, ten)[0]} moved")
@@ -495,11 +595,9 @@ def section_a():
         idx = list(range(0, win.shape[0], 3))
         mine, no_trough, any_sign = [], [], []
         for i in idx:
-            q = _spline_basis(win[i].size)
-            r = win[i] - (win[i] @ q) @ q.T
             mine.append(shipped_on(win[i]))
-            no_trough.append(value_from_resid(r, need_trough=False))
-            any_sign.append(value_from_resid(r, need_positive=False))
+            no_trough.append(value_source(win[i], need_trough=False))
+            any_sign.append(value_source(win[i], need_positive=False))
         row(name, f"windows {len(idx)}",
             f"no trough required: {diff_bars(mine, no_trough)[0]} moved",
             f"a negative peak allowed: {diff_bars(mine, any_sign)[0]} moved")
@@ -510,11 +608,9 @@ def section_a():
         idx = list(range(0, win.shape[0], 3))
         mine, loose, floor3 = [], [], []
         for i in idx:
-            q = _spline_basis(win[i].size)
-            r = win[i] - (win[i] @ q) @ q.T
             mine.append(shipped_on(win[i]))
-            loose.append(value_from_resid(r, strict=False))
-            floor3.append(value_from_resid(r, acmax=win[i].size // 3))
+            loose.append(value_source(win[i], strict=False))
+            floor3.append(value_source(win[i], acmax=win[i].size // 3))
         row(name, f"windows {len(idx)}",
             f"non-strict: {diff_bars(mine, loose)[0]} moved",
             f"floor(n/3): {diff_bars(mine, floor3)[0]} moved")
@@ -525,13 +621,8 @@ def section_a():
         flat_slope = flat_th = 0
         cells = 0
         for i in range(0, win.shape[0], 3):
-            q = _spline_basis(win[i].size)
-            r = win[i] - (win[i] @ q) @ q.T
-            d = r - r.mean()
-            ss = float((d * d).sum())
-            n = d.size
-            acf = np.array([float((d[:n - k] * d[k:]).sum()) / ss
-                            for k in range(1, acmax_of(n) + 1)])
+            acf = shipped_acf(win[i])
+            n = win[i].size
             slopes = np.diff(acf)
             flat_slope += int(np.sum(slopes == 0.0))
             cells += slopes.size
@@ -702,9 +793,7 @@ def section_c():
         guarded = int(s.notna().sum())
         win, _ = windows(f)
         sd = win.std(axis=1)
-        un = [value_from_resid(win[i] - (win[i] @ _spline_basis(LENGTH))
-                               @ _spline_basis(LENGTH).T)
-              for i in range(0, win.shape[0], 29)]
+        un = [value_source(win[i]) for i in range(0, win.shape[0], 29)]
         un = np.asarray(un, float)
         row(f"geometric ladder, step {step:+g}", f"fired {guarded}",
             f"distinct returns per window {len(set(win[0].tolist()))}",
@@ -714,7 +803,7 @@ def section_c():
     s = c22_periodicity(f)
     win, _ = windows(f)
     q = _spline_basis(LENGTH)
-    un = np.asarray([value_from_resid(win[i] - (win[i] @ q) @ q.T)
+    un = np.asarray([value_source(win[i])
                      for i in range(0, win.shape[0], 29)], float)
     resid = win - (win @ q) @ q.T
     dd = resid - resid.mean(axis=1, keepdims=True)
@@ -795,13 +884,7 @@ def section_d():
         margins = []
         th_margins = []
         for i in range(0, win.shape[0], 3):
-            q = _spline_basis(LENGTH)
-            r = win[i] - (win[i] @ q) @ q.T
-            d = r - r.mean()
-            ss = float((d * d).sum())
-            n = d.size
-            acf = np.array([float((d[:n - k] * d[k:]).sum()) / ss
-                            for k in range(1, acmax_of(n) + 1)])
+            acf = shipped_acf(win[i])
             v = shipped_on(win[i])
             if not (v > 0):
                 continue
@@ -930,7 +1013,7 @@ def section_g():
 
     def unguarded(close):
         win, _ = windows(close)
-        return np.asarray([value_from_resid(win[i] - (win[i] @ q) @ q.T)
+        return np.asarray([value_source(win[i])
                            for i in range(win.shape[0])], float)
 
     for name in FRAMES:
@@ -996,10 +1079,10 @@ def section_h():
             f" .. {after.max() if after.size else None}")
 
     head("H1b. What the overflow limb of the mask buys")
-    old = "bad |= ~np.isfinite(ss) | ~(rms > NOISE_FLOOR)"
+    old = "bad |= ~np.isfinite(ss) | ~np.isfinite(var)"
     assert SRC.count(old) == 1
     ns: dict = {}
-    exec(compile(SRC.replace(old, "bad |= ~(rms > NOISE_FLOOR)"),
+    exec(compile(SRC.replace(old, "bad |= np.zeros_like(bad)"),
                  "<no-overflow-guard>", "exec"), ns)
     unguarded = ns["c22_periodicity"]
     for lo, hi in ((1e-100, 1e100), (1e-50, 1e27)):
@@ -1137,31 +1220,44 @@ def section_p():
     def variants(w):
         r_qr = w - (w @ q) @ q.T
         out = {
-            "shipped (QR spline, biased acf, demeaned)": shipped_on(w),
-            "adjusted acf (divisor n - k)":
-                value_from_resid(r_qr, adjusted=True),
-            "acf without the demean":
+            # SHIPPED since 2026-11-20: the source spelling -- z-score the
+            # window, detrend it, average each lag's products over the n - k
+            # pairs that exist (`mean(y(1:N-i).*y(i+1:N))`, `acf[tau-1] /=
+            # size - tau`). The next three are the same quantity with the one
+            # convention the source line does not fix, or spelled the literal
+            # way; the three after them are the pre-2026-11-20 reading, which
+            # normalised by the RESIDUAL's own sum of squares and so carried
+            # the taper n / (n - k) and the ratio resid_var / window_var.
+            "shipped (z-score, n - k divisor, QR spline)": shipped_on(w),
+            "shipped, spelled z-score-first": value_source(w),
+            "shipped, population z-score (ddof 0)": value_source(w, ddof=0),
+            "shipped, residual re-demeaned": value_source(w, demean=True),
+            "biased acf (divisor = the RESIDUAL's sum of squares)":
+                value_from_resid(r_qr),
+            "biased acf, no demean":
                 value_from_resid(r_qr, demean=False),
-            "acmax = floor(n / 3)":
-                value_from_resid(r_qr, acmax=w.size // 3),
-            "non-strict extrema": value_from_resid(r_qr, strict=False),
-            "th = 0 (no rise required)": value_from_resid(r_qr, th=0.0),
-            "scipy B-spline detrend": value_from_resid(fit_resid_scipy(w)),
+            "n - k divisor but normalised on the residual":
+                value_from_resid(r_qr, adjusted=True),
+            "acmax = floor(n / 3)": value_source(w, acmax=w.size // 3),
+            "non-strict extrema": value_source(w, strict=False),
+            "th = 0 (no rise required)": value_source(w, th=0.0),
+            "scipy B-spline detrend": value_source(w, fit=fit_resid_scipy),
             "lagged-pair Pearson acf":
                 value_from_resid(r_qr, kind="pearson"),
             "two-limb normalisation, one mean":
                 value_from_resid(r_qr, kind="halfmean"),
-            "adjusted acf, no demean":
-                value_from_resid(r_qr, kind="adjusted", demean=False),
-            "no detrend at all (raw returns)": value_from_resid(w),
+            "no detrend at all (raw returns)":
+                value_source(w, fit=lambda z: z),
             "detrend by one cubic polynomial (no knot)":
-                value_from_resid(fit_resid_knots(w, knots=())),
+                value_source(w, fit=lambda z: fit_resid_knots(z, knots=())),
             "detrend with the knot at 1/3":
-                value_from_resid(fit_resid_knots(w, knots=(1 / 3,))),
+                value_source(w, fit=lambda z: fit_resid_knots(z, knots=(1 / 3,))),
             "detrend with three pieces":
-                value_from_resid(fit_resid_knots(w, knots=(1 / 3, 2 / 3))),
+                value_source(w, fit=lambda z: fit_resid_knots(
+                    z, knots=(1 / 3, 2 / 3))),
             "detrend by a straight line":
-                value_from_resid(fit_resid_knots(w, knots=(), degree=1)),
+                value_source(w, fit=lambda z: fit_resid_knots(
+                    z, knots=(), degree=1)),
         }
         return out
 
@@ -1182,11 +1278,7 @@ def section_p():
                 tally[key] = tally.get(key, 0) + int(
                     val == r or (math.isnan(val) and math.isnan(r)))
             if mine != r:
-                d = (w - (w @ q) @ q.T)
-                d = d - d.mean()
-                ss = float((d * d).sum())
-                acf = np.array([float((d[:LENGTH - k] * d[k:]).sum()) / ss
-                                for k in range(1, acmax_of(LENGTH) + 1)])
+                acf = shipped_acf(w)
                 i_pk = int(mine) - 1
                 slopes = np.diff(acf)
                 tr = np.where((slopes[:-1] < 0) & (slopes[1:] > 0))[0] + 1

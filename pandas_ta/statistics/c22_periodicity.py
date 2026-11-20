@@ -8,9 +8,19 @@ from pandas_ta.utils import get_offset, verify_series
 #: How much the autocorrelation must RISE from the trough before it for the
 #: peak to count. The 0.01 is the catch22 operation's OWN parameter -- it is
 #: the number in the name `PD_PeriodicityWang_th0_01` -- so it is a module
-#: constant and not a function of `length`. The autocorrelation is normalised
-#: by the window's own variance, so the threshold is dimensionless.
+#: constant and not a function of `length`. It is an ABSOLUTE number, which
+#: is only meaningful because the autocorrelations are those of a Z-SCORED
+#: window (see `ZSCORE_DDOF`): that is what makes them dimensionless.
 TH = 0.01
+#: Divisor convention of the z-score catch22 applies BEFORE the detrend, and
+#: so of the variance every autocorrelation is divided by. 1 is MATLAB
+#: `zscore`'s, which is hctsa's own normalisation; 0 is the population one.
+#: The choice rescales every autocorrelation by `n / (n - 1)` = 1.0101 at the
+#: default `length`, which condition (b)'s absolute 0.01 can see in principle
+#: and does not here: 0 of 2,802 windows of six frames move between the two,
+#: and both agree with the reference implementation on 2,798 of them
+#: (`docs/measure_c22_periodicity.py` sections A5 and P1b).
+ZSCORE_DDOF = 1
 #: What a window with no qualifying peak reads. It is a SENTINEL, "no
 #: periodicity found", and it is the FLOOR of the scale rather than a short
 #: period: the smallest period the scan can report is 2.
@@ -90,16 +100,18 @@ def _periodicity_rows(block):
     """Wang's periodicity, for each row of `block`.
 
     `block` is a `(rows, length)` slab of one-bar SIMPLE RETURNS, oldest
-    first. Each row is detrended by a two-piece cubic regression spline, the
-    autocorrelations of the residual are taken out to `ceil(length / 3)` lags,
-    and the first lag that is a strict local MAXIMUM of them, stands at least
-    `TH` above the last strict local minimum before it, and is itself
-    non-negative, is the period. A row with no such lag reads `NO_PERIOD`.
+    first. Each row is z-scored, detrended by a two-piece cubic regression
+    spline, the autocorrelations of the residual are taken out to
+    `ceil(length / 3)` lags -- each the mean of the `length - k` lagged
+    products that exist -- and the first lag that is a strict local MAXIMUM of
+    them, stands at least `TH` above the last strict local minimum before it,
+    and is itself non-negative, is the period. A row with no such lag reads
+    `NO_PERIOD`.
 
-    Comes back as NaN for a row holding a non-finite return and for a row
-    whose DETRENDED root mean square is at most `NOISE_FLOOR` -- a flat
-    window, a window whose returns are a spline in disguise, and a window
-    whose sums of squares overflow.
+    Comes back as NaN for a row holding a non-finite return, for a row whose
+    DETRENDED root mean square is at most `NOISE_FLOOR` -- a flat window, a
+    window whose returns are a spline in disguise -- and for a row whose
+    pre-detrend variance is zero or whose sums of squares overflow.
     """
     rows, n = block.shape
     q = _spline_basis(n)
@@ -119,10 +131,20 @@ def _periodicity_rows(block):
         d = resid - resid.mean(axis=1, keepdims=True)
         ss = (d * d).sum(axis=1)
         rms = np.sqrt(ss / n)
-    # `~(rms > NOISE_FLOOR)` is True for 0.0 and for NaN; `~isfinite(ss)` is
-    # the limb that catches the +inf a window of enormous (but finite)
-    # returns produces, which would otherwise CLEAR the floor.
-    bad |= ~np.isfinite(ss) | ~(rms > NOISE_FLOOR)
+        # The window's PRE-DETREND variance, which is what catch22's z-score
+        # divides the series by and so what every autocorrelation below is
+        # divided by. It is taken on the window and NOT on the residual: the
+        # 0.01 of condition (b) is an absolute number in z-scored units.
+        var = block.var(axis=1, ddof=ZSCORE_DDOF)
+    # `~(rms > NOISE_FLOOR)` is True for 0.0 and for NaN. A window of zero
+    # variance is a window with no variation, which the floor catches too --
+    # the spline's span holds the constant function, so its residual is zero.
+    bad |= ~(rms > NOISE_FLOOR) | ~(var > 0.0)
+    # The OVERFLOW limb, and it is load-bearing: a window of enormous (but
+    # finite) returns sends both sums of squares to +inf, which CLEARS the
+    # floor and sends every autocorrelation to 0, so the row would read the
+    # SENTINEL 0 -- "no periodicity" -- rather than blank.
+    bad |= ~np.isfinite(ss) | ~np.isfinite(var)
 
     # Lags, out to a third of the window: beyond that the autocorrelation is
     # taken over fewer than two thirds of the pairs and Wang's measure stops
@@ -130,14 +152,22 @@ def _periodicity_rows(block):
     acmax = -(-n // 3)
     acf = np.empty((rows, acmax))
     with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
-        den = np.where(ss > 0.0, ss, 1.0)
+        den = np.where(var > 0.0, var, 1.0)
         for k in range(1, acmax + 1):
-            # The BIASED autocorrelation: the `n - k` products that exist,
-            # over the sum of squares of all `n` deviations. That is what
-            # hctsa's `CO_AutoCorr(y, k, 'Fourier')` computes, and the
-            # alternative (dividing by `n - k` instead) is a different column
-            # -- see this module's __doc__.
-            acf[:, k - 1] = (d[:, :n - k] * d[:, k:]).sum(axis=1) / den
+            # The SOURCE spelling: the `n - k` lagged products that exist,
+            # AVERAGED over those `n - k` pairs, on a window catch22 z-scores
+            # before the detrend. hctsa's `PD_PeriodicityWang` writes the line
+            # as `acf(i) = mean(y(1:N-i).*y(i+1:N))` -- it does not call
+            # `CO_AutoCorr` -- and catch22's C reference divides the same
+            # products by `size - tau`.
+            #
+            # Dividing the residual by `sd` and then multiplying the pairs is
+            # the same quantity as dividing their sum by `var`, so the z-score
+            # is spelled here as one division at the end rather than as a
+            # second projection of a second slab. Measured: the literal
+            # z-score-then-detrend spelling moves 0 of 2,802 windows of six
+            # frames (`docs/measure_c22_periodicity.py` section A5).
+            acf[:, k - 1] = (d[:, :n - k] * d[:, k:]).sum(axis=1) / ((n - k) * den)
 
     out = np.full(rows, float(NO_PERIOD))
     done = np.zeros(rows, dtype=bool)
@@ -231,12 +261,12 @@ c22_periodicity.__doc__ = \
 """catch22 Wang's periodicity of returns (C22PERIODICITY)
 
 The period of the last `length` daily returns, read the way Wang, Wirth
-and Wang (2007) read one: detrend the window with a single-knot cubic
-regression spline, take the autocorrelations of what is left out to a
-third of the window, and report the FIRST lag that is a strict local
-maximum of them, stands at least 0.01 above the last strict local
-minimum before it, and is itself a non-negative correlation. A window
-with no such lag reads 0.
+and Wang (2007) read one: z-score the window, detrend it with a
+single-knot cubic regression spline, take the autocorrelations of what
+is left out to a third of the window, and report the FIRST lag that is a
+strict local maximum of them, stands at least 0.01 above the last strict
+local minimum before it, and is itself a non-negative correlation. A
+window with no such lag reads 0.
 
     C22PERIODICITY = the first lag tau in 2 .. ceil(length/3) - 1 with
                      acf(tau) a strict local max, acf(tau) - acf(last
@@ -252,47 +282,45 @@ Over four stochastic 1,500-bar frames (an iid walk, a second walk
 rounded to the kurus, a 2-lira stock on a 1-kurus tick, a Student-t(3)
 path) it takes 11 to 15 distinct values, runs 3 .. 20, has median 5 and
 reads the sentinel on **0** of those 5,600 bars; on an AR(1)-in-returns
-path, 30 values, 0 .. 33, median 14, sentinel on 10 of 1,400. It TIES
-on 79.3% to 100% of neighbouring bar pairs.
+path, 31 values, 0 .. 33, median 14, sentinel on 10 of 1,400. It TIES
+on 79.4% to 100% of neighbouring bar pairs.
 
 **The deterministic scale is a cosine, and the law is exact**: returns
 that are an exact cosine of period P read exactly P on every fired bar
-at P = 8, 10, 12, 15, 20 and 25. It degrades where the ceiling bites --
-29 or 30 at P = 30, 32 or 33 at P = 33, and 0 or 33 at P = 34, the
-first period past `ceil(length / 3) - 1` = 33, where the sentinel is the
-median reading. At P = 40 and 60 EVERY fired bar reads the sentinel.
-**A period much longer than a third of the window is invisible to this
-measure, by construction.**
+at P = 8, 10, 12, 15, 20, 25 and 30. It degrades where the ceiling
+bites -- 0, 32 or 33 at P = 33, median 33, and the SENTINEL on every
+fired bar at P = 34, the first period past `ceil(length / 3) - 1` = 33,
+and at P = 40 and 60. **A period much longer than a third of the window
+is invisible to this measure, by construction.**
 
 **THE DETREND IS LOAD-BEARING AND ITS KNOT STRUCTURE IS NOT A TASTE
 CHOICE.** Over 467 windows of each STOCHASTIC frame (the cosine frame
 moves 0 under every one of these, a constant column being immune),
-dropping it entirely moves 50 to 202 bars (Spearman +0.47 to +0.86),
-detrending by a straight line 37 to 177, by one cubic with no knot 18 to
-107, with the knot at a third instead of the middle 12 to 70, and with
-three pieces 26 to 119. The
+dropping it entirely moves 52 to 202 bars (Spearman +0.49 to +0.85),
+detrending by a straight line 41 to 175, by one cubic with no knot 19 to
+105, with the knot at a third instead of the middle 12 to 69, and with
+three pieces 26 to 110. The
 shipped structure -- two cubic pieces, one knot, at the middle, by least
 squares -- is also the one the reference implementation measurably
 agrees with: on every window of six frames it reads the same value as
-this module on **8,376 of 8,400** (99.71%, Spearman +0.9980). On the
+this module on **8,387 of 8,400** (99.85%, Spearman +0.9993). On the
 stride-3 subsample of 2,802 of those windows the shipped reading agrees
-on 99.71% and the five other structures on 83.2% (no detrend), 85.9%
-(a line), 92.9% (one cubic), 95.5% (knot at a third) and 91.8% (three
+on 99.86% and the five other structures on 83.2% (no detrend), 85.9%
+(a line), 93.1% (one cubic), 95.5% (knot at a third) and 92.1% (three
 pieces) -- `docs/measure_c22_periodicity.py` section P.
-⚠ Those 24 windows are a REAL difference and the cause is not
-identified. Each of the 8 that fall in the stride-3 subsample IS matched
-by at least one of fourteen alternative readings, but no alternative is
-better overall: the one that matches the most of them (the knot at a
-third, 6 of 8) disagrees with the reference on 126 of those 2,802
-windows, 124 of them windows where this reading agrees. Six of the
-eight are decided by a quantity
-sitting within 6e-03 of a boundary -- a plateau 3e-04 wide, a peak
-1.8e-04 above zero, a rise 3.3e-04 above the threshold -- and two are
-not, so part of the difference is structural rather than marginal. What
-it is NOT is this module's own conditioning: four spellings of the same
-fit sit 2.5e-14 (the independent B-spline) to 1.3e-12 (the
+⚠ Those 13 windows are a REAL difference and the cause is not
+identified. Each of the 4 that fall in the stride-3 subsample IS matched
+by at least one of seventeen alternative readings, but no alternative is
+better overall: the one that matches all four (the knot at a third)
+disagrees with the reference on 127 of those 2,802 windows, every one of
+them a window where this reading agrees. Two of the four are decided by
+a quantity sitting within 1.2e-03 of a boundary -- a rise 2.6e-05 above
+the threshold, a peak 1.8e-04 above zero -- and two are not (2.2e-02 and
+2.1e-01), so part of the difference is structural rather than marginal.
+What it is NOT is this module's own conditioning: four spellings of the
+same fit sit 2.5e-14 (the independent B-spline) to 1.3e-12 (the
 worst-conditioned, the normal equations) apart and move 0 of 1,200
-windows, where the deciding quantities above need 1e-04 to 2e-01.
+windows, where the deciding quantities above need 2.6e-05 to 2e-01.
 This column is therefore NOT bit-identical to the catch22
 reference, unlike `c22_ami_timescale` -- so the 2026-10-24 screen's
 Gate E figure (max |rho| 0.0413 vs `cdl_doji`, SHIP) was measured on
@@ -324,7 +352,9 @@ Gate A also checks the quantity three ways that share no code with this
 module: an exact `fractions.Fraction` oracle that rounds ZERO times --
 the input doubles, the spline basis on the window's grid, the
 least-squares coefficients, the autocorrelations and all three Wang
-conditions as exact rationals (0 disagreements on 648 windows); the same
+conditions as exact rationals (0 disagreements on 648 windows -- the
+z-score's square root is irrational but cancels, since the quantity
+needs only `var`); the same
 spline space fitted by `np.linalg.lstsq` and by the normal equations
 instead of by projection onto a QR factor (0 of 1,200 windows moved);
 and `scipy.interpolate.LSQUnivariateSpline`, a least-squares cubic
@@ -332,24 +362,38 @@ B-SPLINE with one interior knot, which is an independent implementation
 of what hctsa's `spap2(2, 4, 1:N, y)` means (0 of 1,200 moved, residuals
 agreeing to 8.8e-15 .. 2.5e-14 of the residual's own size).
 
-**The autocorrelation is the BIASED one** -- the `length - k` products
-that exist over the sum of squares of all `length` deviations -- because
-that is what the hctsa operation's own `CO_AutoCorr(y, k, 'Fourier')`
-computes. The ADJUSTED spelling (the same products averaged over the
-`length - k` pairs) is a different column, but only just: 2, 5 and 1 bars
-of 467 move on the three frames where anything moves (tick-rounded,
-AR(1), Student-t) and 0 on the walk, the penny and the cosine frame, and it is one
-of the readings that match the reference where this one does not (4 of
-the 8 sampled disagreements). Whether the mean is subtracted from the spline residual
-before the products are taken moves **0** bars of 467 on each of the six
-frames -- the residual of a fit whose span contains the constant
-function already sums to zero.
+**The autocorrelation is the SOURCE's**, which is the ADJUSTED one on a
+Z-SCORED window: hctsa's `PD_PeriodicityWang` does not call
+`CO_AutoCorr`, it writes the line as `acf(i) =
+mean(y(1:N-i).*y(i+1:N))`, and catch22's C reference divides the same
+products by `size - tau` -- in both cases on a series catch22 z-scores
+BEFORE the detrend, which is what makes condition (b)'s ABSOLUTE 0.01
+dimensionless. So the divisor is `(length - k) * var(window)`, with
+`var` taken on the window and not on the residual (`ZSCORE_DDOF`).
+⚠ Until 2026-11-20 this module divided by the RESIDUAL's own sum of
+squares instead -- the biased autocorrelation of the residual -- and
+attributed that to `CO_AutoCorr(y, k, 'Fourier')`, which is not the
+line either source spells. The deviation was two multiplicative
+factors, the lag-dependent `(length - 1) / (length - k)` -- 1.00 at
+lag 1, 1.48 at lag 33 -- and the per-window `resid_ss / window_ss`,
+which is at most 1; both are visible to an ABSOLUTE threshold. It is
+PRICED rather than described: it moves 6 bars of 2,802
+windows of six frames (1 tick-rounded, 4 AR(1), 1 Student-t, Spearman
++0.983 to +1.000 per frame) and it agrees with the reference
+implementation on 2,794 of 2,802 where this reading agrees on 2,798.
+Two conventions the source line does not fix move **0** of those 2,802:
+the z-score's divisor (`ddof` 1, MATLAB `zscore`'s and so hctsa's,
+against the population 0) and whether the mean is subtracted from the
+spline residual before the products -- the residual of a fit whose span
+contains the constant function already sums to zero. Dividing the
+series by `sd` first, which is the literal spelling, also moves 0 of
+the 2,802.
 
 ⚠ **All three of Wang's conditions decide real values**, measured by
 ablation over 467 windows per frame: dropping (a) "a trough before it"
 moves up to 190 bars, allowing a negative peak -- condition (c) -- up to
-319, and the 0.01 of condition (b) moves up to 15 bars at th = 0 and up
-to 91 at th = 0.1. The STRICTNESS of the local-extremum test does not
+316, and the 0.01 of condition (b) moves up to 15 bars at th = 0 and up
+to 90 at th = 0.1. The STRICTNESS of the local-extremum test does not
 (0 of 467 on all six frames, and 0 exactly flat slopes in 15,411 sampled
 lag pairs). `ceil` against `floor` in the lag ceiling moves almost
 nothing on a realistic frame -- 1 bar of 467, on the AR(1) one -- but it
@@ -359,14 +403,16 @@ could not be read at all.
 
 Calculation:
     Default Inputs:
-        length=100, TH=0.01
+        length=100, TH=0.01, ZSCORE_DDOF=1
     r[t]   = close[t] / close[t-1] - 1
     X      = r[T-length+1 .. T]                 (the window)
+    V      = var(X, ddof=ZSCORE_DDOF)           (BEFORE the detrend)
     S      = the least-squares cubic spline on two pieces (one interior
              knot, at the middle of the window) through X
     Y      = X - S                              (the detrended window)
     D      = Y - mean(Y)
-    acf(k) = sum(D[:-k] * D[k:]) / sum(D * D),  k = 1 .. ceil(length/3)
+    acf(k) = sum(D[:-k] * D[k:]) / ((length - k) * V),
+                                                k = 1 .. ceil(length/3)
     C22PERIODICITY = the first lag that is a strict local maximum of
                      acf, at least 0.01 above the last strict local
                      minimum before it, and non-negative; else 0
@@ -385,13 +431,16 @@ it). What it empties:
 * an exactly geometric price path, whose returns are constant up to
   rounding (3 to 5 distinct doubles per window, window sd ~1.2e-16).
   Unguarded it fires on all 1,400 bars of a 1,500-bar frame and reads
-  inside [3, 11] -- values a reader could not tell from a real frame's;
+  inside [3, 11] -- values a reader could not tell from a real frame's.
+  It is rounding noise, so the exact SET moves with numpy's CPU
+  dispatch; the span holds under both dispatches measured here;
 * returns that ARE a cubic in the bar index, where the window varies
   (sd 2.81e-05 .. 1.15e-03, at least 30 million times the floor) but
   the spline fits it to 1.4e-16 and the autocorrelations would be the
-  shape of the FIT's rounding. Unguarded: 1,400 bars reading inside
-  [3, 13]. Both frames are rounding noise, so the exact SETS move with
-  numpy's CPU dispatch; the spans hold under both measured here;
+  shape of the FIT's rounding. Unguarded: 1,400 bars, every one of them
+  reading the SENTINEL 0 -- a legal value of this column, and a claim
+  that a window of pure fit rounding has no periodicity rather than no
+  signal to read;
 * ⚠ **a deterministically smooth price path**, which is the cost worth
   knowing: a price rising by exactly one kurus a bar from 100.00 is a
   smooth hyperbola in returns, the spline fits it to below the floor,
@@ -404,10 +453,12 @@ future-perturbation sweep -- 0 of 35 offsets leak on each of six frames
 with eight splices apiece, and 0 of 35 at `length` 30, 120 and 250 --
 and by six mutants read off this file, edited and exec'd in memory.
 ⚠ The sweep's POWER is limited by the ties: a one-bar look-ahead mutant
-is caught at 8 of 35 offsets (walk), 9 of 35 (tick-rounded) and 2 of 35
-on a frame where the column is constant, while a ten-bar one is caught
-33 to 35 of 35. Where a one-bar mutant moves a pre-splice bar it moves
-exactly bar J - 1.
+is caught at 8 of 35 offsets on the walk, 8 of 35 on the tick-rounded
+frame and 0 of 35 on the cosine frame, where the column is constant so
+only the NaN mask can differ, while a ten-bar one is caught at 33, 33
+and 35 of 35 -- on the cosine frame entirely through that mask, with 0
+value bars moved. Where a one-bar mutant moves a pre-splice bar it
+moves exactly bar J - 1.
 Scale-free: bit-identical under x8, x64, 2**-40 and 2**40 on all six
 frames; under x8 and x64 at `length` 30 / 120 / 250; and under x8 at
 price levels 1e-6, 1e+6 and 1e+100 -- BY CONSTRUCTION, since
@@ -415,21 +466,21 @@ the price enters only as `c[t] / c[t-1]`, and
 `8a / 8b` is the double `a / b`. x10, x3.7, x0.1 and x1.0000001 come out
 bit-identical too, which the arithmetic does not promise for an integer
 decided by float comparisons; what makes it hold is measured, the
-smallest margin in the deciding comparisons being 2.0e-05 (the slope at
-the reported peak) and 3.3e-04 (the peak's rise above its trough,
+smallest margin in the deciding comparisons being 7.1e-05 (the slope at
+the reported peak) and 2.6e-05 (the peak's rise above its trough,
 against the 0.01 threshold).
 NaN on the first `length` bars; on every window holding a close that is
 NaN, infinite, zero, negative or subnormal (101 bars at the default);
 on a window holding a close PAIR whose ratio overflows (100 bars); on a
-window whose residual sum of squares OVERFLOWS although the returns
-themselves are finite, which a close pair of ratio 1e200 reaches and
-one of ratio 1e77 does not (100 bars -- without that guard those bars
-read the SENTINEL 0, "no periodicity", measured); and under the
-blanking rule above.
+window whose sums of squares OVERFLOW although the returns themselves
+are finite, which a close pair of ratio 1e200 reaches and one of ratio
+1e77 does not (100 bars -- without that guard those bars read the
+SENTINEL 0, "no periodicity", measured); and under the blanking rule
+above.
 
 Cost: the windows are walked in chunks, so the peak is set by
 `CHUNK_VALUES` and not by `len(close) * length`: at n = 400,000 the
-traced peak is 23.8 MB (tracemalloc) and the run takes about 6 s.
+traced peak is 23.9 MB (tracemalloc) and the run takes about 7 s.
 Budgets of 100, 400, 1,024 and the default are bit-equal, so the chunk
 boundary is invisible. Wall clock is not quoted as a band because it
 does not reproduce.
