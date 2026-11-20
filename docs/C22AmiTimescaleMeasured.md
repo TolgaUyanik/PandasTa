@@ -8,23 +8,23 @@ PandasTa issue **#125** (C22-AMI-TIMESCALE), ported 2026-11-20 on branch
 | module | `pandas_ta/statistics/c22_ami_timescale.py` |
 | column | `C22AMITIMESCALE_100` (`ORD`, a whole number in [2, 40]) |
 | source | catch22 (Lubba et al. 2019, *Data Min. Knowl. Disc.* 33:1821), feature `IN_AutoMutualInfoStats_40_gaussian_fmmi`; reference code pycatch22 1.x, **GPL-3.0** — ported from the definitions |
-| tests | `tests/test_c22_ami_timescale.py` (195 tests) |
+| tests | `tests/test_c22_ami_timescale.py` (196 tests) |
 | harness | `docs/measure_c22_ami_timescale.py` (sections A–E, G, H, P, T, Z; **P is opt-in** and is the only one that imports the GPL-3.0 reference), `docs/measure_c22_ami_timescale_cpu.py` |
 | Gate A | correct against four independent oracles, 0 disagreements — §A |
 | Gate B | causal; 0 of 35 offsets leak on six frames × eight splices; seven mutants — §B |
-| Gate C | fires on every bar with a full window, 6–10 distinct values; **real-data limb OWED** — §C |
+| Gate C | fires on every bar with a full window, 6–10 distinct values; real data 389,949 non-NaN and 389,949 non-zero of 398,849 — §C |
 | Gate D | ×8/×64/2^±40 bit-identical; `0 < fires < n`; not constant on five of six frames — §D |
-| Gate E | **pending, run by issue-solver after this session** — §E |
-| Gate F | PandasTa green (195 module tests; full suite 2 failed / 12,311 passed / 86 skipped, the known pair); Backtesting's suite **pending, run by issue-solver** — §F |
+| Gate E | **SHIP** — max \|ρ\| **0.0280** vs `ROLLING_LOW_250` (n = 376,599), per-frame max median 0.0701 vs `EMA_200`, 0 of 89 frames ≥ 0.90 — §E |
+| Gate F | PandasTa green (196 module tests; full suite 1 failed / 12,320 passed / 86 skipped, the known `../AlternativeRepos` test); Backtesting's suite **pending, run by issue-solver** — §F |
 
 Every number below was produced by `python docs/measure_c22_ami_timescale.py`
-on this machine (numpy 1.26.4, pandas 2.3.3, Python 3.11), with three
+on this machine (numpy 1.26.4, pandas 2.3.3, Python 3.11), with four
 exceptions: the §F suite counts (`python -m pytest -q`), §F1's no-AVX column
-and §F's rows 2–3 (`docs/measure_c22_ami_timescale_cpu.py`), and the
-2026-10-24 screen figures quoted in §A5 and §E — 0.0280, n = 376,599, 0.0701 —
-which are the owner's PROTOTYPE measurements and are labelled as such wherever
-they appear. Figures that move between numpy's CPU dispatches are tabulated in
-§F1.
+and §F's rows 2–3 (`docs/measure_c22_ami_timescale_cpu.py`), §E and §C4's
+real-data counts (issue-solver's Gate E run `is125-c22_ami_timescale-896a6570`,
+2026-11-20), and the 2026-10-24 screen figures quoted in §A5 — the owner's
+PROTOTYPE measurements, labelled as such wherever they appear. Figures that
+move between numpy's CPU dispatches are tabulated in §F1.
 
 ---
 
@@ -183,13 +183,18 @@ So: on every window SAMPLED that both columns score — 1,200 of 1,200, every
 IS the screened quantity; where a window is flat, suspended or geometric, this
 port blanks and the reference does not. On real BIST frames with suspended runs that makes this
 column's non-NaN count LOWER than the prototype's, so the prototype's
-n = 376,599 is not this column's n, and §C4's real-data limb has to come from
-the port's own Gate E run rather than being inferred.
+n = 376,599 is not this column's n, and §C4's real-data limb had to come from
+the port's own Gate E run rather than being inferred. It now has: **389,949**
+of 398,849 bars, measured (§C4).
 
 The screen's Gate E figure (max |ρ| 0.0280 vs `ROLLING_LOW_250`,
 n = 376,599, SHIP) is therefore about this quantity on the bars both score —
-a PROTOTYPE measurement, with Gate E re-run on the port by issue-solver
-regardless.
+a PROTOTYPE measurement. The port's own run (§E) lands on the same comparator,
+the same n and the same figure to four decimals — a result that agrees with it,
+not a transfer of it. Whether the port's blanking rules cost any real BIST bar
+against the prototype is not answerable from these two numbers: the ρ sample
+sizes match (376,599 both), and the prototype's own non-NaN count over the 89
+frames was never recorded, so there is nothing to subtract it from.
 
 ### A6. The clip is load-bearing
 
@@ -330,7 +335,9 @@ constant limb, does.
 
 ⚠ What this does NOT settle is Gate E's question. Whether the column's top
 real-data comparator is a price level or `Volume` — the issue's tell for a
-rounding artefact — is decided by the Gate E run, which is owed (§E).
+rounding artefact — was decided by the Gate E run. It **is** a price level,
+`ROLLING_LOW_250`, exactly the tell the issue named, at |ρ| **0.0280**. The
+tell fires on the RANKING and not on the magnitude; §E reads that out.
 
 ### C3. The two blanking rules, with their costs
 
@@ -342,11 +349,26 @@ rounding artefact — is decided by the Gate E run, which is owed (§E).
   fire on a 400-bar walk followed by 300 flat closes; bar 459 reads 2, bar 460
   is NaN.
 
-### C4. Real data — **OWED**
+### C4. Real data
 
-Everything above is synthetic. The non-NaN and non-zero counts over the 89
-ALTPORT-1 BIST frames (398,849 bars) come from the Gate E run that issue-solver
-performs after this session, and a later receipt session writes them here.
+Everything above is synthetic. These two counts are from the Gate E run
+`is125-c22_ami_timescale-896a6570` (2026-11-20; 89 frozen ALTPORT-1 BIST
+frames, 398,849 pooled bars):
+
+| | `C22AMITIMESCALE_100` |
+|---|---|
+| non-NaN | **389,949** of 398,849 (97.77%) |
+| non-zero | **389,949** of 398,849 |
+
+The two counts are equal because **2 is the floor of the scale** (§0): the
+column cannot read 0, so every bar that is not blank is non-zero. 398,849 −
+389,949 = 8,900 blank bars, which is exactly 89 frames × the 100 warm-up bars
+each — so on these 89 frames the three blanking rules of §C3 and §G cost **0
+bars beyond the warm-up**. That is arithmetic on the two measured counts and
+the frame count, and it is the only real-data evidence here that the noise
+floor and the constant-limb rule do not bite on BIST dailies. ⚠ It does assume
+every frame is longer than 100 bars; the shortest of the 89 is not measured in
+this receipt, and a frame of ≤ 100 bars would make the identity coincidental.
 
 ## D. Gate D — scale-free
 
@@ -396,26 +418,75 @@ neighbours:
 Seven orders of magnitude above a last-bit question, which is why D2 comes out
 clean and why no test pins a ρ to 1e-6.
 
-## E. Gate E — **pending, run by issue-solver after this session**
+## E. Gate E — **SHIP**
 
-Gate E: pending, run by issue-solver after this session.
+Gate E: measured 2026-11-20 by issue-solver, verdict **SHIP**.
 
-`docs/gate_e_ledger.csv` carries no row for `c22_ami_timescale`, so
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails locally and reports this indicator. That is expected and is the receipt
-session's cue; `tests/test_c22_ami_timescale.py::test_gate_e_is_owed_and_the_
-ledger_has_no_row_yet` asserts the row is absent so the cue cannot be lost.
-CI into `dev` skips it (`GATE_E_PENDING_OK=1`).
+Run `is125-c22_ami_timescale-896a6570`, on
+the code at this branch's first commit, and recorded in
+`docs/gate_e_ledger.csv` by
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-20`.
 
-For reference, and NOT as a result of this port: the 2026-10-24 screen
-measured the prototype at max |ρ| **0.0280** vs `ROLLING_LOW_250`
-(n = 376,599), top-5 per-frame max median 0.0701 → **SHIP** under
-`r3-perframe-0.90`, run `screen_r3_20261024`. §A5 shows the port reproduces
-that prototype's quantity bit-for-bit on 1,200 of 1,200 sampled synthetic
-windows, which is evidence that the figure is about this column — not a
-substitute for the run.
+| | |
+|---|---|
+| column | `C22AMITIMESCALE_100` |
+| max \|ρ\| | **0.0280** (ρ = +0.028040679431830865) |
+| against | `ROLLING_LOW_250` (`compute_all`) |
+| n | **376,599** |
+| per-frame max median \|ρ\| | **0.0701** (0.07013351426940281) vs `EMA_200`, over 89 frames |
+| frames ≥ 0.90 | **0 of 89** (0.0%) on each of the top five comparators, and 0 of 89 ≥ 0.80 on each (`perframe.csv`) |
+| verdict | **SHIP** under `r3-perframe-0.90` |
 
-### E1. In-fork overlap, measured here (6 synthetic frames, 1,500 bars each)
+Run facts (`meta.json`): default parameters (`kwargs: {}`), 89 frames, 398,849
+pooled bars, 329 `compute_all` + 358 manifest = **687** comparators, canary
+`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`, data stamp
+`1be6495e`, pandas 2.3.3 / numpy 1.26.4, module sha1 `523a337c`.
+One comparator was degenerate and dropped: `squeeze_SQZ_NO` (constant over the
+pooled sample), listed in the run's `degenerate.csv`. It was the comparator
+that was constant, not this column.
+
+The split by comparator set: `compute_all` **0.0280** vs `ROLLING_LOW_250`
+(n = 376,599); the `ml_features` manifest **0.0220** vs `ADX_Pctl`
+(n = 389,949). 0.0280 is the max of the two, a factor of **27** under the 0.76
+ship line.
+
+### E2. The issue's tick-rounding tell, read out
+
+The issue said a top comparator that is a price level (`mcgd`,
+`ROLLING_LOW_250`) or `Volume` would point at BIST tick rounding rather than at
+return dynamics. The measured top-25 (`top25.csv`) is price levels almost
+end to end:
+
+| rank | against | \|ρ\| | n |
+|---|---|---|---|
+| 1 | `ROLLING_LOW_250` | 0.0280 | 376,599 |
+| 2 | `ROLLING_HIGH_250` | 0.0260 | 376,599 |
+| 3 | `SMA_200` | 0.0255 | 381,138 |
+| 4 | `EMA_200` | 0.0254 | 381,138 |
+| 5 | `Senkou_A` | 0.0243 | 389,949 |
+| … | | | |
+| 23 | `mcgd` | 0.0231 | 389,949 |
+
+So the tell fires on the RANKING and the issue's two named columns are both in
+it — `ROLLING_LOW_250` first, `mcgd` 23rd. What it does not do is fire on the
+MAGNITUDE: rank 1 is 0.0280 and rank 25 is 0.0231, a spread of 0.005 across 25
+comparators. A ranking that flat is a ranking of noise — the top is a price
+level because 20-odd price levels are all mutually ~1.0 correlated and one of
+them had to come first, not because the column reads a price. `Volume` is not
+in the top 25. Reading this as "no tick-rounding artefact detected at Gate E's
+resolution" is a judgement on the magnitudes above, not a measurement of
+rounding itself; §C2 is the part of this receipt that probes rounding directly,
+on three synthetic paths.
+
+The column's own per-frame figures say the same: median 0.0635 against
+`ROLLING_LOW_250` over 89 frames, max single-frame 0.4343, min 0.0008.
+
+The 2026-10-24 screen measured the PROTOTYPE at max |ρ| 0.0280 vs
+`ROLLING_LOW_250`, n = 376,599, per-frame max median 0.0701 → SHIP (run
+`screen_r3_20261024`). The port's run above lands on the same comparator, the
+same n and the same figures to four decimals. §A5 is why that was expected.
+
+### E3. In-fork overlap, measured here (6 synthetic frames, 1,500 bars each)
 
 Gate E's 687 comparators include the engine's `compute_all` and the
 `ml_features` manifest, so several of this fork's own ACF-family columns are
@@ -455,12 +526,12 @@ for every row; the **largest single per-frame |ρ| over all 15 × 6 cells is
 0.4797** (`FIRSTZEROAC_100`, AR(1) frame), well under the 0.76 ship line, and
 the highest per-frame median is 0.1351.
 
-### E2. **OWED RULE** — issue #130's `CO_FirstMin_ac`
+### E4. **OWED RULE** — issue #130's `CO_FirstMin_ac`
 
 catch22's `CO_FirstMin_ac` (issue **#130**, candidate `c22_acf_first_min`) is
 the first minimum of the SIGNED autocorrelation over the SAME 100 returns —
 the nearest relative this column has, and it does not exist in this tree yet,
-so neither Gate E nor §E1 can see it. Measured here as a function:
+so neither Gate E's run nor §E3 can see it. Measured here as a function:
 
 | frame | walk | tick-rounded | penny | ar1 | cosine | student-t |
 |---|---|---|---|---|---|---|
@@ -478,17 +549,20 @@ the two is reverted or waived. A test asserts this receipt keeps naming #130.
 
 | run | result |
 |---|---|
-| `python -m pytest tests/test_c22_ami_timescale.py -q` | **195 passed** |
-| the same module under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_c22_ami_timescale_cpu.py`, which refuses to run if the environment edit did not take) | **195 passed** (2026-11-20, after the last code change) |
+| `python -m pytest tests/test_c22_ami_timescale.py -q` | **196 passed** (195 before the receipt session: −2 pending-Gate-E tests, +3 that pin the recorded row) |
+| the same module under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_c22_ami_timescale_cpu.py`, which refuses to run if the environment edit did not take) | **196 passed** (2026-11-20, after the receipt session's test swap) |
 | `python docs/measure_c22_ami_timescale_cpu.py A B C D` — sections A, B, C and D re-measured under the same disabled dispatch | ran clean; what moved is in §F1 |
-| `python -m pytest -q` (full suite) | **2 failed, 12,311 passed, 86 skipped** |
+| with `tests/test_gate_e_ledger.py` | **1,302 passed** — the owed-row failure is gone now the row is recorded |
+| `python -m pytest -q` (full suite) | **1 failed, 12,320 passed, 86 skipped** |
 
-The two failures are the known pair, both expected on a local run:
+The one failure is
 `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows`
 (needs the sibling `../AlternativeRepos` checkout; CI deselects it by name) and
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-which reports `['c22_ami_timescale']` and nothing else — the owed Gate E row
-above. Backtesting's suite is run by issue-solver in a clean worktree.
+nothing else. Before the Gate E row was recorded this run was 2 failed /
+12,311 passed, the second being
+`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+reporting `['c22_ami_timescale']` — the owed measurement, now paid.
+Backtesting's suite is run by issue-solver in a clean worktree.
 
 ### F1. What moves under the CI CPU dispatch
 
@@ -594,5 +668,13 @@ clock is not quoted as a band because it does not reproduce.
    bad-return filter, enumerated in §G and §H.
 6. The **estimator** is the lagged pair's own Pearson correlation; the two ACF
    spellings are different columns (§A1).
-7. **Gate E is owed**, and so is Gate C's real-data limb. The 0.0280 figure in
-   §E is the prototype's, measured by the owner's screen, not this port's.
+7. **Gate E is measured: SHIP**, max |ρ| 0.0280 vs `ROLLING_LOW_250` over
+   376,599 pooled bars, per-frame max median 0.0701, 0 of 89 frames ≥ 0.90
+   (§E). It is nearly orthogonal to all 687 comparators — which is not the
+   same as useful; see point 4 and §1.
+8. On real BIST data it fires on **389,949 of 398,849** bars, i.e. everywhere
+   outside the 100-bar warm-up of each frame (§C4), and its one rounding tell
+   — a price level as top comparator — fires on the ranking only (§E2).
+9. The nearest relative, catch22's `CO_FirstMin_ac` (issue **#130**), is not
+   in this tree, so no run has priced the pair over real frames. §E4 carries
+   the rule for when it lands.

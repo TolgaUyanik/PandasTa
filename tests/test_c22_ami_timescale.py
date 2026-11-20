@@ -71,14 +71,29 @@ order of how much it would hurt to lose:
    spelling reads the SENTINEL 40 there -- the top of the scale,
    indistinguishable from a real "no dip" -- on 20 bars of a 1-ulp-step
    frame and 100 bars of the 1e200 frame.
-9. Gate E is OWED. `tests/test_gate_e_ledger.py` fails until the row is
-   recorded, which is the receipt session's cue; the two tests at the bottom
-   of this file assert the row is absent and that the receipt says so.
+9. **Gate E is MEASURED and SHIP**, run by issue-solver on 2026-11-20
+   (`is125-c22_ami_timescale-896a6570`): max |rho| **0.0280** vs
+   `ROLLING_LOW_250` over n = 376,599, per-frame max median 0.0701 vs
+   `EMA_200`, 0 of 89 frames at or above 0.90, 687 comparators. That is a
+   factor of 27 under the 0.76 ship line, so nothing is removed and the row
+   needs no waiver. `test_the_gate_e_row_is_recorded_and_says_ship` pins the
+   ledger row including its run id, and
+   `test_the_receipt_carries_the_measured_gate_e_numbers` pins the receipt.
+   ⚠ The top comparator IS a price level, which is exactly the tick-rounding
+   tell issue #125 named -- but the top 25 span 0.0280 down to 0.0231, so
+   the tell fires on the RANKING of a flat noise ordering and not on any
+   magnitude (receipt §E2).
+10. **Gate C's real-data limb**, from the same run and pinned by
+   `test_gate_cs_real_data_limb_is_in_the_receipt`: 389,949 of 398,849
+   pooled BIST bars non-NaN, and the SAME 389,949 non-zero, because 2 is
+   the floor of the scale.
 
 Not pinned on purpose: exact counts of distinct values, exact bars-moved
 counts under an inexact rescale, and any rho to 1e-6. Those move with
 numpy's CPU dispatch; the tests pin bounds and bands, and the docstrings
-state the local figure.
+state the local figure. Gate E's own arithmetic is not re-derived here
+either -- the launcher ran it over 89 real BIST frames and
+`tests/test_gate_e_ledger.py` checks the row against this tree.
 """
 import csv
 import importlib
@@ -1042,30 +1057,66 @@ def test_the_dictionary_row_describes_this_column():
     assert f"`C22AMITIMESCALE_{LENGTH}`" in doc
 
 
-def test_the_receipt_states_what_is_owed_and_what_is_disclosed():
-    """The receipt is the deliverable the issue asks for. Three things in it
-    are load-bearing for a later session: that Gate E is pending, that Gate
-    C's real-data limb comes from the same run, and the RULE about issue
-    #130's `CO_FirstMin_ac`, whose overlap with this column cannot be
-    measured until it exists."""
+def test_the_receipt_carries_the_measured_gate_e_numbers():
+    """The receipt is the deliverable the issue asks for, and the Gate E run
+    of 2026-11-20 has to live in it rather than only in the ledger. The RULE
+    about issue #130's `CO_FirstMin_ac` stays pinned here too: that overlap
+    is the one this run could not price, because the column does not exist in
+    this tree."""
     doc = io.open(ROOT / "docs" / "C22AmiTimescaleMeasured.md",
                   encoding="utf8").read()
-    assert "Gate E: pending, run by issue-solver after this session" in doc
+    assert "Gate E: measured 2026-11-20 by issue-solver" in doc
+    assert "0.028040679431830865" in doc          # the PORT's pooled max
+    assert "0.07013351426940281" in doc           # its per-frame max median
+    assert "ROLLING_LOW_250" in doc
+    assert "is125-c22_ami_timescale-896a6570" in doc
     assert "r3-perframe-0.90" in doc
     assert "#130" in doc
     assert "IN_AutoMutualInfoStats_40_gaussian_fmmi" in doc
+    # the "pending" wording this test replaced must be gone as a claim
+    assert "Gate E: pending, run by issue-solver" not in doc
 
 
-def test_gate_e_is_owed_and_the_ledger_has_no_row_yet():
-    """Gate E is run by issue-solver after this session, so there is no row
-    and `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row
-    _has_one` reports this indicator. That failure is the receipt session's
-    cue; this test is what tells that session the row is still missing."""
+def test_the_gate_e_row_is_recorded_and_says_ship():
+    """The row exists, names the one shipped column, and carries the verdict
+    the `r3-perframe-0.90` bands give: SHIP needs no waiver and removes
+    nothing.
+
+    The run id is pinned as well as the arithmetic. This port's figures
+    agree with the 2026-10-24 screen PROTOTYPE's to four decimals (§A5,
+    §E2), and an expected agreement is the easiest kind of row to copy over
+    from the wrong run by mistake."""
     path = ROOT / "docs" / "gate_e_ledger.csv"
     with path.open(newline="", encoding="utf-8") as handle:
         rows = [r for r in csv.DictReader(handle)
                 if r["indicator"] == "c22_ami_timescale"]
-    assert rows == [], rows
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["column"] == f"C22AMITIMESCALE_{LENGTH}"
+    assert row["module"] == "pandas_ta.statistics.c22_ami_timescale"
+    assert row["verdict"] == "SHIP"
+    # the band: pooled < 0.76 and no top-5 per-frame MEDIAN at 0.90
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+    assert row["against"] == "ROLLING_LOW_250"
+    assert row["run"] == "is125-c22_ami_timescale-896a6570"
+    assert row["measured"] == "2026-11-20"
+    assert row["waiver"] == ""                    # only STRUCK needs one
+
+
+def test_gate_cs_real_data_limb_is_in_the_receipt():
+    """Gate C's real-data counts come from the same run, and the receipt has
+    to state them: a reachability claim measured only on synthetic frames is
+    the defect CLAUDE.md names.
+
+    389,949 of 398,849 pooled BIST bars are non-NaN, and the SAME 389,949
+    are non-zero -- which is the floor of the scale being 2 rather than a
+    coincidence."""
+    doc = io.open(ROOT / "docs" / "C22AmiTimescaleMeasured.md",
+                  encoding="utf8").read()
+    assert "389,949" in doc            # non-NaN, and non-zero, of 398,849
+    assert "398,849" in doc
+    assert "### C4. Real data — **OWED**" not in doc
 
 
 def test_the_module_docstring_attributes_the_source():
