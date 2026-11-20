@@ -3,6 +3,7 @@ from .arch_lm import arch_lm
 from .c22_ami2 import c22_ami2
 from .c22_ami_timescale import c22_ami_timescale
 from .c22_periodicity import c22_periodicity
+from .c22_whiten_timescale import c22_whiten_timescale
 from .diff2_acf1 import diff2_acf1
 from .entlz import entlz
 from .entropy import entropy
