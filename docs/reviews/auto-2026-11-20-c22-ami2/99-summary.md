@@ -49,3 +49,15 @@ the estimator is Miller–Madow bias-corrected. The first reading reproduced the
 reference on 15 of 2,802 windows; the shipped one on 2,802. `docs/C22Ami2Measured.md`
 §P1c is that work, and it is the reason the 2026-10-24 screen's Gate E
 expectation transfers to this column.
+
+## Postscript — Gate E ran (2026-11-20, receipt session)
+
+The launcher's run `is127-c22_ami2-23b6686b` is in, so the first follow-up
+above is closed: `C22AMI2_100` is **SHIP** — pooled max \|ρ\| 0.0594 vs
+`Dist_from_High_252_pct` (n = 389,949), per-frame max median 0.0742 vs `natr`,
+0 of 89 frames at 0.90, 389,949 of 398,849 pooled BIST bars non-NaN and none
+reading exactly 0. The ledger row is recorded and `docs/C22Ami2Measured.md` §E
+carries the numbers, so the rows above that call Gate E owed are the state at
+review time, not today. §E4's owed rule for issues #132 and #129 stays open.
+And the expectation did transfer: the screen's prototype figure agrees to three
+decimals on the same top comparator.

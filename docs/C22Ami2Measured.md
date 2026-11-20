@@ -11,10 +11,13 @@ in this repository that runs the GPL-3.0 reference)
 **Measured:** 2026-11-20, numpy 1.26.4 / pandas 2.3.3 / python 3.11.2, with
 `AVX512F AVX512_SKX AVX2 FMA3` **enabled** (the CI dispatch is §F1).
 
-**Gate E: pending, run by issue-solver after this session.** Nothing in this
-document is a Gate E result. The figures the 2026-10-24 screen measured are
-quoted in §E and are labelled as the **prototype's**, which is the reference
-implementation's column — and §P1 is the measurement of whether this port is
+**Gate E: measured 2026-11-20 by issue-solver** on this tree (run
+`is127-c22_ami2-23b6686b`): `C22AMI2_100` pooled max \|ρ\| **0.05943562162216838**
+vs `Dist_from_High_252_pct` (n = 389,949), per-frame max median
+**0.07418786831507361** vs `natr` over 89 frames → **SHIP** under
+`r3-perframe-0.90`. §E has the full table and the ledger row; §E0 keeps the
+2026-10-24 screen's **prototype** figure, which is the reference
+implementation's column, and §P1 is the measurement of whether this port is
 that same column.
 
 ---
@@ -530,8 +533,13 @@ points: the exactly-zero return collapses nearly half the window into the
 middle bin. The column still fires everywhere with 1,252 distinct values, and
 what the rounding does to the READING is to push it **down**, from the walk's
 0.0428 to 0.0262 — toward the no-dependence value, not away from it. Whether a
-price level or a candle-shape column becomes its top real comparator is Gate
-E's question and is **owed**.
+price level or a candle-shape column becomes its top real comparator was Gate
+E's question, and the 2026-11-20 run answers it: the top comparator is
+`Dist_from_High_252_pct`, with `drawdown_DD_PCT` top inside `compute_all` —
+both price-DERIVED, both **percent distances rather than the price levels the
+issue named** (`mcgd`, `ROLLING_LOW_250`, `Volume`), and neither is close
+enough to matter: \|ρ\| **0.0594** pooled and **0.0742** as the largest
+per-frame median (§E).
 
 ### C3. What the one blanking rule costs
 
@@ -569,12 +577,27 @@ together.
 Guarded against the unguarded spelling (a mutant of the module's own source):
 **0 value bars and 0 mask bars differ** on each of the six frames.
 
-### C5. Real data — **OWED**
+### C5. Real data — measured 2026-11-20 by the Gate E run
 
-Every count in §A–§D is SYNTHETIC. The pooled BIST figures — how many of
-**398,849** bars fire, and how many read exactly 0.0 — come from the Gate E
-run issue-solver makes after this session. That run also answers §C2's open
-half.
+Every count in §A–§D is SYNTHETIC; this is the real-data limb, from run
+`is127-c22_ami2-23b6686b` over the 89 frozen ALTPORT-1 BIST frames:
+
+| | |
+|---|---|
+| pooled bars | 398,849 |
+| `C22AMI2_100` non-NaN | **389,949** |
+| non-zero | **389,949** |
+
+**389,949 of 398,849 bars fire (97.77%)**, and the 8,900 NaN bars are
+`89 × 100` exactly — the warm-up (100 returns needed, so bars 0–99 of each
+frame), with **0 further bars blanked**. The §C3 floor and the §P2 difference
+from the reference therefore cost nothing on this universe: no BIST window of
+100 returns is flat or exactly geometric enough to trip `sd ≤ 9.095e-13`.
+
+non-zero equals non-NaN, so exactly 0.0 — reachable in principle (§C1) and
+never reached on 8,400 synthetic bars either — was **not** read on any of the
+389,949 BIST bars. The sibling `c22_periodicity` has the two counts differing
+(389,949 / 389,926), so the field does discriminate.
 
 ---
 
@@ -620,27 +643,54 @@ five stochastic ones (8 on the cosine frame, spanning 0.0068 nats), max − min
 
 ---
 
-## E. Gate E — **pending, run by issue-solver after this session**
+## E. Gate E — measured 2026-11-20 by issue-solver → **SHIP**
 
-The harness needs the private Backtesting engine and the 827 MB BIST cache,
-and this session may not touch `../Backtesting` at all.
+Run `is127-c22_ami2-23b6686b`
+(`gate_e_overlap.py run --module pandas_ta.statistics.c22_ami2`), made by the
+launcher against this tree: 89 frozen ALTPORT-1 BIST frames, 398,849 pooled
+bars, 329 `compute_all` + 358 `ml_features` manifest = **687** comparators
+(the run's `n_degenerate` field reads 1), canary
+`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`,
+pandas 2.3.3 / numpy 1.26.4, module sha1 `bbc248507ee8de16080355815ed5260cc807590c`,
+tree sha1 `df4cb6d97fcf141f3eaab2d71717bd16133db261`, data stamp
+`1be6495ef7095ff67ad8f59a2fc0311d74f02652`.
 
-What exists today is the **prototype's** figure, measured on 2026-10-24 on the
-GPL-3.0 reference's column through pycatch22 (run `screen_r3_20261024`, 89
-ALTPORT-1 frames, 398,849 bars, 329 + 358 comparators, canary bit-equal):
-
-| | |
+| | `C22AMI2_100` |
 |---|---|
-| pooled max \|ρ\| | **0.0595** vs `Dist_from_High_252_pct` (n = 389,949) |
-| top-5 per-frame max median | 0.0742 → **SHIP** |
-| next comparators | `drawdown_DD_PCT` 0.0568, `drawdown_DD_LOG` 0.0568 |
-| fork overlap (stage 2, 12 frames) | 0.0596 vs `covariance:COV_30_1`, per-frame max median 0.0854 |
+| pooled max \|ρ\| | **0.05943562162216838** (ρ = −0.05943562162216838) |
+| against | `Dist_from_High_252_pct` (manifest), n = **389,949** |
+| top within `compute_all` | `drawdown_DD_PCT` 0.056832547398623645, n = 389,949 |
+| per-frame max median \|ρ\| | **0.07418786831507361** vs `natr`, 89 frames |
+| frames with a per-frame median ≥ 0.90 | **0.0%** |
+| non-NaN / non-zero | 389,949 / 389,949 (§C5) |
+| bands | `r3-perframe-0.90` → pooled 0.0594 < 0.76 and 0.0742 < 0.90 → **SHIP** |
 
-**That figure is an expectation for this port, and §P1 is why it is a
-reasonable one**: this column equals the reference to 1e-12 on 8,400 of 8,400
-windows of six frames. It is still not a result for this port — a different
-column on 89 BIST frames could find a different top comparator — and the
-launcher re-runs it.
+SHIP is the whole verdict: no column is removed, nothing is disclosed, no
+waiver is needed. The row is in `docs/gate_e_ledger.csv` as
+`c22_ami2,pandas_ta.statistics.c22_ami2,C22AMI2_100,SHIP,…,is127-c22_ami2-23b6686b,2026-11-20`
+with an empty waiver field, recorded by
+`python docs/gate_e_ledger.py record … --measured 2026-11-20`, which refuses a
+row whose module sha1 is not this tree's.
+
+### E0. The prototype's figure, beside this port's
+
+The 2026-10-24 screen measured the **prototype** — the GPL-3.0 reference's
+column through pycatch22 (run `screen_r3_20261024`, same 89 frames, 398,849
+bars, 687 comparators, canary bit-equal):
+
+| | prototype, 2026-10-24 | this port, 2026-11-20 |
+|---|---|---|
+| pooled max \|ρ\| | **0.0595** | **0.0594** (0.05943562162216838) |
+| against | `Dist_from_High_252_pct`, n = 389,949 | the same, n = 389,949 |
+| top-5 per-frame max median | 0.0742 | 0.0742 (0.07418786831507361) |
+| next comparators | `drawdown_DD_PCT` 0.0568, `drawdown_DD_LOG` 0.0568 | `drawdown_DD_PCT` 0.0568 is the `compute_all` top |
+| fork overlap (stage 2, 12 frames, not Gate E) | 0.0596 vs `covariance:COV_30_1`, per-frame max median 0.0854 | not re-run (§E1 is the in-fork reading made here) |
+
+They agree to three decimals on the same top comparator and the same sample
+size, and §P1 is why that was expected: this column equals the reference to
+1e-12 on 8,400 of 8,400 windows of six frames. The two runs are still two runs
+— the fourth decimal differs as printed (0.0595 vs 0.0594), and the
+prototype's number is not evidence for this port; the row above is.
 
 ### E1. In-fork overlap, measured HERE (6 synthetic frames, not Gate E)
 
@@ -718,11 +768,12 @@ fails if this section is dropped.
 
 ## F. Gate F — suites
 
-**This module:** `python -m pytest tests/test_c22_ami2.py -q` → **243 passed**
-in 17.9 s.
+**This module:** `python -m pytest tests/test_c22_ami2.py -q` → **244 passed**
+in 17.6 s (the receipt session swapped the two pending-Gate-E tests for three
+that pin the recorded row; the porting session's run was 243 passed in 17.9 s).
 
 **Under the CI CPU dispatch:** `python docs/measure_c22_ami2_cpu.py` →
-**243 passed** in 17.4 s with `NPY_DISABLE_CPU_FEATURES = 'AVX512F
+**244 passed** in 17.8 s with `NPY_DISABLE_CPU_FEATURES = 'AVX512F
 AVX512_SKX AVX2 FMA3'`. That script sets the variable before numpy is
 imported and then **refuses to run** unless all four features are actually
 off — it prints the dispatchable features still enabled (`SSSE3`, `SSE41`,
@@ -732,15 +783,20 @@ launcher's own spelling (`NPY_DISABLE_CPU_FEATURES=… python -m pytest …`) is
 an environment-prefixed command, which this session's shell rules do not
 allow; the script is the same run by another route.
 
-**Whole suite:** `python -m pytest -q` → **2 failed, 13,482 passed, 86
-skipped** in 8 m 35 s, on the final tree with the review log in place. Both
-failures are expected and neither is caused by
-this port's code:
+**Whole suite:** `python -m pytest -q` → **1 failed, 13,491 passed, 86
+skipped** in 8 m 41 s, on the final tree with the review log and the recorded
+ledger row in place. The one failure is expected and is not caused by this
+port's code:
 
 | failure | why |
 |---|---|
-| `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` | *"no Gate E ledger row for ['c22_ami2']"* — Gate E is owed, by design. CI sets `GATE_E_PENDING_OK=1` and this becomes a **skip** reading "Gate E owed"; locally it fails. `tests/test_c22_ami2.py::test_the_gate_e_row_is_owed` is its mirror and passes. |
 | `tests/test_altrepo_talib_csv.py::test_regenerating_reproduces_the_committed_rows` | pre-existing on every clean checkout here: it needs the sibling `../AlternativeRepos` tree, and CI deselects it by name. |
+
+The porting session's run was **2 failed, 13,482 passed, 86 skipped**; the
+second failure was `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+(*"no Gate E ledger row for ['c22_ami2']"*), which the recorded row closes —
+`tests/test_c22_ami2.py::test_the_gate_e_row_is_recorded_and_says_ship` is now
+the mirror of it.
 
 The 86 skips are the upstream correlation suite (`data/SPY_D.csv` is
 gitignored) plus the environment-dependent ones; the port's own tests are
@@ -755,7 +811,11 @@ Re-measured sections A, B, C, D, E and G with the four features off. The rows
 below are the whole re-measurement: every digit named here moves on a CI CPU,
 and the facts named as unchanged inside each row were checked. §H and §T came
 back identical; §P needs the GPL-3.0 reference and is not part of the CI
-question.
+question. §E's Gate E digits and §C5's BIST counts are the launcher's single
+run on its own machine and were not re-measured here at all — which is why the
+tests pin the ρ figures as the **bands** they decide (`< 0.76`, `< 0.90`) and
+the integer counts exactly (389,949, `non_zero == non_nan`), and check the
+printed decimals only as text in this document.
 
 | section | moves |
 |---|---|
@@ -999,9 +1059,11 @@ laws and §A1's exact oracle check it independently of the reference.
 The reference scores the degenerate windows this port refuses, so this
 column's non-NaN count on real data is **lower** than the prototype's wherever
 a BIST window is flat or exactly geometric. On the 89-frame universe the
-prototype's own `w.std() > 0` filter already removes the fully flat ones; the
-difference the floor makes beyond that is part of what the Gate E run will
-show (§C5).
+prototype's own `w.std() > 0` filter already removes the fully flat ones, and
+the Gate E run shows the floor costs nothing beyond it: 389,949 non-NaN of
+398,849 is the 100-bar warm-up and nothing else (§C5). The sentence above is
+therefore a statement about windows that BIST does not contain, not about this
+universe.
 
 ---
 
@@ -1033,6 +1095,9 @@ reproduce.
 5. **It blanks where the window does not vary** (sd ≤ 9.09e-13) and that
    includes an exactly geometric path, but **not** a deterministically smooth
    one — unlike `c22_periodicity`, which blanks both.
-6. **Gate E is pending.** Until the launcher's run is recorded in
-   `docs/gate_e_ledger.csv`, the only overlap numbers here are the
-   prototype's (§E) and six synthetic frames' (§E1).
+6. **Gate E says SHIP** (run `is127-c22_ami2-23b6686b`, 2026-11-20): nothing
+   among the engine's 687 comparators restates this column — the largest is
+   0.0594 (`Dist_from_High_252_pct`) pooled and 0.0742 (`natr`) as a per-frame
+   median (§E). It fires on 389,949 of 398,849 pooled BIST bars and read
+   exactly 0 on none of them (§C5). Still owed: the two unported catch22
+   relatives of §E4, which Gate E cannot see.

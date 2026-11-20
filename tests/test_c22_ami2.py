@@ -98,11 +98,14 @@ it would hurt to lose:
    deterministically smooth path: a price rising one kurus a bar fires on all
    1,400 bars and reads 1.3432, near the top of the scale, where
    `c22_periodicity` blanks.
-10. **Gate E is OWED.** The launcher runs it after this session, so there is
-    no ledger row yet and `test_the_gate_e_row_is_owed` asserts there is
-    none; `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-    fails until the receipt session records one. Gate C's real-data limb is
-    owed from the same run: every count in this file is SYNTHETIC.
+10. **Gate E is MEASURED and says SHIP.** Run `is127-c22_ami2-23b6686b` of
+    2026-11-20: pooled max |rho| 0.0594 vs `Dist_from_High_252_pct`
+    (n = 389,949), per-frame max median 0.0742 vs `natr`, 0 of 89 frames at
+    0.90 -- so no column is removed and no waiver is needed. The tests pin the
+    ledger row's identity and the BANDS rather than the digits, and they pin
+    Gate C's real-data limb from the same run (389,949 of 398,849 pooled BIST
+    bars non-NaN, 389,949 non-zero), because every OTHER count in this file is
+    SYNTHETIC.
 
 Not pinned on purpose: exact counts of distinct values, exact bars-moved
 counts, and any value to 1e-15. The counts are robust to the CPU dispatch
@@ -1329,31 +1332,73 @@ def test_the_dictionary_row_describes_this_column():
     assert "c22_ami2" in text
 
 
-# ------------------------------------------------------- Gate E, owed
+# ------------------------------------------------------- Gate E, measured
 RECEIPT = ROOT / "docs" / "C22Ami2Measured.md"
 
 
-def test_the_receipt_says_gate_e_is_pending():
-    """Gate E is run by the launcher after this session, so the receipt must
-    say PENDING rather than carry a number nobody measured. The PROTOTYPE's
-    figure is in the document and is labelled as the prototype's."""
+def test_the_receipt_carries_the_measured_gate_e_numbers():
+    """The receipt is the deliverable the issue asks for, so the launcher's
+    run of 2026-11-20 has to live in it and not only in the ledger: the pooled
+    max with its comparator, the sample size, the per-frame max median with
+    ITS comparator, and the run id.
+
+    The 2026-10-24 screen's PROTOTYPE figure (0.0595, the same comparator)
+    stays in §E0, labelled as the prototype's, because the agreement is what
+    §P1 predicted -- but the pending line must be gone, since that line is how
+    this document said "nobody has measured this"."""
     text = RECEIPT.read_text(encoding="utf-8")
-    assert "Gate E: pending, run by issue-solver after this session" in text
-    assert "0.0595" in text and "Dist_from_High_252_pct" in text
-    assert "prototype" in text.lower()
+    assert "Gate E: measured 2026-11-20 by issue-solver" in text
+    assert "0.05943562162216838" in text          # the PORT's pooled max
+    assert "0.07418786831507361" in text          # its per-frame max median
+    assert "Dist_from_High_252_pct" in text and "natr" in text
+    assert "389,949" in text
+    assert "is127-c22_ami2-23b6686b" in text
+    assert "r3-perframe-0.90" in text
+    assert "0.0595" in text and "prototype" in text.lower()
+    assert "Gate E: pending, run by issue-solver" not in text
 
 
-def test_the_gate_e_row_is_owed():
-    """The ledger has no row for this column yet, and
-    `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-    fails until the receipt session records one. That failure is expected and
-    this test is its mirror: if a row appears, this test fails and the
-    pending-Gate-E tests here must be swapped for ones that pin the row."""
+def test_the_gate_e_row_is_recorded_and_says_ship():
+    """The ledger carries exactly one row, for the one shipped column, and the
+    `r3-perframe-0.90` bands put it at SHIP: nothing is removed, no waiver is
+    needed. The bands are asserted as bands (pooled < 0.76, per-frame max
+    median < 0.90) rather than as digits, which is what the CPU-dispatch rule
+    asks for; the run id is pinned beside them, because this port's figure
+    agrees with the 2026-10-24 screen's prototype to three decimals and an
+    expected agreement is the easiest kind of row to copy in from the wrong
+    run."""
     path = ROOT / "docs" / "gate_e_ledger.csv"
     with path.open(newline="", encoding="utf-8") as fh:
         rows = [r for r in csv.DictReader(fh)
-                if r.get("indicator") == "c22_ami2"]
-    assert rows == [], rows
+                if r["indicator"] == "c22_ami2"]
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["column"] == f"C22AMI2_{LENGTH}"
+    assert row["module"] == "pandas_ta.statistics.c22_ami2"
+    assert row["verdict"] == "SHIP"
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+    assert row["against"] == "Dist_from_High_252_pct"
+    assert row["run"] == "is127-c22_ami2-23b6686b"
+    assert row["measured"] == "2026-11-20"
+    assert row["waiver"] == ""                  # only STRUCK needs one
+
+
+def test_the_gate_e_row_has_no_sentinel_gap():
+    """0.0 is a legal reading of this column, not only a blank (§C1), and on
+    the 89 BIST frames it was never read: the row's non-NaN and non-zero
+    counts are EQUAL. The sibling `c22_periodicity`, whose scale reaches 0 by
+    way of a flat window, has them differing -- so this is a measured fact
+    about BIST returns and not a property of the field."""
+    path = ROOT / "docs" / "gate_e_ledger.csv"
+    with path.open(newline="", encoding="utf-8") as fh:
+        rows = {r["indicator"]: r for r in csv.DictReader(fh)}
+    row = rows["c22_ami2"]
+    non_nan, non_zero = int(row["non_nan"]), int(row["non_zero"])
+    assert non_nan == 389949
+    assert non_zero == non_nan
+    sibling = rows["c22_periodicity"]
+    assert int(sibling["non_zero"]) < int(sibling["non_nan"])
 
 
 def test_the_receipt_states_the_agreement_with_the_reference():
@@ -1394,10 +1439,13 @@ def test_the_receipt_scopes_its_interpretive_figures_to_the_length():
     assert "is a floor, not a recommendation" in text
 
 
-def test_gate_cs_real_data_limb_is_owed_in_the_receipt():
-    """Every count in this file is synthetic. The receipt says the real-data
-    limb comes from the launcher's Gate E run, and names the pooled bar count
-    it owes."""
+def test_gate_cs_real_data_limb_is_in_the_receipt():
+    """Every count measured in THIS file is synthetic, which is the defect
+    `CLAUDE.md` names, so Gate C's real-data limb has to be stated in the
+    receipt: 389,949 of 398,849 pooled BIST bars non-NaN, which is `89 x 100`
+    bars short of the pool -- the warm-up exactly, so the §C3 floor and the
+    §P2 gap to the reference blanked nothing on real data."""
     text = RECEIPT.read_text(encoding="utf-8")
-    assert "owed" in text.lower()
     assert "398,849" in text
+    assert "389,949" in text
+    assert "0 further bars blanked" in text
