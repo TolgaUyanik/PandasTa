@@ -72,5 +72,35 @@ Verification after fixes:
 `python docs/measure_c22_entropy_pairs_cpu.py` (AVX512F/AVX512_SKX/AVX2/FMA3
 disabled) -> 110 passed.
 
-Committed as a follow-up commit; re-dispatching the Fletcher reviewer for
-round 2.
+Committed as a follow-up commit (`22d8f45`); re-dispatched the Fletcher
+reviewer for round 2.
+
+## Round 2
+
+VERDICT: PASS
+
+FINDINGS (verbatim):
+- severity: NIT
+  location: pandas_ta/statistics/c22_entropy_pairs.py:159
+  problem: the round-1 fix that merged the docstring title onto one
+    physical line produced an 86-character line, longer than any other
+    line in the file.
+  fix: cosmetic only; not applied.
+
+SUMMARY (verbatim): Both round-1 MAJORs are actually fixed, not just
+claimed fixed. The `docs/IndicatorDictionary.md` row for
+`c22_entropy_pairs` (line 236) now carries the real description, confirmed
+by reading the file directly and by the new
+`test_the_dictionary_row_describes_this_column`. The length-guard-band test
+is parametrized at `None, 0, 1, MIN_LENGTH-1, MIN_LENGTH, 250, 250.7` and
+checks both `.name` and the fired-bar count at each, mirroring `c22_ami2`,
+and it passes. 7 new test functions with 18 parametrized cases land the
+claimed 92->110, and the full required subset reproduces bit for bit on
+this machine (1408 passed, 7 skipped, 1 expected failure at
+`test_gate_e_ledger.py`), as does the CPU-dispatch re-run (110 passed with
+AVX512F/AVX512_SKX/AVX2/FMA3 disabled). A fresh pass over Gate A, Gate B,
+the GPL-3.0 boundary, and the new tests turned up nothing that contradicts
+the receipt. This port is clean; ship it to Gate E.
+
+Only a NIT survived, which per the review-loop rule is PASS. No further
+fix round. Run complete.
