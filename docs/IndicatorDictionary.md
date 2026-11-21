@@ -233,7 +233,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `c22_ami2` | C | `length=None` | `C22AMI2_100` SF | 100 | How much the bin a return falls into tells you about the bin the return TWO bars later falls into: cut the last `length` daily returns into 5 even… |
 | `c22_ami_timescale` | C | `length=None` | `C22AMITIMESCALE_100` ORD | 100 | How soon the last `length` daily returns stop looking like their own lagged copy: for each lag 1 .. 40, correlate the window with itself shifted by… |
 | `c22_dfa` | C | `length=None` | `C22DFA_100` SF | 100 | WHERE the detrended fluctuation of the last `length` returns stops following one power law and starts following another: measure `F(tau)`, the… |
-| `c22_entropy_pairs` | C | `length=None` | `C22ENTROPYPAIRS_100` SF | 100 | (C22ENTROPYPAIRS) |
+| `c22_entropy_pairs` | C | `length=None` | `C22ENTROPYPAIRS_100` SF | 100 | Cut the last `length` daily returns into 3 roughly-equiprobable letters by their OWN 1/3 and 2/3 empirical quantiles, read off every overlapping… |
 | `c22_periodicity` | C | `length=None` | `C22PERIODICITY_100` ORD | 100 | The period of the last `length` daily returns, read the way Wang, Wirth and Wang (2007) read one: z-score the window, detrend it with a single-knot… |
 | `covariance` | C | `other=None`, `length=None`, `ddof=None` | `COV_30_1` SF | 30 | The trailing covariance of two series over `length` bars. The two-series counterpart of `variance`, and the unnormalised counterpart of `correlation`. |
 | `cusum` | C | `length=None` | `CUSUM_100` SF | 100 | The largest standardised rise of log price over any earlier reference bar in a rolling window: for each reference bar n, the log change from n to the… |

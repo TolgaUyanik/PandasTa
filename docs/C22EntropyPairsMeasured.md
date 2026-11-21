@@ -7,7 +7,7 @@ catch22 entropy of 2-letter words in a 3-quantile return alphabet (100)
 opt-in and is the only place in this repository that runs the GPL-3.0
 reference)
 **CPU re-run:** `docs/measure_c22_entropy_pairs_cpu.py`
-**Tests:** `tests/test_c22_entropy_pairs.py` (92 tests)
+**Tests:** `tests/test_c22_entropy_pairs.py` (110 tests)
 **Measured:** 2026-11-21, numpy 1.26.4 / pandas 2.3.3 / python 3.11, with
 `AVX512F AVX512_SKX AVX2 FMA3` **enabled** (the CI dispatch is §F1).
 
@@ -310,12 +310,14 @@ Gate E's question and is owed.
 ## F. Gate F — suites
 
 **This module:** `python -m pytest tests/test_c22_entropy_pairs.py -q` →
-**92 passed**.
+**110 passed** (review round 1 added 18: the length guard band and column
+naming, a short-input probe, wiring/accessor checks, offset/fillna, the
+chunk budget, and a stricter dictionary-row check).
 
 **Required subset (this session):**
 `python -m pytest -q tests/test_c22_entropy_pairs.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`
 → **1 failed** (`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-*"no Gate E ledger row for ['c22_entropy_pairs']"*) **, 1390 passed, 7
+*"no Gate E ledger row for ['c22_entropy_pairs']"*) **, 1408 passed, 7
 skipped.** The one failure is expected and documented by the issue-solver
 rules: `GATE_E_PENDING_OK` is not set in this session, so the missing ledger
 row fails rather than skips; the receipt session records the row once the
@@ -331,7 +333,7 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
 `python docs/measure_c22_entropy_pairs_cpu.py` sets the variable before numpy
 is imported and refuses to run unless all four features are actually off.
 
-Run result: **92 passed**, `tests/test_c22_entropy_pairs.py -q`. No count in
+Run result: **110 passed**, `tests/test_c22_entropy_pairs.py -q`. No count in
 the test module is pinned to an exact value that this dispatch could move —
 every distinct-value and tie-share claim in §B4/§C1 is asserted as a `>=`
 bound (`>= 20` distinct values, `> 0.05` range) rather than an exact count,
@@ -461,7 +463,7 @@ and the sub-1.0 Spearman on two of six frames are stated, not hidden.
 | C | Fires on every full-window bar on all 6 synthetic frames, including the tick-rounded penny frame (21.68% zero returns); blanks correctly on a flat run and an exact geometric ladder |
 | D | Bit-identical under ×8/×64/2⁻⁴⁰/2⁴⁰ price rescale (24/24 cells); 0 bars moved under ×10/×3.7/×0.1/×1.0000001 return rescale; `0 < fires < n` |
 | E | **Pending** — run by issue-solver after this session |
-| F | This module's 92 tests pass, under both the local dispatch and the CI CPU-feature set; required cross-module subset passes except the expected Gate-E-ledger failure |
+| F | This module's 110 tests pass, under both the local dispatch and the CI CPU-feature set; required cross-module subset passes except the expected Gate-E-ledger failure |
 
 **Decision: SHIP, pending Gate E.** Nothing in Gates A–D disqualifies the
 column; the one open reading (the quantile interpolation convention) is

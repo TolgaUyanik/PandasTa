@@ -156,8 +156,7 @@ def c22_entropy_pairs(close, length=None, offset=None, **kwargs):
 
 
 c22_entropy_pairs.__doc__ = \
-"""catch22 entropy of 2-letter words in a 3-quantile return alphabet
-(C22ENTROPYPAIRS)
+"""catch22 entropy of 2-letter words in a 3-quantile return alphabet (C22ENTROPYPAIRS)
 
 Cut the last `length` daily returns into 3 roughly-equiprobable letters by
 their OWN 1/3 and 2/3 empirical quantiles, read off every overlapping
@@ -223,14 +222,25 @@ catch22 ports on returns use -- so that this column reads SHAPE and not the
 rounding of a flat window.
 
 Causal: bar T reads closes T - length .. T. Measured by future-perturbation
-sweep and by mutants read off this file, edited and exec'd in memory; see
-`tests/test_c22_entropy_pairs.py` and the receipt for the figures.
+sweep (0 of 35 offsets leak on six frames with eight splices apiece, and 0
+of 35 at `length` 10, 120 and 250) and by eleven mutants read off this file,
+edited and exec'd in memory; every look-ahead mutant is caught at 10 or more
+of the 35 offsets, which the sweep can see despite this column's higher tie
+rate (9.4% to 62.7% of neighbouring bars tied across the six synthetic
+frames, against `c22_ami2`'s 7% to 22%, because this column is an integer
+bincount rather than a continuous mutual information) -- see
+`tests/test_c22_entropy_pairs.py` and `docs/C22EntropyPairsMeasured.md` §B
+for the full counts.
 
 Scale-free: the price enters only as `c[t] / c[t-1]`, so `8a / 8b` is the
-double `a / b` and a x2**k rescale is bit-identical BY CONSTRUCTION. The
-quantile cut points and the letter assignment are both decided by order
-comparisons on `Z`, which an increasing rescale of the returns themselves
-cannot reorder either; see the receipt for the measured margins.
+double `a / b` and a x8/x64/2**-40/2**40 price rescale is bit-identical BY
+CONSTRUCTION (measured: all 24 cells across six frames). The quantile cut
+points and the letter assignment are both decided by order comparisons on
+`Z`, which an increasing rescale of the returns themselves cannot reorder
+either: measured 0 bars moved under a x10, x3.7, x0.1 or x1.0000001 RETURN
+rescale of the walk frame (not bit-identical by construction, since those
+factors are not exact in binary -- see the receipt §D2 for the margin
+argument).
 
 NaN on the first `length` bars; on every window holding a close that is NaN,
 infinite, zero, negative or subnormal; on a window holding a close PAIR whose

@@ -42,7 +42,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from pandas import Series
+from pandas import DataFrame, Series
 
 from .context import pandas_ta
 from pandas_ta.statistics.c22_entropy_pairs import (
@@ -578,3 +578,97 @@ def test_the_column_is_blind_to_an_inexact_return_rescale(factor):
 def test_zero_lt_fires_lt_n_at_the_default_length():
     s = base("walk")
     assert 0 < int(s.notna().sum()) < len(s)
+
+
+@pytest.mark.parametrize("n,fires", [(99, None), (100, None), (101, 1),
+                                     (102, 2)])
+def test_a_short_input_returns_none_until_one_window_exists(n, fires):
+    s = c22_entropy_pairs(FRAMES["walk"].iloc[:n])
+    if fires is None:
+        assert s is None
+    else:
+        assert int(s.notna().sum()) == fires
+
+
+@pytest.mark.parametrize("length,name,fires", [
+    (None, "C22ENTROPYPAIRS_100", 1400),
+    (0, "C22ENTROPYPAIRS_100", 1400),
+    (1, "C22ENTROPYPAIRS_100", 1400),
+    (MIN_LENGTH - 1, "C22ENTROPYPAIRS_100", 1400),
+    (MIN_LENGTH, f"C22ENTROPYPAIRS_{MIN_LENGTH}", 1500 - MIN_LENGTH),
+    (250, "C22ENTROPYPAIRS_250", 1250),
+    (250.7, "C22ENTROPYPAIRS_250", 1250),
+])
+def test_the_length_guard_band(length, name, fires):
+    """Below `MIN_LENGTH` = `NUM_LETTERS ** WORD_LENGTH + 1` = 10 -- where a
+    window would hold fewer 2-letter words than the alphabet has word types
+    -- a length falls back to 100 rather than computing something thin, AND
+    the column is named after the length actually used, not the one asked
+    for. This is the exact branch `CLAUDE.md`'s "naming is API" warns about:
+    an untested fallback here would silently rename the column a caller
+    thinks it is reading."""
+    s = c22_entropy_pairs(FRAMES["walk"], length=length)
+    assert s.name == name
+    assert int(s.notna().sum()) == fires
+    assert MIN_LENGTH == NUM_LETTERS ** WORD_LENGTH + 1
+
+
+def test_the_offset_and_the_fill_are_the_house_ones():
+    s = c22_entropy_pairs(FRAMES["walk"], offset=2)
+    assert same(s.to_numpy()[2:], base("walk").to_numpy()[:-2])
+    s = c22_entropy_pairs(FRAMES["walk"], fillna=-1)
+    assert int(s.isna().sum()) == 0
+    assert int((s == -1).sum()) == LENGTH
+
+
+@pytest.mark.parametrize("budget", [100, 400, 1024])
+def test_the_chunk_budget_cannot_change_a_value(budget):
+    """Every quantity is per-row, so the chunk boundary is invisible."""
+    want = base("walk")
+    MODULE.CHUNK_VALUES = budget
+    try:
+        got = c22_entropy_pairs(FRAMES["walk"])
+    finally:
+        MODULE.CHUNK_VALUES = CHUNK_VALUES
+    assert same(want, got)
+
+
+# ------------------------------------------------------------- wiring
+def test_the_five_wiring_touch_points():
+    assert Path(MODULE.__file__).exists()
+    assert hasattr(pandas_ta.statistics, "c22_entropy_pairs")
+    assert "c22_entropy_pairs" in pandas_ta.Category["statistics"]
+    assert hasattr(pandas_ta.core.AnalysisIndicators, "c22_entropy_pairs")
+    assert (ROOT / "tests" / "test_c22_entropy_pairs.py").exists()
+
+
+def test_the_accessor_forwards_its_parameters():
+    df = DataFrame({"close": FRAMES["walk"].to_numpy()})
+    acc = df.ta.c22_entropy_pairs()
+    assert acc.name == "C22ENTROPYPAIRS_100"
+    assert same(acc, base("walk"))
+    acc = df.ta.c22_entropy_pairs(length=250, offset=1)
+    assert acc.name == "C22ENTROPYPAIRS_250"
+    assert same(acc, c22_entropy_pairs(FRAMES["walk"], length=250, offset=1))
+
+
+def test_the_dictionary_row_describes_this_column():
+    """Not just a substring check: the generator (`docs/gen_indicator_
+    dictionary.py`) takes the docstring's first line as the title and the
+    next contiguous run of non-blank lines as the body, so a title that
+    wraps onto a second physical line swallows that line as the whole body
+    and leaves the real description unreached -- exactly what happened here
+    on the first pass, caught because this test checks for descriptive
+    WORDS and not merely the column name."""
+    text = (ROOT / "docs" / "IndicatorDictionary.md").read_text(
+        encoding="utf-8")
+    assert "C22ENTROPYPAIRS_100" in text
+    assert "c22_entropy_pairs" in text
+    lines = [ln for ln in text.splitlines() if "c22_entropy_pairs" in ln]
+    assert lines, "no row for c22_entropy_pairs in the dictionary"
+    row_text = lines[0]
+    assert "entropy" in row_text.lower()
+    assert "(C22ENTROPYPAIRS)" not in row_text, (
+        "the docstring title leaked its own parenthetical short name into "
+        "the dictionary body instead of a real description -- the title "
+        "line wrapped and broke the generator's parser")
