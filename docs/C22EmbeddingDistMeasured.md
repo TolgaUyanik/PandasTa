@@ -83,11 +83,12 @@ AR(1) at phi 0.7, and a Student-t(3) path, five each, lengths 60-300):
 ```
 A1. Broad sweep, 25 mixed frames, candidate(bins=5, zero_to_max, abs_prop):
     n=25  max|err|=1.245120  mean|err|=0.308518
+    oracle's own range on these 25 frames: 0.029989 .. 1.358727
 ```
 
-The oracle's own range on these frames spans roughly 0.03 to 1.36; a
-max error of 1.245 against that range means the candidate is not a loose
-approximation, it is reading a different quantity.
+A max error of 1.245120 against an oracle range of 0.029989 to 1.358727
+means the candidate is not a loose approximation, it is reading a
+different quantity.
 
 ## 3. §A2 — isolating the delay parameter
 
@@ -100,6 +101,7 @@ autocorrelation is strongly negative by construction:
 ```
 A2. Tau pinned to 1 by construction (acf(1) of the 8 frames):
     -0.920, -0.888, -0.923, -0.909, -0.915, -0.903, -0.877, -0.930
+    oracle's own range on these 8 frames: 0.297274 .. 0.422275
 ```
 
 30 histogram variants (bins in `{3, 5, 10, 20, 40}` x edges `{zero-to-max,
@@ -142,11 +144,12 @@ against the same 8 frames' oracle values:
 ```
 
 The `abs_count` metric reads far worse than either `abs_prop` or
-`abs_density` here (6.5 to 27.7, not a close call); its apparent scale
-mismatch is a property of these particular 8 frames' similar pair
-counts, not a structural disqualifier (§1 above withdraws the earlier,
-wrong, "ruled out analytically" claim for `abs_density`, and `abs_count`
-is simply the worst performer measured rather than excluded on theory).
+`abs_density` here (6.5 to 27.7 against an oracle range of 0.297 to
+0.422 on these 8 frames, not a close call); its apparent scale mismatch
+is a property of these particular 8 frames' similar pair counts, not a
+structural disqualifier (§1 above withdraws the earlier, wrong, "ruled
+out analytically" claim for `abs_density`, and `abs_count` is simply the
+worst performer measured rather than excluded on theory).
 
 The density reading is the closest found by a wide margin, so its bin
 count was swept finely (4 to 24, `min_to_max` edges) to check whether

@@ -80,9 +80,13 @@ def embed2_dist(y, tau):
 
 def expfit_meandiff(d, bins=5, edges="zero_to_max", metric="abs_prop"):
     """The candidate statistic: moment-matched exponential vs a histogram
-    of `d`, compared by mean absolute difference of bin PROPORTIONS
-    (the only metric consistent with this port's own measured affine
-    invariance of the oracle's output -- section A0 below)."""
+    of `d`, compared by mean absolute difference -- of bin PROPORTIONS
+    (`abs_prop`, this function's default and §A1's reading), raw COUNTS
+    (`abs_count`) or DENSITY (`abs_density`). Affine invariance of the
+    oracle's output (section A0) does NOT single out one of the three:
+    `d` is computed from an already-z-scored series, so it is invariant
+    to the original input's scale before any of the three ever runs.
+    §A2 tests all three empirically instead of assuming one."""
     if d.size < 2:
         return np.nan
     lam = 1.0 / d.mean()
@@ -169,14 +173,16 @@ def section_a1_broad_sweep():
             y = rng.standard_t(3, size=n)
         frames.append(y)
 
-    errs = []
+    errs, refs = [], []
     for y in frames:
         ref = fn(y.tolist())
+        refs.append(ref)
         val, _tau = candidate(y)
         if not (np.isnan(val) or np.isnan(ref)):
             errs.append(abs(val - ref))
     print("A1. Broad sweep, 25 mixed frames, candidate(bins=5, zero_to_max, abs_prop):")
     print(f"    n={len(errs)}  max|err|={max(errs):.6f}  mean|err|={np.mean(errs):.6f}")
+    print(f"    oracle's own range on these 25 frames: {min(refs):.6f} .. {max(refs):.6f}")
 
 
 def section_a2_tau_pinned():
@@ -200,6 +206,7 @@ def section_a2_tau_pinned():
         acf1.append(float(np.sum(yo[:-1] * yo[1:]) / np.sum(yo * yo)))
     print("A2. Tau pinned to 1 by construction (acf(1) of the 8 frames):")
     print("    " + ", ".join(f"{v:.3f}" for v in acf1))
+    print(f"    oracle's own range on these 8 frames: {min(refs):.6f} .. {max(refs):.6f}")
 
     print("    bins  edges        metric       max|err|")
     best = None
