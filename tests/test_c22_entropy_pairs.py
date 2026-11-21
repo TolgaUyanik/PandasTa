@@ -255,6 +255,29 @@ def test_bit_equal_to_the_exact_rational_oracle(frame):
 
 
 @pytest.mark.parametrize("frame", list(FRAMES))
+def test_bit_equal_to_the_exact_rational_oracle_non_integral_index(frame):
+    """A1 at a length whose virtual index is NOT an integer: at the default
+    `length` = 100, `(length - 1) / 3` = 33 exactly, so `numpy.quantile`'s
+    `linear` interpolation never actually interpolates (`frac` = 0 on both
+    cuts) and the oracle above never exercises it. `length` = 120 makes
+    `(length - 1) / 3` = 39.667 and `(length - 1) * 2 / 3` = 79.333, so both
+    cut points fall strictly between two order statistics and the oracle
+    recomputes the real interpolation with zero rounding (`Fraction`)."""
+    length = 120
+    win, bars = windows(FRAMES[frame], length=length)
+    mine_series = c22_entropy_pairs(FRAMES[frame], length=length)
+    ran = 0
+    for i in range(0, win.shape[0], EXACT_STRIDE):
+        mine_letter, _ = shipped_letters(win[i])
+        exact = exact_letters(win[i])
+        assert np.array_equal(mine_letter, exact), (frame, int(bars[i]))
+        mine = float(mine_series.iloc[int(bars[i])])
+        assert abs(mine - value_exact(win[i])) < 1e-12, (frame, int(bars[i]))
+        ran += 1
+    assert ran >= 14, ran
+
+
+@pytest.mark.parametrize("frame", list(FRAMES))
 def test_the_plain_python_respelling_agrees(frame):
     """A second spelling sharing no code with the module: `math.fsum`, a
     hand-written linear-interpolation quantile, and a dict-counted entropy."""
@@ -572,7 +595,7 @@ def test_the_column_is_blind_to_an_inexact_return_rescale(factor):
     b = c22_entropy_pairs(Series(scaled)).to_numpy()
     moved, mask = diff_bars(a, b, tol=1e-9)
     assert mask == 0
-    assert moved <= len(a) // 20, (factor, moved)
+    assert moved == 0, (factor, moved)
 
 
 def test_zero_lt_fires_lt_n_at_the_default_length():

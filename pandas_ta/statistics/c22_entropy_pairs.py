@@ -188,13 +188,16 @@ names the BINNING rule (cut points at the window's own empirical quantiles)
 but not which quantile ESTIMATOR to use at a finite sample -- there is more
 than one convention for interpolating between order statistics. This port
 uses linear interpolation between the two bracketing order statistics
-(`numpy.quantile`'s default, equivalent to the classic Hazen-adjacent "type
-7" estimator), the most common convention and the one a reader reproducing
-"the 1/3 and 2/3 empirical quantiles" from the paper's own words would reach
-for first. It is disclosed here rather than picked silently because a
-different interpolation convention is a different column at the margin: see
-the `docs/C22EntropyPairsMeasured.md` receipt for the measured effect of two
-other candidate conventions.
+(`numpy.quantile`'s default, plotting position `p_k = (k - 1) / (n - 1)`,
+the "type 7" estimator), the most common convention and the one a reader
+reproducing "the 1/3 and 2/3 empirical quantiles" from the paper's own words
+would reach for first. It is NOT the same convention as MATLAB/hctsa's own
+`quantile`, which is the Hazen rule (`p_k = (k - 0.5) / n`, "type 5",
+`numpy.quantile(method="hazen")`) -- a different estimator, not an adjacent
+one. It is disclosed here rather than picked silently because a different
+interpolation convention is a different column at the margin: see the
+`docs/C22EntropyPairsMeasured.md` receipt (§P1) for the measured effect of
+the candidate conventions tried, Hazen included.
 
 **What is INERT here, measured rather than assumed.** The empirical quantile
 of an increasing affine map of a sample is the same affine map of the
@@ -224,13 +227,15 @@ rounding of a flat window.
 Causal: bar T reads closes T - length .. T. Measured by future-perturbation
 sweep (0 of 35 offsets leak on six frames with eight splices apiece, and 0
 of 35 at `length` 10, 120 and 250) and by eleven mutants read off this file,
-edited and exec'd in memory; every look-ahead mutant is caught at 10 or more
-of the 35 offsets, which the sweep can see despite this column's higher tie
-rate (9.4% to 62.7% of neighbouring bars tied across the six synthetic
-frames, against `c22_ami2`'s 7% to 22%, because this column is an integer
-bincount rather than a continuous mutual information) -- see
-`tests/test_c22_entropy_pairs.py` and `docs/C22EntropyPairsMeasured.md` §B
-for the full counts.
+edited and exec'd in memory; every look-ahead mutant that can move a CLEAN
+frame is caught at 10 or more of the 35 offsets, which the sweep can see
+despite this column's higher tie rate (9.4% to 62.7% of neighbouring bars
+tied across the six synthetic frames, against `c22_ami2`'s 7% to 22%,
+because this column is an integer bincount rather than a continuous mutual
+information); the one exception, a bad-data-mask mutant that back-dates
+which bar a NaN return marks bad, is inert on a clean frame (0 of 35) and
+caught 12 of 12 offsets on a dirty one -- see `tests/test_c22_entropy_pairs.py`
+and `docs/C22EntropyPairsMeasured.md` §B for the full counts.
 
 Scale-free: the price enters only as `c[t] / c[t-1]`, so `8a / 8b` is the
 double `a / b` and a x8/x64/2**-40/2**40 price rescale is bit-identical BY

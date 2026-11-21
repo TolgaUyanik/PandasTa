@@ -389,7 +389,7 @@ def section_p():
         return entropy_of(letter)
 
     methods = ["linear", "lower", "higher", "nearest", "midpoint",
-               "median_unbiased", "normal_unbiased"]
+               "median_unbiased", "normal_unbiased", "hazen", "weibull"]
     worst = {m: 0.0 for m in methods}
     gaps = {m: [] for m in methods}
     agree = {m: 0 for m in methods}
@@ -449,12 +449,29 @@ def section_p():
         n_types = len(set(zip(letter[:-1].tolist(), letter[1:].tolist())))
         return v / math.log(n_types) if n_types > 1 else 0.0
 
+    def entropy_with_divisor(letter, divisor):
+        code = letter[:-1] * NUM_LETTERS + letter[1:]
+        counts = np.bincount(code, minlength=NUM_WORD_TYPES)
+        p = counts / float(divisor)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return float(-np.sum(np.where(p > 0, p * np.log(p), 0.0)))
+
+    def value_divide_by_length(window):
+        letter, _ = shipped_letters(window)
+        return entropy_with_divisor(letter, letter.size)
+
+    def value_divide_by_length_minus_2(window):
+        letter, _ = shipped_letters(window)
+        return entropy_with_divisor(letter, letter.size - 2)
+
     candidates = {
         "shipped (overlap, ln, raw)": lambda w: float(base("walk").iloc[0])
             if False else entropy_of(shipped_letters(w)[0]),
         "non-overlapping pairs": value_nonoverlap,
         "log2 instead of ln": value_log2,
         "normalized by log(#observed types)": value_normalized,
+        "divide by length (100) not length-1": value_divide_by_length,
+        "divide by length-2 (98) not length-1": value_divide_by_length_minus_2,
     }
     worst2 = {k: 0.0 for k in candidates}
     med2 = {k: [] for k in candidates}
