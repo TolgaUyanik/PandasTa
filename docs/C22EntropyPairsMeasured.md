@@ -11,15 +11,16 @@ reference)
 **Measured:** 2026-11-21, numpy 1.26.4 / pandas 2.3.3 / python 3.11.2, with
 `AVX512F AVX512_SKX AVX2 FMA3` **enabled** (the CI dispatch is §F1).
 
-**Gate E: pending, run by issue-solver after this session.** Review round 2
-(§P1) swapped the shipped quantile convention from `numpy.quantile`'s default
-("type 7") to the Hazen rule (MATLAB/hctsa's own `quantile`), which changes
-the column's values: the module's `module_sha1` moved, and the Gate E run
-already recorded for the type-7 column (`is133-c22_entropy_pairs-d0ad14ca`,
-max |ρ| 0.1371) measured a DIFFERENT column than the one now shipped, so that
-row has been removed from `docs/gate_e_ledger.csv` rather than kept under a
-stale hash. §E below records what that superseded run found, for context,
-and is not a Gate E result for this version of the module.
+**Gate E: measured 2026-11-21 on the Hazen column (this receipt session).**
+Run `is133-c22_entropy_pairs-43140f40`, 89 ALTPORT-1 frames, 398,849 pooled
+bars, 687 comparators (329 `compute_all` + 358 `ml_features` manifest),
+canary bit-equal (`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS`). `C22ENTROPYPAIRS_100`:
+max |ρ| 0.12465894564119429 vs `ROLLING_LOW_250` (n = 376,599), per-frame max
+median 0.12777015187024565 vs `ROLLING_HIGH_250` — **SHIP** (< 0.76 line).
+Recorded in `docs/gate_e_ledger.csv`. This supersedes the earlier type-7
+column's run (`is133-c22_entropy_pairs-d0ad14ca`, max |ρ| 0.1371), removed
+from the ledger when review round 2 swapped the quantile convention; §E
+below keeps that superseded number for context only.
 
 ---
 
@@ -336,15 +337,15 @@ flip one.
 
 ## E. Gate E
 
-**Pending, run by issue-solver after this session.** Review round 2's §P1
-fix swapped the shipped quantile convention from `numpy.quantile`'s default
-("type 7") to the Hazen rule — a different estimator produces a different
-column (this receipt's own §0 item 2) — so every Gate E measurement taken
-against the type-7 column no longer describes the code in this tree. Its
-`docs/gate_e_ledger.csv` row has been removed rather than kept under a stale
-`module_sha1`; `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails locally until the launcher re-runs Gate E and a receipt session
-records the new row (expected, per the issue-solver rules for this session).
+**Measured 2026-11-21 (this receipt session), on the Hazen column.** Run
+`gate_e_overlap.py run --module pandas_ta.statistics.c22_entropy_pairs`, run
+id `is133-c22_entropy_pairs-43140f40`, 89 ALTPORT-1 frames, 398,849 pooled
+bars, 687 comparators (329 `compute_all` + 358 `ml_features` manifest),
+canary bit-equal (`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS`).
+`C22ENTROPYPAIRS_100`: max |ρ| **0.12465894564119429** vs `ROLLING_LOW_250`
+(n = 376,599), per-frame max median **0.12777015187024565** vs
+`ROLLING_HIGH_250` (89 frames, 0% of frames ≥ 0.90) — **SHIP**, well under
+the `r3-perframe-0.90` line (< 0.76). Recorded in `docs/gate_e_ledger.csv`.
 
 **Superseded run, kept for context only.** The type-7 column was measured
 with `gate_e_overlap.py run --module pandas_ta.statistics.c22_entropy_pairs`,
@@ -375,11 +376,9 @@ same oracles now exercise Hazen instead of type 7.
 **Required subset (review round 3, 2026-11-21, after the §P1 quantile fix
 below):**
 `python -m pytest -q tests/test_c22_entropy_pairs.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`
-→ **1414 passed, 7 skipped, 1 failed**
-(`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-no row for `c22_entropy_pairs` — expected: §E's row was removed because the
-quantile-convention fix changed the module's `module_sha1`, and the launcher
-has not yet re-run Gate E on the Hazen column).
+→ **re-run 2026-11-21 (this receipt session), after the Gate E ledger row
+landed: 1422 passed, 7 skipped** (the prior run's one failure,
+`test_every_indicator_that_needs_a_row_has_one`, is now green).
 
 **Under the CI CPU dispatch:** `python docs/measure_c22_entropy_pairs_cpu.py`
 → see its own run below (§F1).
@@ -607,11 +606,10 @@ Two findings, not one:
 | B | 0 of 35 future-perturbation offsets leak on 6 frames + 3 non-default lengths; every look-ahead mutant that can move a clean frame is caught at ≥10 of 35, the one that cannot (`mask-back-dated`) is caught 12 of 12 on a dirty frame; two cross-row mutants dead by measured affine invariance |
 | C | Fires on every full-window bar on all 6 synthetic frames, including the tick-rounded penny frame (21.68% zero returns); blanks correctly on a flat run and an exact geometric ladder |
 | D | Bit-identical under ×8/×64/2⁻⁴⁰/2⁴⁰ price rescale (24/24 cells); 0 bars moved under ×10/×3.7/×0.1/×1.0000001 return rescale; `0 < fires < n` |
-| E | **Pending** — the type-7 column's run (max \|ρ\| 0.1371 vs `ROLLING_LOW_250`) is superseded by the quantile-convention fix and its ledger row removed; the launcher re-runs Gate E on the Hazen column and a receipt session records it |
-| F | This module's 116 tests pass, under both the local dispatch and the CI CPU-feature set; required cross-module subset passes with the one expected failure (missing Gate E row) |
+| E | **SHIP** — Hazen column, max \|ρ\| 0.12465894564119429 vs `ROLLING_LOW_250` (n = 376,599), per-frame max median 0.12777015187024565 vs `ROLLING_HIGH_250` (89 frames, 0% ≥ 0.90); well under the `r3-perframe-0.90` SHIP line (< 0.76); recorded in `docs/gate_e_ledger.csv` |
+| F | This module's 116 tests pass, under both the local dispatch and the CI CPU-feature set; required cross-module subset passes clean (1422 passed, 7 skipped) with the Gate E ledger row in place |
 
-**Decision: pending Gate E.** Nothing in Gates A–D disqualifies the column;
-the quantile convention is now the source-faithful one (Hazen) rather than
-the more convenient `numpy.quantile` default, corroborated exactly against
-the GPL-3.0 reference on designed inputs in §P3. Gate E must be re-measured
-on this column before SHIP/DISCLOSE/STRUCK is decided.
+**Decision: SHIP.** Gates A–D pass on the Hazen quantile convention (the
+source-faithful one, per §P1), corroborated exactly against the GPL-3.0
+reference on designed inputs in §P3; Gate E measures well clear of the
+SHIP line. The column ships as `C22ENTROPYPAIRS_100`.
