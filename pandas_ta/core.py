@@ -1931,6 +1931,12 @@ class AnalysisIndicators(BasePandasObject):
         result = c22_dfa(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def c22_entropy_pairs(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_entropy_pairs(close=close, length=length, offset=offset,
+                                   **kwargs)
+        return self._post_process(result, **kwargs)
+
     def c22_periodicity(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = c22_periodicity(close=close, length=length, offset=offset,
