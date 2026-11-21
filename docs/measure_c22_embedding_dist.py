@@ -21,21 +21,22 @@ this fork's `c22_ami2` and `c22_acf_first_min` make of it (never read
 as source, never imported by shipped code -- nothing under
 `pandas_ta/` imports it, and this module is not shipped either).
 
-Result, stated in the companion receipt
-(`docs/C22EmbeddingDistMeasured.md`): it does not reproduce the oracle
-under any of the 35 structural variants tried here (1 broad-sweep
-reading + 30 histogram variants + 4 alternative distance/comparison
-readings), nor under a further 21-point fine bin sweep of the closest
-of those 30 (min-to-max edges, density comparison), which plateaus at a
-max error of 0.02-0.05 rather than converging toward zero -- including
-ones where `tau` is pinned to 1 by construction (so the delay rule
-cannot be the discrepancy). Gate A is UNRESOLVED and PandasTa issue
-#132 is
-closed as a measured revert: no `pandas_ta` module, test or wiring
-entry was added for this feature in this port, because shipping a
-column whose correctness could not be checked would be exactly the
-"claim written before it was measured" this repository's CLAUDE.md
-calls its dominant defect.
+Result, stated in the companion receipt (`docs/C22EmbeddingDistMeasured.md`):
+no FIXED bin count (34 distinct readings tried: 30 in the main grid, 4 more
+in sA3, all now z-scored per step 1 above -- round 1 of review fixed a bug
+where sA2/sA3 had skipped that step) reproduces the oracle, plateauing at a
+max error of 1.0-3.9% (ddof=1) once z-scored correctly. A data-driven bin count gets much
+closer: numpy's own `bins='auto'` convention (Freedman-Diaconis vs Sturges,
+whichever is narrower -- a documented, non-GPL library default) reproduces
+the oracle to float precision on 30 of 33 frames tried (7/8 tau-pinned, 23/25
+diverse), with the 3 exceptions off by exactly one bin (max error 1.7%) --
+not a structural miss, but not a "0 of N disagree" genuine match either (the
+bar `c22_acf_first_min`'s sP sets). No variant tried clears that bar on every
+frame. Gate A is UNRESOLVED and PandasTa issue #132 is closed as a measured
+revert: no `pandas_ta` module, test or wiring entry was added for this
+feature in this port, because shipping a column whose correctness could not
+be checked on every frame tried would be exactly the "claim written before
+it was measured" this repository's CLAUDE.md calls its dominant defect.
 """
 import importlib.util
 
@@ -76,6 +77,93 @@ def embed2_dist(y, tau):
     dx = np.diff(p1)
     dy = np.diff(p2)
     return np.sqrt(dx * dx + dy * dy)
+
+
+def zscore(y, ddof=1):
+    """Step 1 of the definition. `candidate()` uses ddof=1; some sections
+    below also report ddof=0 to size how much that choice alone moves a
+    density reading."""
+    y = np.asarray(y, dtype=float)
+    return (y - y.mean()) / np.std(y, ddof=ddof)
+
+
+def scott_bins(d):
+    """Scott's normal-reference rule (bin WIDTH = 3.49*std*n^-1/3), the
+    convention MATLAB's `histcounts`/`histogram('auto')` falls back to for
+    non-integer data -- documented, public, non-GPL library behaviour."""
+    n = d.size
+    if n < 2:
+        return 1
+    std = np.std(d, ddof=1)
+    span = d.max() - d.min()
+    if std <= 0 or span <= 0:
+        return 1
+    width = 3.49 * std * n ** (-1.0 / 3.0)
+    return max(1, int(np.ceil(span / width)))
+
+
+def freedman_diaconis_bins(d):
+    """Freedman-Diaconis rule (bin WIDTH = 2*IQR*n^-1/3)."""
+    n = d.size
+    if n < 2:
+        return 1
+    q75, q25 = np.percentile(d, [75, 25])
+    iqr = q75 - q25
+    span = d.max() - d.min()
+    if iqr <= 0 or span <= 0:
+        return 1
+    width = 2.0 * iqr * n ** (-1.0 / 3.0)
+    return max(1, int(np.ceil(span / width)))
+
+
+def sqrt_bins(d):
+    """`ceil(sqrt(n))`, the other common histogram-default rule."""
+    return max(1, int(np.ceil(np.sqrt(d.size))))
+
+
+def numpy_auto_bins(d):
+    """numpy's own `bins='auto'` convention: `max(Freedman-Diaconis count,
+    Sturges count)` -- i.e. whichever of the two gives the NARROWER bin
+    width. This is numpy's documented library default (`np.histogram`
+    with no explicit `bins`), distinct from plain Freedman-Diaconis
+    alone (`freedman_diaconis_bins` above), which never falls back to
+    Sturges when the FD width degenerates on small/skewed samples."""
+    return len(np.histogram_bin_edges(d, bins="auto")) - 1
+
+
+def build_a1_frames(rng):
+    """25 mixed synthetic frames -- shared by sA1 and sA2b so both sections
+    measure the identical frame set."""
+    frames = []
+    for i in range(25):
+        n = int(rng.integers(60, 300))
+        kind = i % 5
+        if kind == 0:
+            y = rng.normal(size=n)
+        elif kind == 1:
+            y = np.cumsum(rng.normal(size=n))
+        elif kind == 2:
+            t = np.arange(n)
+            y = np.sin(2 * np.pi * t / 17.0) + 0.1 * rng.normal(size=n)
+        elif kind == 3:
+            y = np.zeros(n)
+            for j in range(1, n):
+                y[j] = 0.7 * y[j - 1] + rng.normal()
+        else:
+            y = rng.standard_t(3, size=n)
+        frames.append(y)
+    return frames
+
+
+def build_a2_frames(rng):
+    """8 strongly anti-persistent frames (tau=1 under every plausible
+    first-zero convention) -- shared by sA2, sA2b and sA3."""
+    frames = []
+    for i in range(8):
+        n = int(rng.integers(40, 90))
+        y = ((-1.0) ** np.arange(n)) * (1.0 + 0.3 * rng.normal(size=n))
+        frames.append(y)
+    return frames
 
 
 def expfit_meandiff(d, bins=5, edges="zero_to_max", metric="abs_prop"):
@@ -148,30 +236,13 @@ def section_a0_affine_invariance():
 
 def section_a1_broad_sweep():
     """25 mixed synthetic frames, the candidate's own tau rule, bins=5,
-    zero_to_max, abs_prop -- the single best-effort reading of the public
-    definition, checked against the oracle."""
+    zero_to_max, abs_prop -- the house default reading (5 bins, as
+    `c22_ami2` uses), checked against the oracle."""
     import pycatch22
 
     fn = pycatch22.CO_Embed2_Dist_tau_d_expfit_meandiff
     rng = np.random.default_rng(1)
-    frames = []
-    for i in range(25):
-        n = int(rng.integers(60, 300))
-        kind = i % 5
-        if kind == 0:
-            y = rng.normal(size=n)
-        elif kind == 1:
-            y = np.cumsum(rng.normal(size=n))
-        elif kind == 2:
-            t = np.arange(n)
-            y = np.sin(2 * np.pi * t / 17.0) + 0.1 * rng.normal(size=n)
-        elif kind == 3:
-            y = np.zeros(n)
-            for j in range(1, n):
-                y[j] = 0.7 * y[j - 1] + rng.normal()
-        else:
-            y = rng.standard_t(3, size=n)
-        frames.append(y)
+    frames = build_a1_frames(rng)
 
     errs, refs = [], []
     for y in frames:
@@ -206,11 +277,7 @@ def section_a2_tau_pinned():
 
     fn = pycatch22.CO_Embed2_Dist_tau_d_expfit_meandiff
     rng = np.random.default_rng(7)
-    frames = []
-    for i in range(8):
-        n = int(rng.integers(40, 90))
-        y = ((-1.0) ** np.arange(n)) * (1.0 + 0.3 * rng.normal(size=n))
-        frames.append(y)
+    frames = build_a2_frames(rng)
     refs = [fn(y.tolist()) for y in frames]
 
     acf1 = []
@@ -221,14 +288,19 @@ def section_a2_tau_pinned():
     print("    " + ", ".join(f"{v:.3f}" for v in acf1))
     print(f"    oracle's own range on these 8 frames: {min(refs):.6f} .. {max(refs):.6f}")
 
-    print("    bins  edges        metric       max|err|")
+    # Step 1 of the definition (z-score) applies BEFORE embed2_dist, same
+    # as candidate() -- this grid was previously computed on the raw
+    # frame, which mis-scales the density metric (CRITICAL, round 1).
+    zframes = [zscore(y, ddof=1) for y in frames]
+
+    print("    bins  edges        metric       max|err|  (z-scored, ddof=1)")
     best = None
     for bins in (3, 5, 10, 20, 40):
         for edges in ("zero_to_max", "min_to_max"):
             for metric in ("abs_prop", "abs_count", "abs_density"):
                 errs = []
-                for y, ref in zip(frames, refs):
-                    d = embed2_dist(np.asarray(y, dtype=float), 1)
+                for z, ref in zip(zframes, refs):
+                    d = embed2_dist(z, 1)
                     val = expfit_meandiff(d, bins=bins, edges=edges, metric=metric)
                     errs.append(abs(val - ref))
                 m = max(errs)
@@ -237,16 +309,54 @@ def section_a2_tau_pinned():
                     best = (m, bins, edges, metric)
     print(f"    best: bins={best[1]} edges={best[2]} metric={best[3]} max|err|={best[0]:.6f}")
 
+    # Per-frame, how much did the round-1 z-score bug actually move the
+    # winning config's error, frame by frame? The metric VALUE scales by
+    # exactly that frame's own sigma (an algebraic fact: d_z = d_raw/sigma,
+    # histogram bin membership is unchanged by a uniform rescale of both
+    # `d` and its own min/max edges, so density and its exponential fit
+    # both scale by 1/sigma -- see expfit_meandiff). But ERROR is
+    # |value - ref| against a FIXED oracle reference, so a ~sigma move in
+    # value does NOT translate into a uniform shift in error -- it can
+    # swing in either direction by any amount depending which side of
+    # `ref` the raw value already sat on. Printed, not asserted:
+    print("    per-frame value/error under the z-score fix, bins=10/min_to_max/abs_density:")
+    for i, (y, ref) in enumerate(zip(frames, refs)):
+        sigma = np.std(y, ddof=1)
+        d_raw = embed2_dist(np.asarray(y, dtype=float), 1)
+        val_raw = expfit_meandiff(d_raw, bins=10, edges="min_to_max", metric="abs_density")
+        err_raw = abs(val_raw - ref)
+        d_z = embed2_dist(zscore(y, ddof=1), 1)
+        val_z = expfit_meandiff(d_z, bins=10, edges="min_to_max", metric="abs_density")
+        err_z = abs(val_z - ref)
+        pct = "n/a" if err_raw == 0 else f"{(err_z - err_raw) / err_raw * 100:+.1f}%"
+        print(f"      frame {i}: sigma={sigma:.4f}  val_raw={val_raw:.6f}  val_z={val_z:.6f}"
+              f"  (val_z/val_raw={val_z / val_raw:.4f})  err_raw={err_raw:.6f}  err_z={err_z:.6f}"
+              f"  err_change={pct}")
+
+    # How much does ddof alone move the winning (density) reading? At
+    # n=40..90, std(ddof=0) vs std(ddof=1) differ by sqrt(n/(n-1)) ~
+    # 0.6-1.3%; that is a statement about `std`, not about the resulting
+    # error (see the per-frame table above: value changes don't translate
+    # into proportional error changes against a fixed reference).
+    zframes0 = [zscore(y, ddof=0) for y in frames]
+    errs0 = []
+    for z, ref in zip(zframes0, refs):
+        d = embed2_dist(z, 1)
+        val = expfit_meandiff(d, bins=best[1], edges=best[2], metric=best[3])
+        errs0.append(abs(val - ref))
+    print(f"    same best config, ddof=0 z-score instead: max|err|={max(errs0):.6f}"
+          f" (ddof=1 was {best[0]:.6f})")
+
     # The winner above (min_to_max / abs_density) is the closest reading
     # found. Sweep its bin count finely to check whether the gap is just
     # "wrong bin count" (would converge to ~0 somewhere in this range) or
     # a genuine residual (stays bounded away from 0 everywhere).
-    print("    fine bin sweep of the winner (min_to_max, abs_density), bins 4..24:")
+    print("    fine bin sweep of the winner (min_to_max, abs_density), bins 4..24, ddof=1:")
     fine_max, fine_mean = [], []
     for bins in range(4, 25):
         errs = []
-        for y, ref in zip(frames, refs):
-            d = embed2_dist(np.asarray(y, dtype=float), 1)
+        for z, ref in zip(zframes, refs):
+            d = embed2_dist(z, 1)
             val = expfit_meandiff(d, bins=bins, edges="min_to_max", metric="abs_density")
             errs.append(abs(val - ref))
         fine_max.append(max(errs))
@@ -254,6 +364,123 @@ def section_a2_tau_pinned():
     print(f"    bins 4..24: max|err| ranges {min(fine_max):.6f} .. {max(fine_max):.6f}"
           f" (best at bins={4 + int(np.argmin(fine_max))})")
     print(f"    bins 4..24: mean|err| ranges {min(fine_mean):.6f} .. {max(fine_mean):.6f}")
+
+    print("    same fine sweep, ddof=0 z-score instead:")
+    fine_max0, fine_mean0 = [], []
+    for bins in range(4, 25):
+        errs = []
+        for z, ref in zip(zframes0, refs):
+            d = embed2_dist(z, 1)
+            val = expfit_meandiff(d, bins=bins, edges="min_to_max", metric="abs_density")
+            errs.append(abs(val - ref))
+        fine_max0.append(max(errs))
+        fine_mean0.append(float(np.mean(errs)))
+    print(f"    bins 4..24: max|err| ranges {min(fine_max0):.6f} .. {max(fine_max0):.6f}"
+          f" (best at bins={4 + int(np.argmin(fine_max0))})")
+    print(f"    bins 4..24: mean|err| ranges {min(fine_mean0):.6f} .. {max(fine_mean0):.6f}")
+
+
+def section_a2b_auto_bin_rules():
+    """The data-driven bin-count family the fixed grid above never tried
+    (MAJOR, round 1): Scott's normal-reference rule, Freedman-Diaconis,
+    and ceil(sqrt(n)) -- the convention a histogram call inherits as its
+    library default, documented and non-GPL. Crossed with both edge
+    conventions and all three metrics, on z-scored (ddof=1) `d`, on both
+    the 8 tau-pinned frames (sA2) and sA1's 25 diverse frames (candidate's
+    own tau there, since nothing pins it on that set)."""
+    import pycatch22
+
+    fn = pycatch22.CO_Embed2_Dist_tau_d_expfit_meandiff
+    rules = (("scott", scott_bins), ("freedman_diaconis", freedman_diaconis_bins),
+              ("sqrt", sqrt_bins))
+
+    def run(frames, tau_fixed, label):
+        refs = [fn(y.tolist()) for y in frames]
+        zframes = [zscore(y, ddof=1) for y in frames]
+        print(f"    {label}:")
+        best = None
+        for rule_name, rule_fn in rules:
+            for edges in ("zero_to_max", "min_to_max"):
+                for metric in ("abs_prop", "abs_count", "abs_density"):
+                    errs = []
+                    bins_used = []
+                    for z, ref in zip(zframes, refs):
+                        tau = tau_fixed if tau_fixed is not None else acf_first_zero(z)
+                        d = embed2_dist(z, tau)
+                        nb = rule_fn(d)
+                        bins_used.append(nb)
+                        val = expfit_meandiff(d, bins=nb, edges=edges, metric=metric)
+                        errs.append(abs(val - ref))
+                    m = max(errs)
+                    print(f"      {rule_name:18s} {edges:11s} {metric:11s} max|err|={m:.6f}"
+                          f" bins={bins_used}")
+                    if best is None or m < best[0]:
+                        best = (m, rule_name, edges, metric)
+        print(f"      best auto-bin config on {label}: {best[1]}/{best[2]}/{best[3]}"
+              f" max|err|={best[0]:.6f}")
+
+    rng7 = np.random.default_rng(7)
+    run(build_a2_frames(rng7), tau_fixed=1, label="8 tau-pinned frames (sA2)")
+    rng1 = np.random.default_rng(1)
+    run(build_a1_frames(rng1), tau_fixed=None, label="25 diverse frames (sA1)")
+
+    # Per-frame optimal bin count for the density metric (min_to_max
+    # edges, tau=1): does it track n, or either auto-bin rule's count?
+    print("    per-frame optimal bin count for abs_density (min_to_max, tau=1), sA2 frames:")
+    rng7b = np.random.default_rng(7)
+    frames = build_a2_frames(rng7b)
+    refs = [fn(y.tolist()) for y in frames]
+    zframes = [zscore(y, ddof=1) for y in frames]
+    for i, (z, ref) in enumerate(zip(zframes, refs)):
+        d = embed2_dist(z, 1)
+        best_bins, best_err = None, None
+        for b in range(2, 41):
+            val = expfit_meandiff(d, bins=b, edges="min_to_max", metric="abs_density")
+            err = abs(val - ref)
+            if best_err is None or err < best_err:
+                best_err, best_bins = err, b
+        print(f"      frame {i}: n(d)={d.size:3d}  optimal_bins={best_bins:2d}  err={best_err:.6f}"
+              f"  scott={scott_bins(d)}  fd={freedman_diaconis_bins(d)}  sqrt={sqrt_bins(d)}")
+
+    # The per-frame optimal bin counts above don't track any of the three
+    # single-rule families cleanly. numpy's actual `bins='auto'` tie-break
+    # (max of FD and Sturges counts, not FD alone) was not in that family
+    # and is tried here as a fourth, equally public, equally non-GPL
+    # reading -- min_to_max edges, abs_density, z-scored (ddof=1) `d`.
+    print("    numpy bins='auto' (max(FD, Sturges) by width), min_to_max, abs_density, ddof=1:")
+
+    def run_numpy_auto(frames, tau_fixed, label):
+        refs = [fn(y.tolist()) for y in frames]
+        zframes = [zscore(y, ddof=1) for y in frames]
+        errs, exact_errs = [], []
+        for i, (z, ref) in enumerate(zip(zframes, refs)):
+            tau = tau_fixed if tau_fixed is not None else acf_first_zero(z)
+            d = embed2_dist(z, tau)
+            nb = numpy_auto_bins(d)
+            val = expfit_meandiff(d, bins=nb, edges="min_to_max", metric="abs_density")
+            err = abs(val - ref)
+            errs.append(err)
+            if err < 1e-4:
+                exact_errs.append(err)
+            else:
+                # What bin count WOULD have been needed here? (brute force,
+                # same range as the sA2 per-frame optimal-bin search above.)
+                best_bins, best_err = None, None
+                for b in range(2, 80):
+                    v = expfit_meandiff(d, bins=b, edges="min_to_max", metric="abs_density")
+                    e = abs(v - ref)
+                    if best_err is None or e < best_err:
+                        best_err, best_bins = e, b
+                print(f"      {label} frame {i}: n(d)={d.size:3d} bins={nb:2d} err={err:.6f}"
+                      f" (not float-precision; needed bins={best_bins}, err there={best_err:.6f})")
+        print(f"      {label}: {len(exact_errs)}/{len(frames)} frames match to float precision (<1e-4);"
+              f" of those, err ranges {min(exact_errs):.2e} .. {max(exact_errs):.2e};"
+              f" overall max|err|={max(errs):.6f} mean|err|={np.mean(errs):.6f}")
+
+    rng7c = np.random.default_rng(7)
+    run_numpy_auto(build_a2_frames(rng7c), tau_fixed=1, label="8 tau-pinned (sA2)")
+    rng1b = np.random.default_rng(1)
+    run_numpy_auto(build_a1_frames(rng1b), tau_fixed=None, label="25 diverse (sA1)")
 
 
 def section_a3_alt_structures():
@@ -266,12 +493,9 @@ def section_a3_alt_structures():
 
     fn = pycatch22.CO_Embed2_Dist_tau_d_expfit_meandiff
     rng = np.random.default_rng(7)
-    frames = []
-    for i in range(8):
-        n = int(rng.integers(40, 90))
-        y = ((-1.0) ** np.arange(n)) * (1.0 + 0.3 * rng.normal(size=n))
-        frames.append(y)
+    frames = build_a2_frames(rng)
     refs = [fn(y.tolist()) for y in frames]
+    zframes = [zscore(y, ddof=1) for y in frames]
 
     def radius_dist(y, tau):
         y = np.asarray(y, dtype=float)
@@ -305,13 +529,13 @@ def section_a3_alt_structures():
         fit = 1.0 - np.exp(-lam * d)
         return float(np.mean(np.abs(emp - fit)))
 
-    print("A3. Alternative structures, tau=1, bins=5 / zero_to_max / abs_prop where applicable:")
+    print("A3. Alternative structures, z-scored, tau=1, bins=5 / zero_to_max / abs_prop where applicable:")
     for label, dist_fn in (("radius-from-origin", radius_dist), ("L1 step", l1_dist),
                             ("all-pairs Euclidean", all_pairs_dist)):
-        errs = [abs(expfit_meandiff(dist_fn(y, 1)) - ref) for y, ref in zip(frames, refs)]
+        errs = [abs(expfit_meandiff(dist_fn(z, 1)) - ref) for z, ref in zip(zframes, refs)]
         print(f"    {label:20s} max|err|={max(errs):.6f}")
-    errs = [abs(cdf_meandiff(embed2_dist(np.asarray(y, dtype=float), 1)) - ref)
-            for y, ref in zip(frames, refs)]
+    errs = [abs(cdf_meandiff(embed2_dist(z, 1)) - ref)
+            for z, ref in zip(zframes, refs)]
     print(f"    {'CDF meandiff':20s} max|err|={max(errs):.6f}")
 
 
@@ -325,6 +549,8 @@ def main():
     section_a1_broad_sweep()
     print()
     section_a2_tau_pinned()
+    print()
+    section_a2b_auto_bin_rules()
     print()
     section_a3_alt_structures()
 
