@@ -11,11 +11,12 @@ reference)
 **Measured:** 2026-11-21, numpy 1.26.4 / pandas 2.3.3 / python 3.11, with
 `AVX512F AVX512_SKX AVX2 FMA3` **enabled** (the CI dispatch is §F1).
 
-**Gate E: pending, run by issue-solver after this session.** The 2026-10-24
-screen's prototype figure (the GPL-3.0 reference's own column, not this port)
-was max |ρ| 0.1247 vs `ROLLING_LOW_250` → SHIP; §P below is this port's own
-black-box comparison to that reference, which is a correctness check, not
-Gate E.
+**Gate E: measured 2026-11-21, SHIP.** `C22ENTROPYPAIRS_100` max |ρ|
+**0.1371** vs `ROLLING_LOW_250` (`compute_all`, n = 376,599); per-frame max
+median 0.1290 vs `ROLLING_HIGH_250` (89 frames, 0.0% of frames ≥ 0.90) → well
+under the `r3-perframe-0.90` SHIP line (< 0.76). Full run in §E below. §P
+below is this port's own black-box comparison to the GPL-3.0 reference, which
+is a correctness check, not Gate E.
 
 ---
 
@@ -295,15 +296,24 @@ flip one.
 
 ## E. Gate E
 
-**Pending, run by issue-solver after this session.**
+Run by the issue-solver launcher, `gate_e_overlap.py run --module
+pandas_ta.statistics.c22_entropy_pairs`, 89 ALTPORT-1 frames, 398,849 pooled
+bars, 687 comparators (329 `compute_all` + 358 `ml_features` manifest),
+canary bit-equal (`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS`). Outputs:
+`is133-c22_entropy_pairs-1d07d116`, recorded in `docs/gate_e_ledger.csv`.
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | per-frame against | verdict |
+|---|---|---|---|---|---|---|
+| `C22ENTROPYPAIRS_100` | **0.1371** | `ROLLING_LOW_250` | 376,599 | 0.1290 | `ROLLING_HIGH_250` | **SHIP** |
+
+Both the pooled figure and the per-frame max median sit well under the
+`r3-perframe-0.90` ship line (< 0.76), close to the 2026-10-24 screen's
+prototype figure for the reference's own column (max |ρ| 0.1247 vs
+`ROLLING_LOW_250`) — the port reads the same as the prototype on this
+measure.
 
 §P below is this port's own black-box correctness check against the GPL-3.0
-reference (pycatch22 1.0.2) — a Gate A corroboration, not Gate E. The
-2026-10-24 screen's figure for the *prototype* (the reference's own column,
-read through `ind_screen_r3.py`) was max |ρ| 0.1247 vs `ROLLING_LOW_250` →
-SHIP, next comparators `mcgd` 0.1201, `SMA_200` 0.1192, well under the
-`r3-perframe-0.90` ship line. Whether this PORT's column reads the same is
-Gate E's question and is owed.
+reference (pycatch22 1.0.2) — a Gate A corroboration, not Gate E.
 
 ---
 
@@ -314,14 +324,13 @@ Gate E's question and is owed.
 naming, a short-input probe, wiring/accessor checks, offset/fillna, the
 chunk budget, and a stricter dictionary-row check).
 
-**Required subset (this session):**
+**Required subset (receipt session, 2026-11-21, after the ledger row was
+recorded):**
 `python -m pytest -q tests/test_c22_entropy_pairs.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`
-→ **1 failed** (`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-*"no Gate E ledger row for ['c22_entropy_pairs']"*) **, 1408 passed, 7
-skipped.** The one failure is expected and documented by the issue-solver
-rules: `GATE_E_PENDING_OK` is not set in this session, so the missing ledger
-row fails rather than skips; the receipt session records the row once the
-launcher's Gate E run lands.
+→ **1416 passed, 7 skipped.** The prior session's one expected failure
+(`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
+missing ledger row) is gone now that `docs/gate_e_ledger.csv` carries the
+Gate E run's row.
 
 **Under the CI CPU dispatch:** `python docs/measure_c22_entropy_pairs_cpu.py`
 → see its own run below (§F1).
@@ -462,12 +471,10 @@ and the sub-1.0 Spearman on two of six frames are stated, not hidden.
 | B | 0 of 35 future-perturbation offsets leak on 6 frames + 3 non-default lengths; all look-ahead mutants caught at ≥10 of 35; two cross-row mutants dead by measured affine invariance |
 | C | Fires on every full-window bar on all 6 synthetic frames, including the tick-rounded penny frame (21.68% zero returns); blanks correctly on a flat run and an exact geometric ladder |
 | D | Bit-identical under ×8/×64/2⁻⁴⁰/2⁴⁰ price rescale (24/24 cells); 0 bars moved under ×10/×3.7/×0.1/×1.0000001 return rescale; `0 < fires < n` |
-| E | **Pending** — run by issue-solver after this session |
-| F | This module's 110 tests pass, under both the local dispatch and the CI CPU-feature set; required cross-module subset passes except the expected Gate-E-ledger failure |
+| E | **SHIP** — max \|ρ\| 0.1371 vs `ROLLING_LOW_250` (n = 376,599); per-frame max median 0.1290, well under the `r3-perframe-0.90` line |
+| F | This module's 110 tests pass, under both the local dispatch and the CI CPU-feature set; required cross-module subset passes, ledger row now recorded |
 
-**Decision: SHIP, pending Gate E.** Nothing in Gates A–D disqualifies the
-column; the one open reading (the quantile interpolation convention) is
-disclosed in the module's docstring and corroborated as the best structural
-fit against the GPL-3.0 reference in §P. If the launcher's Gate E run STRIKES
-this column, the receipt session reverts it and this file stays as the
-record either way.
+**Decision: SHIP.** Nothing in Gates A–E disqualifies the column; the one
+open reading (the quantile interpolation convention) is disclosed in the
+module's docstring and corroborated as the best structural fit against the
+GPL-3.0 reference in §P.
