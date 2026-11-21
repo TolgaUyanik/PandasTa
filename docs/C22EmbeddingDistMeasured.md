@@ -8,10 +8,11 @@ file is the receipt.
 | | |
 |---|---|
 | candidate | catch22 (Lubba et al. 2019, *Data Min. Knowl. Disc.* 33:1821), feature `CO_Embed2_Dist_tau_d_expfit_meandiff` — the hctsa operation `CO_Embed2_Dist(y,'tau')`, exponential-fit misfit of consecutive distances in a 2-D delay embedding — proposed on the last 100 daily simple returns |
-| harness | `docs/measure_c22_embedding_dist.py` (sections A0-A3; opt-in use of `pycatch22` 1.0.2 as a BLACK-BOX ORACLE ONLY, never read as source, never imported outside this one `docs/` script) |
+| harness | `docs/measure_c22_embedding_dist.py` (sections A0-A3; a bare run imports `pycatch22` 1.0.2 when present in the environment, used strictly as a BLACK-BOX ORACLE, never read as source, never imported outside this one `docs/` script) |
 | Gate A | **UNRESOLVED.** 25-frame broad sweep: max \|err\| 1.245120 against the best-effort candidate (§A1). Isolating the delay parameter (8 frames built so `tau = 1` under every plausible convention, §A2), z-scored correctly: best FIXED bin count of 30 variants max \|err\| 0.023518 (bins=10, min-to-max edges, density); fine sweep of that reading plateaus at 0.010-0.039. A data-driven bin count gets far closer — numpy's `bins='auto'` convention reproduces the oracle to float precision on 30 of 33 frames (7/8 + 23/25), but 3 frames stay off by exactly one bin, max \|err\| 0.017442 (§A2b). Four alternative structural readings (§A3) all stayed at max \|err\| > 0.19 (range 0.1995-0.3236). No reading tried reproduces the oracle on every frame. |
 | Gate B/C/D | not attempted — no module exists to test |
-| Gate E/F | not applicable — nothing shipped |
+| Gate E | not applicable — nothing shipped |
+| Gate F | whole suites, launcher's clean worktrees — see §6 |
 | outcome | **measured revert** per issue #132: "a measured revert closes this exactly as well as a ship" |
 
 Every number below is `python docs/measure_c22_embedding_dist.py`'s own output
@@ -272,9 +273,10 @@ three metrics, z-scored (ddof=1), on both the 8 tau-pinned frames and §A1's
       sqrt               min_to_max  abs_prop    max|err|=0.328237 bins=[10, 9, 8, 10, 9, 9, 8, 9]
       sqrt               min_to_max  abs_count   max|err|=6.553204 bins=[10, 9, 8, 10, 9, 9, 8, 9]
       sqrt               min_to_max  abs_density max|err|=0.017699 bins=[10, 9, 8, 10, 9, 9, 8, 9]
-      best: sqrt/min_to_max/abs_density max|err|=0.017699
+      best auto-bin config on 8 tau-pinned frames (sA2): sqrt/min_to_max/abs_density max|err|=0.017699
     25 diverse frames (sA1):
-      best: freedman_diaconis/min_to_max/abs_density max|err|=0.061574
+      ... (18 rows of the same scott/freedman_diaconis/sqrt x edges x metric grid, elided here -- same structure as above, run on sA1's 25 frames)
+      best auto-bin config on 25 diverse frames (sA1): freedman_diaconis/min_to_max/abs_density max|err|=0.061574
 ```
 
 None of these three single rules alone reproduces the oracle to float
@@ -325,7 +327,7 @@ the frames that match, the same order as §A0's own rounding noise) under
 Euclidean distance → min-to-max edges → bins=max(FD,Sturges) → density →
 mean|actual−fit|`. The 3 exceptions are each off by EXACTLY one bin (frame
 3: 11 vs the needed 10; sA1 frame 4: 36 vs 35; sA1 frame 18: 10 vs the
-needed 9 — all four "needed" counts above are the harness's own brute-force
+needed 9 — all three "needed" counts above are the harness's own brute-force
 search over bins 2-79 at each mismatched frame, printed above, not
 asserted), not by a wrong structure — the kind of discrepancy a slightly
 different percentile-interpolation or tie-break convention in the
@@ -363,7 +365,15 @@ z-score fix to float precision (translation-invariant structurally, so the
 mean-centering step of z-scoring cannot move them; only `radius-from-origin`
 moved, from 0.200161 to 0.199525, because a distance "from the origin" is
 NOT translation-invariant and the origin shifts when the series is
-centered). `radius-from-origin` reads each embedded point's own distance
+centered). Translation invariance is only half the argument — it does not
+cover the σ-division half of z-scoring. `L1 step` and `all-pairs Euclidean`
+survive that half because §A3 evaluates them through `expfit_meandiff`'s
+default `abs_prop` metric, which §3's per-bin derivation already proves
+scale-invariant (histogram bin membership is unchanged when `d` and the
+edges are rescaled by the same constant); `CDF meandiff` survives it
+because it compares `lambda*d`, and `lambda = 1/mean(d)` scales by the
+inverse of whatever `d` scales by, so the product is scale-free on its own
+terms. `radius-from-origin` reads each embedded point's own distance
 from the origin instead of the distance between consecutive points. `L1
 step` swaps the Euclidean distance for a taxicab one. `all-pairs Euclidean`
 reads the distance between every pair of embedded points, not only

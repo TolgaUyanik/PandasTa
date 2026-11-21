@@ -27,10 +27,15 @@ ASSUMPTIONS: none beyond what the system prompt already states.
 
 ## Outcome
 
-Gate A (correctness) could not be established: black-box calibration
-against `pycatch22` 1.0.2 (oracle only, never read as source, never
-shipped) across 35 structural variants of the public definition, plus a
-26-point generalisation/fine-sweep check, never converged on the
-reference's output. **Measured revert**: no `pandas_ta` module, test or
-wiring was added. Receipt: `docs/C22EmbeddingDistMeasured.md` and
-`docs/measure_c22_embedding_dist.py`, both committed.
+Gate A (correctness) could not be established on every frame: black-box
+calibration against `pycatch22` 1.0.2 (oracle only, never read as source,
+never shipped) across 34 structural variants of the public definition (30
+histogram-parameter readings + 4 alternative structures), plus a 21-point
+fine bin sweep, a 25-frame generalisation cross-check, and a data-driven
+bin-count family (round 4, below): the closest reading, numpy's own
+`bins='auto'` convention, reproduces the oracle to float precision on 30
+of 33 frames, but 3 stay off by exactly one bin — short of this fork's own
+Gate A bar (`c22_acf_first_min`'s "0 of N disagree"). **Measured revert**:
+no `pandas_ta` module, test or wiring was added. Receipt:
+`docs/C22EmbeddingDistMeasured.md` and `docs/measure_c22_embedding_dist.py`,
+both committed.
