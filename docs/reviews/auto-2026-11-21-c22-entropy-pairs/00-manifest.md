@@ -28,7 +28,9 @@ reading, logged as ASSUMPTIONS rather than asked:
   Disclosed in the module docstring and tested against six candidate
   conventions in `docs/measure_c22_entropy_pairs.py` §P1; none reproduces
   the GPL-3.0 reference bit-for-bit, and the shipped convention ties for
-  the best median fit.
+  the best median fit. (Counts as of `b985c6c`; a later review round found
+  `linear` was not the source's convention and switched the shipped reading
+  to Hazen — the final state is in `docs/C22EntropyPairsMeasured.md` §P1.)
 - **ASSUMPTION (word definition: overlapping vs non-overlapping pairs).**
   Chose OVERLAPPING consecutive-letter pairs (`length - 1` words), the
   conventional reading of a "motif" statistic and the one catch22's own
@@ -57,7 +59,9 @@ without duplicating context).
 ## Phase 4 — Execute + gate
 
 Implementation: `pandas_ta/statistics/c22_entropy_pairs.py`,
-`tests/test_c22_entropy_pairs.py` (92 tests), `docs/measure_c22_entropy_pairs.py`,
+`tests/test_c22_entropy_pairs.py` (92 tests; counts as of `b985c6c`; the
+final state is 116 tests, in `docs/C22EntropyPairsMeasured.md` §F),
+`docs/measure_c22_entropy_pairs.py`,
 `docs/measure_c22_entropy_pairs_cpu.py`, `docs/C22EntropyPairsMeasured.md`,
 wiring in `pandas_ta/__init__.py` / `pandas_ta/core.py` /
 `pandas_ta/statistics/__init__.py`, count updates in `README.md` /

@@ -9,12 +9,13 @@ Every number here was measured by running this module and
 would hurt to lose:
 
 1. **The reading the definition leaves open.** "Quantile" names the BINNING
-   rule but not the quantile ESTIMATOR at a finite sample. This port uses
-   linear interpolation between bracketing order statistics (`numpy.
-   quantile`'s default). It is disclosed rather than picked silently because
-   a different interpolation convention is a different column at the
-   margin -- see the receipt.
-2. **The exact rational oracle agrees.** Linear-interpolated quantiles of a
+   rule but not the quantile ESTIMATOR at a finite sample. hctsa is MATLAB,
+   and MATLAB's own `quantile` is the Hazen rule (`p_k = (k - 0.5) / n`,
+   `numpy.quantile(method="hazen")`), so this port uses Hazen rather than
+   `numpy.quantile`'s own default ("type 7"). It is disclosed rather than
+   picked silently because a different interpolation convention is a
+   different column at the margin -- see the receipt.
+2. **The exact rational oracle agrees.** Hazen-interpolated quantiles of a
    finite sample are a RATIONAL function of the order statistics -- no
    irrational operation is involved -- so the two cut points and every
    letter assignment can be recomputed with zero rounding and compared to
@@ -154,7 +155,7 @@ def shipped_letters(window, ddof=ZSCORE_DDOF):
     w = np.asarray(window, float)
     sd = float(w.std(ddof=ddof))
     z = (w - w.mean()) / sd
-    q1, q2 = np.quantile(z, [1.0 / 3.0, 2.0 / 3.0])
+    q1, q2 = np.quantile(z, [1.0 / 3.0, 2.0 / 3.0], method="hazen")
     letter = (z > q1).astype(np.int64) + (z > q2).astype(np.int64)
     return letter, (q1, q2)
 
@@ -182,12 +183,17 @@ def value_def(window, ddof=ZSCORE_DDOF, zscore=True, reverse=False):
     z = [(v - mean) / sd for v in w] if zscore else list(w)
 
     def quantile(p):
+        """Hazen plotting position: sorted values sit at (k - 0.5) / n for
+        1-indexed k, i.e. 0-indexed virtual index p * n - 0.5 -- MATLAB's own
+        `quantile` convention, since hctsa is MATLAB."""
         s = sorted(z)
-        pos = p * (n - 1)
+        pos = p * n - 0.5
+        if pos <= 0.0:
+            return s[0]
+        if pos >= n - 1:
+            return s[-1]
         k = int(math.floor(pos))
         frac = pos - k
-        if k + 1 >= n:
-            return s[-1]
         return s[k] + frac * (s[k + 1] - s[k])
 
     q1, q2 = quantile(1.0 / 3.0), quantile(2.0 / 3.0)
@@ -206,7 +212,7 @@ def value_def(window, ddof=ZSCORE_DDOF, zscore=True, reverse=False):
 
 
 def exact_letters(window, ddof=ZSCORE_DDOF):
-    """Letters recomputed with ZERO rounding: linear-interpolated quantiles
+    """Letters recomputed with ZERO rounding: Hazen-interpolated quantiles
     are a RATIONAL function of the order statistics, and z-scoring is
     provably inert, so the raw returns can be used directly."""
     y = [Fraction(float(v)) for v in window]
@@ -217,12 +223,15 @@ def exact_letters(window, ddof=ZSCORE_DDOF):
         return None
 
     def quantile(p):
+        """Hazen: 0-indexed virtual index p * n - 1/2."""
         s = sorted(u)
-        pos = Fraction(p) * (n - 1)
+        pos = Fraction(p) * n - Fraction(1, 2)
+        if pos <= 0:
+            return s[0]
+        if pos >= n - 1:
+            return s[-1]
         k = int(pos)
         frac = pos - k
-        if k + 1 >= n:
-            return s[-1]
         return s[k] + frac * (s[k + 1] - s[k])
 
     q1, q2 = quantile(Fraction(1, 3)), quantile(Fraction(2, 3))
@@ -240,7 +249,7 @@ def value_exact(window):
 @pytest.mark.parametrize("frame", list(FRAMES))
 def test_bit_equal_to_the_exact_rational_oracle(frame):
     """Gate A's strongest limb: the letter sequence with ZERO roundings
-    (linear-interpolated quantiles are rational in the order statistics, and
+    (Hazen-interpolated quantiles are rational in the order statistics, and
     z-scoring is provably inert here, so the raw returns settle them)."""
     win, bars = windows(FRAMES[frame])
     ran = 0
@@ -256,13 +265,18 @@ def test_bit_equal_to_the_exact_rational_oracle(frame):
 
 @pytest.mark.parametrize("frame", list(FRAMES))
 def test_bit_equal_to_the_exact_rational_oracle_non_integral_index(frame):
-    """A1 at a length whose virtual index is NOT an integer: at the default
-    `length` = 100, `(length - 1) / 3` = 33 exactly, so `numpy.quantile`'s
-    `linear` interpolation never actually interpolates (`frac` = 0 on both
-    cuts) and the oracle above never exercises it. `length` = 120 makes
-    `(length - 1) / 3` = 39.667 and `(length - 1) * 2 / 3` = 79.333, so both
-    cut points fall strictly between two order statistics and the oracle
-    recomputes the real interpolation with zero rounding (`Fraction`)."""
+    """A1 at a SECOND length, to exercise interpolation at a different
+    fractional offset than the default. Under Hazen's virtual index
+    `p * n - 1/2`, the default `length` = 100 is already non-integral at both
+    cuts (32.8333, 66.1667 of 99 returns), so the oracle above already
+    interpolates for real -- unlike the rejected type-7 reading, where
+    `(length - 1) / 3` lands exactly on 33 and 66 at `length` = 100 and the
+    cut points are plain order statistics with no interpolation at all.
+    `length` = 120 lands on a different fraction (39.5, 79.5 of 119 returns,
+    an exact half rather than a repeating third) and the oracle recomputes
+    that interpolation with zero rounding (`Fraction`), so this test is a
+    second, independently-fractioned data point rather than the only one
+    that exercises interpolation."""
     length = 120
     win, bars = windows(FRAMES[frame], length=length)
     mine_series = c22_entropy_pairs(FRAMES[frame], length=length)
@@ -378,8 +392,10 @@ MUTANTS = {
         "sd = block.std(axis=1, ddof=ZSCORE_DDOF)",
         "sd = np.full(block.shape[0], block.std(ddof=ZSCORE_DDOF))"),
     "chunk-wide-quantile": (
-        "        q = np.quantile(z, [1.0 / 3.0, 2.0 / 3.0], axis=1)",
-        "        qc = np.quantile(z.ravel(), [1.0 / 3.0, 2.0 / 3.0])\n"
+        "        q = np.quantile(z, [1.0 / 3.0, 2.0 / 3.0], axis=1, "
+        "method=\"hazen\")",
+        "        qc = np.quantile(z.ravel(), [1.0 / 3.0, 2.0 / 3.0], "
+        "method=\"hazen\")\n"
         "        q = np.broadcast_to(qc[:, None], (2, rows))"),
     "word-order-swapped": (
         "    code = letter[:, :-1] * NUM_LETTERS + letter[:, 1:]",

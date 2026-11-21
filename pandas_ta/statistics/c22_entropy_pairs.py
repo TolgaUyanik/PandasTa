@@ -79,8 +79,9 @@ def _entropy_pairs_rows(block):
         bad |= ~(sd > NOISE_FLOOR) | ~np.isfinite(sd)
 
         # The two INTERIOR quantile cut points of the alphabet, one row at a
-        # time: linear-interpolated empirical quantiles at 1/3 and 2/3.
-        q = np.quantile(z, [1.0 / 3.0, 2.0 / 3.0], axis=1)
+        # time: Hazen-interpolated empirical quantiles at 1/3 and 2/3 --
+        # MATLAB's own `quantile` convention, since hctsa is MATLAB.
+        q = np.quantile(z, [1.0 / 3.0, 2.0 / 3.0], axis=1, method="hazen")
         # Letter k is "how many of the two cut points z stands strictly
         # above": z <= q1 -> 0, q1 < z <= q2 -> 1, z > q2 -> 2.
         letter = (z > q[0][:, None]).astype(np.int64) \
@@ -186,18 +187,21 @@ makes of it.
 **ONE READING THE DEFINITION LEAVES OPEN, AND HOW IT WAS SETTLED.** "Quantile"
 names the BINNING rule (cut points at the window's own empirical quantiles)
 but not which quantile ESTIMATOR to use at a finite sample -- there is more
-than one convention for interpolating between order statistics. This port
-uses linear interpolation between the two bracketing order statistics
-(`numpy.quantile`'s default, plotting position `p_k = (k - 1) / (n - 1)`,
-the "type 7" estimator), the most common convention and the one a reader
-reproducing "the 1/3 and 2/3 empirical quantiles" from the paper's own words
-would reach for first. It is NOT the same convention as MATLAB/hctsa's own
-`quantile`, which is the Hazen rule (`p_k = (k - 0.5) / n`, "type 5",
-`numpy.quantile(method="hazen")`) -- a different estimator, not an adjacent
-one. It is disclosed here rather than picked silently because a different
-interpolation convention is a different column at the margin: see the
-`docs/C22EntropyPairsMeasured.md` receipt (§P1) for the measured effect of
-the candidate conventions tried, Hazen included.
+than one convention for interpolating between order statistics. The cited
+source, hctsa's `SB_MotifThree(y, 'quantile', 3)`, is MATLAB, and MATLAB's own
+`quantile` is the Hazen rule (`p_k = (k - 0.5) / n`, "type 5",
+`numpy.quantile(method="hazen")`, public from MathWorks' own documentation,
+no GPL-3.0 source needed), so this port USES Hazen. The rejected alternative
+is `numpy.quantile`'s own default (plotting position `p_k = (k - 1) / (n - 1)`,
+"type 7") -- the more common convention, and the one a reader reproducing
+"the 1/3 and 2/3 empirical quantiles" from the paper's own words alone would
+reach for first, but not the source's: the reference-fit measurement
+(`docs/C22EntropyPairsMeasured.md` §P1) found no reason to prefer it over
+Hazen either -- its median gap to the GPL-3.0 reference TIES Hazen's and its
+max gap is worse (0.0437 vs 0.0202). It is disclosed here rather than picked
+silently because a different interpolation convention is a different column
+at the margin: see the receipt (§P1) for the measured effect of every
+candidate convention tried.
 
 **What is INERT here, measured rather than assumed.** The empirical quantile
 of an increasing affine map of a sample is the same affine map of the
@@ -213,7 +217,7 @@ Calculation:
     r[t]    = close[t] / close[t-1] - 1
     X       = r[T-length+1 .. T]                      (the window)
     Z       = (X - mean(X)) / sd(X, ddof=1)            (inert, see above)
-    q1, q2  = the 1/3 and 2/3 empirical quantiles of Z, linear interpolation
+    q1, q2  = the 1/3 and 2/3 empirical quantiles of Z, Hazen interpolation
     k[t]    = how many of {q1, q2} that Z[t] stands strictly above
     W       = {(k[t], k[t+1]) : t = 1 .. length - 1}   (length - 1 words)
     p       = word-type frequencies of W over the 9 possible types
@@ -229,7 +233,7 @@ sweep (0 of 35 offsets leak on six frames with eight splices apiece, and 0
 of 35 at `length` 10, 120 and 250) and by eleven mutants read off this file,
 edited and exec'd in memory; every look-ahead mutant that can move a CLEAN
 frame is caught at 10 or more of the 35 offsets, which the sweep can see
-despite this column's higher tie rate (9.4% to 62.7% of neighbouring bars
+despite this column's higher tie rate (8.8% to 62.7% of neighbouring bars
 tied across the six synthetic frames, against `c22_ami2`'s 7% to 22%,
 because this column is an integer bincount rather than a continuous mutual
 information); the one exception, a bad-data-mask mutant that back-dates

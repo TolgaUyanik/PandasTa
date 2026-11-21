@@ -139,7 +139,7 @@ def shipped_letters(window, ddof=ZSCORE_DDOF):
     w = np.asarray(window, float)
     sd = float(w.std(ddof=ddof))
     z = (w - w.mean()) / sd
-    q1, q2 = np.quantile(z, [1.0 / 3.0, 2.0 / 3.0])
+    q1, q2 = np.quantile(z, [1.0 / 3.0, 2.0 / 3.0], method="hazen")
     letter = (z > q1).astype(np.int64) + (z > q2).astype(np.int64)
     return letter, (q1, q2)
 
@@ -153,6 +153,8 @@ def entropy_of(letter):
 
 
 def exact_letters(window, ddof=ZSCORE_DDOF):
+    """Zero-rounding Hazen quantiles: 0-indexed virtual index `p * n - 1/2`,
+    MATLAB's own `quantile` convention (hctsa is MATLAB)."""
     y = [Fraction(float(v)) for v in window]
     n = len(y)
     mean = sum(y) / n
@@ -162,11 +164,13 @@ def exact_letters(window, ddof=ZSCORE_DDOF):
 
     def quantile(p):
         s = sorted(u)
-        pos = Fraction(p) * (n - 1)
+        pos = Fraction(p) * n - Fraction(1, 2)
+        if pos <= 0:
+            return s[0]
+        if pos >= n - 1:
+            return s[-1]
         k = int(pos)
         frac = pos - k
-        if k + 1 >= n:
-            return s[-1]
         return s[k] + frac * (s[k + 1] - s[k])
 
     q1, q2 = quantile(Fraction(1, 3)), quantile(Fraction(2, 3))
@@ -194,12 +198,15 @@ def value_def(window, ddof=ZSCORE_DDOF, zscore=True, reverse=False):
     z = [(v - mean) / sd for v in w] if zscore else list(w)
 
     def quantile(p):
+        """Hazen: 0-indexed virtual index p * n - 1/2."""
         s = sorted(z)
-        pos = p * (n - 1)
+        pos = p * n - 0.5
+        if pos <= 0.0:
+            return s[0]
+        if pos >= n - 1:
+            return s[-1]
         k = int(math.floor(pos))
         frac = pos - k
-        if k + 1 >= n:
-            return s[-1]
         return s[k] + frac * (s[k + 1] - s[k])
 
     q1, q2 = quantile(1.0 / 3.0), quantile(2.0 / 3.0)
@@ -242,6 +249,24 @@ def section_a():
             if exact is not None and np.array_equal(letter, exact):
                 ok += 1
             mine = float(base(frame).iloc[int(bars[i])])
+            worst = max(worst, abs(mine - value_exact(win[i])))
+            ran += 1
+        row(frame, ran, ok, f"{worst:.2e}")
+
+    head("A1b. Same oracle at length=120 (a second fractional offset)")
+    for frame in FRAMES:
+        length = 120
+        win, bars = windows(FRAMES[frame], length=length)
+        mine_series = c22_entropy_pairs(FRAMES[frame], length=length)
+        ok = 0
+        worst = 0.0
+        ran = 0
+        for i in range(0, win.shape[0], 97):
+            letter, _ = shipped_letters(win[i])
+            exact = exact_letters(win[i])
+            if exact is not None and np.array_equal(letter, exact):
+                ok += 1
+            mine = float(mine_series.iloc[int(bars[i])])
             worst = max(worst, abs(mine - value_exact(win[i])))
             ran += 1
         row(frame, ran, ok, f"{worst:.2e}")
@@ -465,8 +490,7 @@ def section_p():
         return entropy_with_divisor(letter, letter.size - 2)
 
     candidates = {
-        "shipped (overlap, ln, raw)": lambda w: float(base("walk").iloc[0])
-            if False else entropy_of(shipped_letters(w)[0]),
+        "shipped (overlap, ln, raw)": lambda w: entropy_of(shipped_letters(w)[0]),
         "non-overlapping pairs": value_nonoverlap,
         "log2 instead of ln": value_log2,
         "normalized by log(#observed types)": value_normalized,
@@ -489,6 +513,44 @@ def section_p():
     for name in candidates:
         row(name, "median gap", f"{float(np.median(med2[name])):.4f}",
             "max gap", f"{worst2[name]:.4f}")
+
+    head("P3. Designed inputs -- exact identification, not gap-fitting")
+    print("Rank-only inputs (ties aside, the letter assignment depends only "
+          "on each point's RANK, not its value), so every candidate's "
+          "predicted value is forced by construction and a near-zero gap "
+          "pins the convention exactly instead of winning a noisy fit.")
+    plateau = np.arange(float(LENGTH))
+    plateau[33] = plateau[32]
+    designed = {
+        "monotone (0..99, no ties)": np.arange(float(LENGTH)),
+        "one-step-plateau (ranks 32/33 tied)": plateau,
+        "two-level (50 x 0.0, 50 x 1.0)": np.concatenate(
+            [np.zeros(LENGTH // 2), np.ones(LENGTH - LENGTH // 2)]),
+    }
+    exact_structural = {name: 0 for name in candidates}
+    quantile_all_exact = 0
+    for dname, w in designed.items():
+        ref = float(pycatch22.catch22_all(w.tolist())["values"][idx])
+        row(dname, "pycatch22", f"{ref:.6f}")
+        q_exact = 0
+        for m in methods:
+            val = value_with_quantile_method(w, m)
+            hit = abs(val - ref) < 1e-9
+            q_exact += int(hit)
+            row("  quantile", m, f"{val:.6f}", "gap", f"{abs(val - ref):.2e}",
+                "EXACT" if hit else "")
+        quantile_all_exact += int(q_exact == len(methods))
+        for name, fn in candidates.items():
+            val = fn(w)
+            hit = abs(val - ref) < 1e-9
+            exact_structural[name] += int(hit)
+            row("  structural", name, f"{val:.6f}", "gap",
+                f"{abs(val - ref):.2e}", "EXACT" if hit else "")
+    row("summary: windows where all 9 quantile methods are EXACT",
+        quantile_all_exact, "of", len(designed))
+    for name in candidates:
+        row("summary: structural", name, "EXACT on",
+            exact_structural[name], "of", len(designed), "designed windows")
 
 
 SECTIONS = {"S": section_s, "A": section_a, "B": section_b, "C": section_c,

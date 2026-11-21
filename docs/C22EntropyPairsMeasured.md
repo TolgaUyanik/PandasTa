@@ -8,15 +8,18 @@ opt-in and is the only place in this repository that runs the GPL-3.0
 reference)
 **CPU re-run:** `docs/measure_c22_entropy_pairs_cpu.py`
 **Tests:** `tests/test_c22_entropy_pairs.py` (116 tests)
-**Measured:** 2026-11-21, numpy 1.26.4 / pandas 2.3.3 / python 3.11, with
+**Measured:** 2026-11-21, numpy 1.26.4 / pandas 2.3.3 / python 3.11.2, with
 `AVX512F AVX512_SKX AVX2 FMA3` **enabled** (the CI dispatch is §F1).
 
-**Gate E: measured 2026-11-21, SHIP.** `C22ENTROPYPAIRS_100` max |ρ|
-**0.1371** vs `ROLLING_LOW_250` (`compute_all`, n = 376,599); per-frame max
-median 0.1290 vs `ROLLING_HIGH_250` (89 frames, 0.0% of frames ≥ 0.90) → well
-under the `r3-perframe-0.90` SHIP line (< 0.76). Full run in §E below. §P
-below is this port's own black-box comparison to the GPL-3.0 reference, which
-is a correctness check, not Gate E.
+**Gate E: pending, run by issue-solver after this session.** Review round 2
+(§P1) swapped the shipped quantile convention from `numpy.quantile`'s default
+("type 7") to the Hazen rule (MATLAB/hctsa's own `quantile`), which changes
+the column's values: the module's `module_sha1` moved, and the Gate E run
+already recorded for the type-7 column (`is133-c22_entropy_pairs-d0ad14ca`,
+max |ρ| 0.1371) measured a DIFFERENT column than the one now shipped, so that
+row has been removed from `docs/gate_e_ledger.csv` rather than kept under a
+stale hash. §E below records what that superseded run found, for context,
+and is not a Gate E result for this version of the module.
 
 ---
 
@@ -30,7 +33,7 @@ possible word types:
 ```
 r[t]   = close[t] / close[t-1] - 1
 Z      = (X - mean(X)) / sd(X, ddof=1)                     # inert, §A3
-q1, q2 = the 1/3 and 2/3 empirical quantiles of Z (linear interpolation)
+q1, q2 = the 1/3 and 2/3 empirical quantiles of Z (Hazen interpolation)
 k[t]   = how many of {q1, q2} that Z[t] stands strictly above
 W      = {(k[t], k[t+1]) : t = 1 .. 99}                    # 99 overlapping words
 C22ENTROPYPAIRS = -sum over observed word types of p * log(p)
@@ -40,20 +43,30 @@ Three things a reader has to know before using it:
 
 1. **It is bounded in `[0, log 9]` = `[0, 2.1972245773362196]`**, an
    ENCLOSURE reached only by a perfectly uniform 9-way distribution.
-   Measured range over six synthetic frames: **1.255674 to 2.197225**
+   Measured range over six synthetic frames: **1.263948 to 2.197225**
    (§C1) — close to the top of the scale on five of six, because 99
    overlapping words over 9 types land near-uniform on most return
    sequences that are not themselves highly repetitive.
 2. **The quantile ESTIMATOR is an open reading the definition does not
-   settle**, and this port's choice (linear interpolation, `numpy.
-   quantile`'s default, "type 7") does not reproduce the GPL-3.0 reference
-   bit for bit — see §P. The structural reading (overlapping pairs, natural
-   log) is measured to be the best fit among the structural candidates
-   tried (§P2); the residual gap itself is NOT attributed to the quantile
-   convention — §P1 measures that swapping conventions, including MATLAB/
-   hctsa's own Hazen rule, moves the typical gap only in the fourth decimal
-   place — so the cause of the ~0.02 median disagreement with the reference
-   is disclosed as unidentified, not pinned on interpolation.
+   settle, and this port follows the source: the Hazen rule** (MATLAB/
+   hctsa's own `quantile`, since hctsa is MATLAB — see §P1). `numpy.
+   quantile`'s own default ("type 7") was considered and rejected: it does
+   not reproduce the GPL-3.0 reference bit for bit either, and §P1 found no
+   measured reason to prefer it over Hazen (median gap ties, max gap is
+   worse). Neither convention reproduces the reference bit for bit — see §P
+   — and §P3's designed-input probe explains why a black-box fit cannot
+   settle this choice at all: Shannon entropy over the 9 word-type counts is
+   invariant to a boundary shift that only PERMUTES which category holds
+   which count, which is exactly what moving between quantile conventions
+   does on rank-only data. The structural reading (overlapping pairs,
+   natural log, divisor `length - 1`) is measured to reproduce the GPL-3.0
+   reference EXACTLY on three designed, rank-only inputs (§P3) — the
+   strongest Gate A corroboration this receipt has — while the one
+   structural near-miss on real data (§P2's divisor-98 candidate) does NOT
+   reproduce the reference on those same designed inputs, so it is ruled out
+   as a fitting artifact rather than a hint at the true structure. The ~0.02
+   median gap to the reference on real (non-designed) windows remains
+   disclosed as unidentified.
 3. **Z-scoring is INERT** (§A3): the empirical quantile of an increasing
    affine map of a sample is the same affine map of the quantile of the
    sample, so no letter boundary can move relative to the data under a
@@ -86,9 +99,10 @@ not evidence**.
 
 ### A1. The exact rational oracle — zero roundings on the letter sequence
 
-Linear-interpolated quantiles of a finite sample are a RATIONAL function of
-the order statistics, so the letter sequence can be recomputed with zero
-rounding (`Fraction` arithmetic) and compared to the shipped float pipeline.
+Hazen-interpolated quantiles are a RATIONAL function of the order statistics
+(virtual index `p * n - 1/2`, no irrational operation), so the letter
+sequence can be recomputed with zero rounding (`Fraction` arithmetic) and
+compared to the shipped float pipeline.
 
 | frame | windows | letter sequences equal | max \|value gap\| |
 |---|---|---|---|
@@ -103,13 +117,15 @@ rounding (`Fraction` arithmetic) and compared to the shipped float pipeline.
 because once the letter sequence matches, both spellings reduce to the same
 `bincount` + `log` arithmetic on the same integers.
 
-⚠ At `length` = 100 this does not exercise interpolation at all: the virtual
-index `(length - 1) * p` is exactly 33.0 and 66.0 for `p` = 1/3, 2/3 (99 is
-divisible by 3), so `numpy.quantile`'s `linear` method returns the plain
-order statistics `x[33]`, `x[66]` with `frac` = 0 on both cuts — the oracle
-above matches trivially because neither spelling ever interpolates. A second
-run at `length` = 120, where `(length - 1) / 3` = 39.667 and `(length - 1) *
-2 / 3` = 79.333 are both non-integral, forces the real interpolation:
+Under Hazen's virtual index `p * n - 1/2`, the default `length` = 100
+already interpolates for real at both cuts (32.8333 and 66.1667 of 99
+returns, neither an integer) — unlike the REJECTED type-7 reading, where
+`(length - 1) * p` lands exactly on 33.0 and 66.0 at this length (99 is
+divisible by 3) and the quantile is a plain order statistic with `frac` = 0.
+A second run at `length` = 120 (cuts at 39.5 and 79.5 of 119 returns — an
+exact half rather than a repeating third) is kept as a second, independently
+-fractioned data point rather than the only one that exercises
+interpolation:
 
 | frame | windows | letter sequences equal | max \|value gap\| |
 |---|---|---|---|
@@ -129,10 +145,10 @@ quantile function, no numpy vectorisation.
 
 | frame | windows | max \|gap\| |
 |---|---|---|
-| walk | 200 | 4.44e-16 |
+| walk | 200 | 8.88e-16 |
 | tick-rounded | 200 | 8.88e-16 |
 | penny | 200 | 4.44e-16 |
-| ar1 | 200 | 8.88e-16 |
+| ar1 | 200 | 6.66e-16 |
 | cosine | 200 | 2.22e-16 |
 | student-t | 200 | 8.88e-16 |
 
@@ -215,15 +231,15 @@ module on all 1,500 bars of walk, tick-rounded and penny.
 
 | frame | fired | distinct values | share of neighbouring pairs tied | min | max |
 |---|---|---|---|---|---|
-| walk | 1,400 | **530** | 0.1158 | 2.132676 | 2.196305 |
-| tick-rounded | 1,400 | **543** | 0.0944 | 2.105018 | 2.196305 |
-| penny | 1,400 | **748** | 0.1415 | 1.255674 | 2.196305 |
-| ar1 | 1,400 | **966** | 0.1851 | 1.871165 | 2.165775 |
-| cosine | 1,400 | **26** | 0.6269 | 1.635248 | 1.659030 |
-| student-t | 1,400 | **636** | 0.0958 | 2.115633 | 2.197225 |
+| walk | 1,400 | **509** | 0.1237 | 2.124410 | 2.196305 |
+| tick-rounded | 1,400 | **576** | 0.0879 | 2.106414 | 2.196305 |
+| penny | 1,400 | **745** | 0.1372 | 1.263948 | 2.197225 |
+| ar1 | 1,400 | **944** | 0.1823 | 1.886269 | 2.163134 |
+| cosine | 1,400 | **34** | 0.6269 | 1.635248 | 1.659793 |
+| student-t | 1,400 | **609** | 0.1008 | 2.110775 | 2.196305 |
 
 This column takes an INTEGER-bincount-derived value (unlike `c22_ami2`'s
-continuous mutual information), so tie shares are higher (9.4%–62.7%) and
+continuous mutual information), so tie shares are higher (8.8%–62.7%) and
 distinct-value counts lower — the sweep still catches every look-ahead mutant
 that can move a CLEAN frame on the 35-offset test above because 8 independent
 splices per offset are enough even at these tie rates. The one look-ahead
@@ -238,29 +254,29 @@ a dirty one instead.
 
 | frame | fired | distinct | min | median | max |
 |---|---|---|---|---|---|
-| walk | 1,400 | 530 | 2.132676 | 2.182479 | 2.196305 |
-| tick-rounded | 1,400 | 543 | 2.105018 | 2.178481 | 2.196305 |
-| penny | 1,400 | 748 | 1.255674 | 2.173883 | 2.196305 |
-| ar1 | 1,400 | 966 | 1.871165 | 2.035772 | 2.165775 |
-| cosine | 1,400 | 26 | 1.635248 | 1.656289 | 1.659030 |
-| student-t | 1,400 | 636 | 2.115633 | 2.178843 | 2.197225 |
+| walk | 1,400 | 509 | 2.124410 | 2.182310 | 2.196305 |
+| tick-rounded | 1,400 | 576 | 2.106414 | 2.179048 | 2.196305 |
+| penny | 1,400 | 745 | 1.263948 | 2.174901 | 2.197225 |
+| ar1 | 1,400 | 944 | 1.886269 | 2.035946 | 2.163134 |
+| cosine | 1,400 | 34 | 1.635248 | 1.656649 | 1.659793 |
+| student-t | 1,400 | 609 | 2.110775 | 2.178843 | 2.196305 |
 
 Derived bounds: `[0, 2.1972245773362196]`. The column sits near the top of
 the scale on five of six synthetic frames, because 99 overlapping 2-letter
 words spread over 9 types land close to uniform on most non-repetitive
 sequences — this is the column's own baseline, not a sign that it is
-constant: the walk frame alone has 530 distinct values.
+constant: the walk frame alone has 509 distinct values.
 
 ### C2. The issue's own worry: BIST tick rounding
 
 The penny frame (a 2-lira stock on a 1-kurus tick) has 21.68% of its returns
-exactly 0.0. Its first window's 3 letters hold 35 / 32 / 33 points — the
+exactly 0.0. Its first window's 3 letters hold 33 / 34 / 33 points — the
 quantile split still comes out close to equiprobable despite the rounding,
 because the ties sit at the SAME return value and so fall together inside
 whichever letter their quantile band lands in, rather than collapsing two
 letters into one the way a fixed-width bin would. The column still fires
-everywhere, with 748 distinct values (the most of any non-ar1 frame) and the
-widest range (1.255674 to 2.196305) of the six synthetic frames.
+everywhere, with 745 distinct values (the most of any non-ar1 frame) and the
+widest range (1.263948 to 2.197225) of the six synthetic frames.
 
 ### C3. What the blanking floor costs
 
@@ -275,7 +291,7 @@ Unguarded (the `no-floor` mutant, every window, not a sample):
 |---|---|---|
 | 0.01 | 1,400 of 1,500 | 0.4534 / 0.7578 / 0.9594 |
 | 0.001 | 1,400 of 1,500 | 0.3973 / 0.7029 / 1.0288 |
-| −0.005 | 1,400 of 1,500 | 0.9950 / 1.1497 / 2.1356 |
+| −0.005 | 1,400 of 1,500 | 0.9950 / 1.1541 / 2.1356 |
 
 These unguarded readings sit well inside the derived bounds and overlap the
 real frames' own ranges (§C1), which is what the floor buys: without it this
@@ -320,42 +336,29 @@ flip one.
 
 ## E. Gate E
 
-Run by the issue-solver launcher, `gate_e_overlap.py run --module
-pandas_ta.statistics.c22_entropy_pairs`, 89 ALTPORT-1 frames, 398,849 pooled
-bars, 687 comparators (329 `compute_all` + 358 `ml_features` manifest),
-canary bit-equal (`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS`). Outputs:
-`is133-c22_entropy_pairs-d0ad14ca`, recorded in `docs/gate_e_ledger.csv`.
+**Pending, run by issue-solver after this session.** Review round 2's §P1
+fix swapped the shipped quantile convention from `numpy.quantile`'s default
+("type 7") to the Hazen rule — a different estimator produces a different
+column (this receipt's own §0 item 2) — so every Gate E measurement taken
+against the type-7 column no longer describes the code in this tree. Its
+`docs/gate_e_ledger.csv` row has been removed rather than kept under a stale
+`module_sha1`; `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+fails locally until the launcher re-runs Gate E and a receipt session
+records the new row (expected, per the issue-solver rules for this session).
 
-| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | per-frame against | verdict |
-|---|---|---|---|---|---|---|
-| `C22ENTROPYPAIRS_100` | **0.1371** | `ROLLING_LOW_250` | 376,599 | 0.1290 | `ROLLING_HIGH_250` | **SHIP** |
-
-Both the pooled figure and the per-frame max median sit well under the
-`r3-perframe-0.90` ship line (< 0.76), close to the 2026-10-24 screen's
-prototype figure for the reference's own column (max |ρ| 0.1247 vs
-`ROLLING_LOW_250`) — the port reads the same as the prototype on this
-measure.
+**Superseded run, kept for context only.** The type-7 column was measured
+with `gate_e_overlap.py run --module pandas_ta.statistics.c22_entropy_pairs`,
+89 ALTPORT-1 frames, 398,849 pooled bars, 687 comparators (329 `compute_all`
++ 358 `ml_features` manifest), canary bit-equal (`AKBNK.IS, BIENY.IS,
+AGHOL.IS, SASA.IS`) — max |ρ| 0.1371 vs `ROLLING_LOW_250` (n = 376,599),
+per-frame max median 0.1290 vs `ROLLING_HIGH_250`, well under the
+`r3-perframe-0.90` SHIP line (< 0.76), run id `is133-c22_entropy_pairs-d0ad14ca`.
+That number measured the REJECTED type-7 column, not the Hazen column this
+tree now ships, so it is not carried forward as this port's Gate E result.
 
 §P below is this port's own black-box correctness check against the GPL-3.0
-reference (pycatch22 1.0.2) — a Gate A corroboration, not Gate E.
-
-⚠ **`module_sha1` re-pinned, review round 2.** The findings below (§P1/§P2,
-docstring wording) only touched prose: no line that the kernel executes
-moved. `tests/test_gate_e_ledger.py::test_row_output_has_not_moved` confirms
-the recorded output fingerprint still matches this file's live output, so
-`docs/gate_e_ledger.csv`'s `module_sha1` for this row was updated to the new
-file's hash (`a9a061f1…`) without a new Gate E run — the measured numbers
-above are unchanged.
-
-**Re-run, receipt session, 2026-11-21.** The launcher re-ran Gate E on the
-tree at this branch's HEAD after the review-round commits above (run
-`is133-c22_entropy_pairs-d0ad14ca`, `pandas_ta_src_sha1`
-`763331041953e11357aa51d01675032009d4064a`, superseding the prior run's
-`257abcef…` — the whole-tree hash moved because later commits touched other
-files, not this module: `candidate_source_sha1` is still `a9a061f1…`, unchanged).
-Every measured number (max |ρ|, comparator, n, per-frame max median, verdict)
-came back identical to the numbers already in this section — SHIP confirmed,
-re-recorded in `docs/gate_e_ledger.csv` under the new run id.
+reference (pycatch22 1.0.2) — a Gate A corroboration, not Gate E, and
+unaffected by which gate-E-ledger row exists.
 
 ---
 
@@ -365,16 +368,18 @@ re-recorded in `docs/gate_e_ledger.csv` under the new run id.
 **116 passed** (review round 1 added 18: the length guard band and column
 naming, a short-input probe, wiring/accessor checks, offset/fillna, the
 chunk budget, and a stricter dictionary-row check; review round 2 added 6: a
-second exact-rational-oracle run at a non-integral quantile index, §A1).
+second exact-rational-oracle run at a non-integral quantile index, §A1). The
+test count is unchanged by review round 3's quantile-convention fix: the
+same oracles now exercise Hazen instead of type 7.
 
-**Required subset (review round 2, 2026-11-21, after the §P1/§P2 fixes
+**Required subset (review round 3, 2026-11-21, after the §P1 quantile fix
 below):**
 `python -m pytest -q tests/test_c22_entropy_pairs.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`
-→ **1422 passed, 7 skipped.** The prior session's one expected failure
+→ **1414 passed, 7 skipped, 1 failed**
 (`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-missing ledger row) is gone now that `docs/gate_e_ledger.csv` carries the
-Gate E run's row; the `module_sha1` re-pin above keeps
-`test_row_still_describes_its_module` passing too.
+no row for `c22_entropy_pairs` — expected: §E's row was removed because the
+quantile-convention fix changed the module's `module_sha1`, and the launcher
+has not yet re-run Gate E on the Hazen column).
 
 **Under the CI CPU dispatch:** `python docs/measure_c22_entropy_pairs_cpu.py`
 → see its own run below (§F1).
@@ -452,7 +457,7 @@ against this port's `_entropy_pairs_rows` kernel on the identical window:
 | cosine | 0.6387 |
 | student-t | 0.8714 |
 
-Five of six frames correlate above 0.83; the cosine frame (only 26 distinct
+Five of six frames correlate above 0.83; the cosine frame (only 34 distinct
 values over 1,400 bars, §B4) is the weakest, which is the usual low-distinct-
 value caveat rather than a sign of a wrong formula. **0 of 90 windows agree
 to 1e-9** — this port does not reproduce the reference bit for bit — but the
@@ -461,86 +466,136 @@ correlation is strong enough to confirm the same underlying signal.
 ### P1. Candidate quantile interpolation conventions, fit to the black box
 
 Nine `numpy.quantile` interpolation methods, same 90 windows, holding the
-structural reading (overlapping pairs, natural log) fixed. MATLAB's own
-`quantile` (hctsa is MATLAB) assigns sorted values to the midpoint
-probabilities `p_k = (k - 0.5) / n` and interpolates linearly — the Hazen
-rule, "type 5" — which is public from MathWorks' own documentation (no
-GPL-3.0 source needed) and has shipped as `numpy.quantile(method="hazen")`
-since numpy 1.22 (this environment runs 1.26.4). It is in the sweep below,
-alongside `weibull` for completeness:
+structural reading (overlapping pairs, natural log) fixed. The cited source,
+hctsa's `SB_MotifThree(y, 'quantile', 3)`, is MATLAB, and MATLAB's own
+`quantile` assigns sorted values to the midpoint probabilities
+`p_k = (k - 0.5) / n` and interpolates linearly — the Hazen rule, "type 5" —
+which is public from MathWorks' own documentation (no GPL-3.0 source needed)
+and has shipped as `numpy.quantile(method="hazen")` since numpy 1.22 (this
+environment runs 1.26.4). `weibull` is in the sweep too, for completeness:
 
 | method | agree < 1e-9 | mean gap | median gap | max gap |
 |---|---|---|---|---|
-| linear (**shipped**, "type 7", `p_k=(k-1)/(n-1)`) | 0 of 90 | 0.0192 | 0.0202 | 0.0437 |
+| linear (**rejected**, "type 7", `p_k=(k-1)/(n-1)`, `numpy.quantile`'s own default) | 0 of 90 | 0.0192 | 0.0202 | 0.0437 |
 | lower | 0 of 90 | 0.0192 | 0.0202 | 0.0437 |
 | higher | 0 of 90 | 0.0192 | 0.0202 | 0.0437 |
 | nearest | 0 of 90 | 0.0192 | 0.0202 | 0.0437 |
 | midpoint | 0 of 90 | 0.0192 | 0.0202 | 0.0437 |
 | median_unbiased | 0 of 90 | 0.0185 | 0.0202 | 0.0202 |
 | normal_unbiased | 0 of 90 | 0.0185 | 0.0202 | 0.0202 |
-| **hazen** (MATLAB/hctsa's own convention, "type 5") | 0 of 90 | 0.0185 | 0.0202 | 0.0202 |
+| **hazen** (**shipped**, MATLAB/hctsa's own convention, "type 5") | 0 of 90 | 0.0185 | 0.0202 | 0.0202 |
 | weibull | 0 of 90 | 0.0185 | 0.0202 | 0.0202 |
 
 **These nine rows are two distinct behaviours, not nine.** At the default
-`length` = 100 the virtual index `(length - 1) * p` is exactly 33.0 and 66.0
-for `p` = 1/3, 2/3 (99 is divisible by 3), so `linear`, `lower`, `higher`,
-`nearest` and `midpoint` all land on the same two order statistics `x[33]`,
-`x[66]` — they are ONE convention measured five times, which is why those
-five rows are byte-identical. `median_unbiased`, `normal_unbiased`, `hazen`
-and `weibull` use plotting positions whose virtual index at `length` = 100
-is NOT an integer, so they interpolate and (here) land in the same bracket,
-producing a second byte-identical group. The sweep is two distinct cut-point
-behaviours, not nine, and no inference should be drawn from the agreement
-among rows within either group.
+`length` = 100 the rejected `linear` reading's virtual index
+`(length - 1) * p` is exactly 33.0 and 66.0 for `p` = 1/3, 2/3 (99 is
+divisible by 3), so `linear`, `lower`, `higher`, `nearest` and `midpoint` all
+land on the same two order statistics `x[33]`, `x[66]` — they are ONE
+convention measured five times, which is why those five rows are
+byte-identical. `median_unbiased`, `normal_unbiased`, `hazen` and `weibull`
+use plotting positions whose virtual index at `length` = 100 is NOT an
+integer, so they interpolate and (here) land in the same bracket, producing
+a second byte-identical group — the shipped Hazen reading is one member of
+this second group. The sweep is two distinct cut-point behaviours, not nine,
+and no inference should be drawn from the agreement among rows within either
+group.
 
 Across those two behaviours the MEDIAN gap does not move (0.0202 both), only
-the MAX does (0.0437 → 0.0202, Hazen's worst case is half linear's). Hazen —
-the convention MATLAB/hctsa's `quantile` actually uses — does not reproduce
-the reference bit for bit either (0 of 90 agree to 1e-9), and it does not
-close the typical ~0.02 gap at all; it only trims the tail. **The residual is
-therefore NOT attributed to the quantile convention**: swapping to the
-source-faithful Hazen reading leaves the typical disagreement with the
-reference unchanged, so whatever drives it is not this interpolation choice.
-**`linear` is kept as the shipped reading** on three grounds — it is the
-natural "the 1/3 and 2/3 empirical quantile" reading, it is `numpy.
-quantile`'s own default, and its median gap ties Hazen's — and switching to
-Hazen now would retroactively invalidate the Gate E measurement already
-recorded in `docs/gate_e_ledger.csv` for the `linear` column (a different
-quantile convention is a different column, by this port's own §0 item 1) for
-a tail-only improvement that does not touch the actual unexplained residual.
+the MAX does (0.0437 → 0.0202, Hazen's worst case is half the rejected
+`linear` reading's). **Gate A says start from the source formula, and the
+source formula is MATLAB's, so this port SHIPS Hazen**, not `linear` —
+`linear` was the more common convention and the one a reader reproducing
+"the 1/3 and 2/3 empirical quantile" from the paper's own words alone would
+reach for first, but it is not the source's, and this very table gives no
+measured reason to keep it anyway: its median gap merely TIES Hazen's and its
+max gap is WORSE. Neither convention reproduces the GPL-3.0 reference bit for
+bit (0 of 90 agree to 1e-9 either way), and §P3 below explains why a
+black-box fit cannot settle this choice at all: on designed, rank-only
+inputs every one of these nine conventions reproduces the reference
+identically, because Shannon entropy over the 9 word-type counts is
+invariant to the single-index relabelling a quantile-convention swap
+produces there. The quantile convention is decided by fidelity to the
+source, not by which one fits noisy data better — because on this feature,
+fit cannot discriminate between them.
 
 ### P2. Candidate structural readings, fit to the black box
 
-Same 90 windows, holding the quantile convention fixed at linear:
+Same 90 windows, holding the quantile convention fixed at the shipped Hazen
+reading:
 
 | candidate reading | median gap | max gap |
 |---|---|---|
-| **shipped** (overlapping pairs, natural log, raw) | **0.0202** | **0.0437** |
-| non-overlapping pairs (`floor(length/2)` words) | 0.0506 | 0.2587 |
-| `log2` instead of natural log | 0.9388 | 0.9569 |
-| normalized by `log(#observed word types)` | 1.2023 | 1.2169 |
-| word-count divisor `length` (100) instead of `length - 1` (99) | 0.0318 | 0.0531 |
-| word-count divisor `length - 2` (98) instead of `length - 1` (99) | 0.0081 | 0.0343 |
+| **shipped** (overlapping pairs, natural log, raw) | **0.0202** | **0.0202** |
+| non-overlapping pairs (`floor(length/2)` words) | 0.0472 | 0.2587 |
+| `log2` instead of natural log | 0.9397 | 0.9521 |
+| normalized by `log(#observed word types)` | 1.2017 | 1.2169 |
+| word-count divisor `length` (100) instead of `length - 1` (99) | 0.0319 | 0.0322 |
+| word-count divisor `length - 2` (98) instead of `length - 1` (99) | 0.0082 | 0.0135 |
 
 The shipped reading beats four of the five alternatives tried, by a wide
 margin over `log2`, the type-count normalization and the wrong-divisor-by-
 100 candidate — evidence that the structural reading (words are OVERLAPPING
 consecutive letter pairs, entropy in NATS) was read correctly from the
-definition. **It does not beat all five.** Dividing the word COUNTS by
-`length - 2` = 98 instead of the correct `length - 1` = 99 — which does not
-sum the word-type frequencies to 1, so it is not a valid probability
-distribution and is not a candidate this port can adopt — fits the black box
-better than the shipped reading on both the median (0.0081 vs 0.0202) and
-the max (0.0343 vs 0.0437). This is reported as a measured near-miss, not
-explained: it says the residual correlates with SOME divisor-like quantity
-smaller than 99, but a 98-divisor is not a coherent alternative reading of
-`SB_MotifThree(y, 'quantile', 3)`, so no candidate tried here — across both
-§P1's quantile conventions and this table's structural readings — identifies
-the actual cause of the ~0.02 median disagreement with the GPL-3.0
-reference. **This is a Gate A corroboration of the structural reading, not
-Gate E, and not a claim that this port reproduces the reference**: the
-residual gap, the sub-1.0 Spearman on two of six frames, and the unexplained
-98-divisor near-miss are all stated, not hidden.
+definition. **It does not beat all five on this noisy fit.** Dividing the
+word COUNTS by `length - 2` = 98 instead of the correct `length - 1` = 99 —
+which does not sum the word-type frequencies to 1, so it is not a valid
+probability distribution and is not a candidate this port can adopt — still
+fits the black box better than the shipped reading on both the median
+(0.0082 vs 0.0202) and the max (0.0135 vs 0.0202). §P3 below settles this
+near-miss with designed inputs instead of a noisy fit: the shipped reading
+reproduces the reference EXACTLY on all three designed windows, and the
+98-divisor candidate does not reproduce it on any of them — so the near-miss
+on real data is a fitting artifact, not a hint at the true structure, and is
+ruled out rather than merely disclosed. What §P3 does NOT settle is the
+~0.02 median gap on real (non-designed) windows itself: that residual's
+cause remains unidentified. **This is a Gate A corroboration of the
+structural reading, not Gate E, and not a claim that this port reproduces
+the reference**: the residual gap and the sub-1.0 Spearman on two of six
+frames are both stated, not hidden.
+
+### P3. Designed, rank-only inputs — exact identification instead of a noisy fit
+
+§P1 and §P2 above FIT every candidate to 90 real, noisy windows, where many
+readings differ by amounts of the same order as the residual itself — which
+is why the 98-divisor candidate "wins" a fit without being a coherent
+reading. Three designed windows remove the noise: each is a sequence whose
+RANK order is fixed by construction, so the letter sequence under any
+quantile convention is forced and the word-type counts are deterministic.
+`pycatch22.catch22_all` is run directly on each (`LENGTH` = 100 values fed as
+the "returns" window, matching how real windows are probed above):
+
+| window | pycatch22 | all 9 quantile methods | shipped structural | other 5 structural candidates |
+|---|---|---|---|---|
+| monotone (0, 1, .., 99; no ties) | 1.189142 | **EXACT**, all 9 | **EXACT** (gap 0.00e+00) | all 5 miss (gap 1.88e-03 to 5.26e-01) |
+| one-step-plateau (ranks 32/33 tied, else monotone) | 1.189142 | **EXACT**, all 9 | **EXACT** (gap 0.00e+00) | all 5 miss (gap 1.88e-03 to 5.26e-01) |
+| two-level (50 × 0.0, 50 × 1.0) | 0.742611 | **EXACT**, all 9 | **EXACT** (gap 0.00e+00) | all 5 miss (gap 2.52e-03 to 3.29e-01) |
+
+Two findings, not one:
+
+1. **The structural reading is pinned exactly.** The shipped reading
+   (overlapping pairs, natural log, divisor `length - 1` = 99) reproduces
+   `pycatch22` bit-for-bit on all three designed windows — the strongest Gate
+   A corroboration in this receipt, because there is no fitting involved: the
+   predicted and reference values are either equal or they are not. Every
+   structural alternative tried, INCLUDING the 98-divisor near-miss that beat
+   the shipped reading on the noisy §P2 fit, disagrees with the reference on
+   every designed window. The near-miss is therefore a fitting artifact of
+   real data, not evidence for a 98 divisor.
+2. **The quantile convention cannot be identified this way.** All nine
+   `numpy.quantile` methods — including the rejected `linear`/type-7 reading
+   and the shipped Hazen reading — reproduce `pycatch22` EXACTLY on all three
+   windows, i.e. they agree with each other too. This is not a coincidence of
+   these three windows: Shannon entropy over the 9 word-type counts is a
+   function of the MULTISET of counts, invariant to which category holds
+   which count. On rank-only data, moving the quantile convention shifts at
+   most one letter's boundary by one index, which PERMUTES two counts between
+   categories without changing the multiset — so the entropy is identical
+   under every convention whenever no other structure breaks that symmetry.
+   This is also why §P1's noisy fit found the quantile convention barely
+   moves the gap: the effect of the convention on this feature's value is
+   usually a no-op by this same argument, so no designed OR real input can
+   use the black box to choose between Hazen and type 7. The choice is
+   correctly made by fidelity to the source (§P1), not by fit.
 
 ---
 
@@ -548,14 +603,15 @@ residual gap, the sub-1.0 Spearman on two of six frames, and the unexplained
 
 | Gate | Result |
 |---|---|
-| A | Exact rational oracle agrees on 15/15 sampled windows per frame (6 frames) at `length` 100 AND at a non-integral-index `length` 120; independent plain-Python spelling agrees to 8.9e-16; z-score and word-order invariances measured and hold; structural reading (overlapping pairs, nats, raw) beats 4 of 5 alternative readings against the GPL-3.0 black box (§P2), but the ~0.02 median gap to the reference is NOT attributed to the quantile convention (§P1: swapping to MATLAB/hctsa's own Hazen rule leaves it unchanged) and its cause is otherwise unidentified |
+| A | Ships the Hazen quantile convention (MATLAB/hctsa's own `quantile`, §P1), not `numpy.quantile`'s default. Exact rational oracle agrees on 15/15 sampled windows per frame (6 frames) at `length` 100 AND at a second fractional offset, `length` 120; independent plain-Python spelling agrees to 8.9e-16; z-score and word-order invariances measured and hold; the structural reading (overlapping pairs, nats, divisor `length - 1`) reproduces the GPL-3.0 reference EXACTLY on three designed, rank-only inputs (§P3), which also rules out the real-data 98-divisor near-miss as a fitting artifact and explains why the quantile convention itself cannot be chosen by any black-box fit (entropy's permutation invariance over the word-type counts); the ~0.02 median gap on real (non-designed) windows remains unidentified |
 | B | 0 of 35 future-perturbation offsets leak on 6 frames + 3 non-default lengths; every look-ahead mutant that can move a clean frame is caught at ≥10 of 35, the one that cannot (`mask-back-dated`) is caught 12 of 12 on a dirty frame; two cross-row mutants dead by measured affine invariance |
 | C | Fires on every full-window bar on all 6 synthetic frames, including the tick-rounded penny frame (21.68% zero returns); blanks correctly on a flat run and an exact geometric ladder |
 | D | Bit-identical under ×8/×64/2⁻⁴⁰/2⁴⁰ price rescale (24/24 cells); 0 bars moved under ×10/×3.7/×0.1/×1.0000001 return rescale; `0 < fires < n` |
-| E | **SHIP** — max \|ρ\| 0.1371 vs `ROLLING_LOW_250` (n = 376,599); per-frame max median 0.1290, well under the `r3-perframe-0.90` line |
-| F | This module's 116 tests pass, under both the local dispatch and the CI CPU-feature set; required cross-module subset passes, ledger row now recorded |
+| E | **Pending** — the type-7 column's run (max \|ρ\| 0.1371 vs `ROLLING_LOW_250`) is superseded by the quantile-convention fix and its ledger row removed; the launcher re-runs Gate E on the Hazen column and a receipt session records it |
+| F | This module's 116 tests pass, under both the local dispatch and the CI CPU-feature set; required cross-module subset passes with the one expected failure (missing Gate E row) |
 
-**Decision: SHIP.** Nothing in Gates A–E disqualifies the column; the one
-open reading (the quantile interpolation convention) is disclosed in the
-module's docstring and corroborated as the best structural fit against the
-GPL-3.0 reference in §P.
+**Decision: pending Gate E.** Nothing in Gates A–D disqualifies the column;
+the quantile convention is now the source-faithful one (Hazen) rather than
+the more convenient `numpy.quantile` default, corroborated exactly against
+the GPL-3.0 reference on designed inputs in §P3. Gate E must be re-measured
+on this column before SHIP/DISCLOSE/STRUCK is decided.
