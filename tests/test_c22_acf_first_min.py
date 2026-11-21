@@ -11,8 +11,10 @@ What these pin, in order of how much it would hurt to lose:
   with no FFT and no vectorisation, value for value, at three lengths.
   Two closed forms: alternating returns read 1 (ACF(0)=1, ACF(1)<0,
   ACF(2)>0 is an immediate local minimum); a deterministic linear return
-  RAMP has a monotonically falling autocorrelation with no interior
-  minimum, so it reads the `length` sentinel.
+  RAMP has exactly one interior local minimum, at a lag fixed by the
+  window length rather than the slope -- measured 71 at `length` 100, so
+  every fired bar reads the same constant and the sentinel is never
+  reached.
 * CAUSALITY: future-perturbation sweep at several offsets, and a mutant
   (the write index moved one bar earlier) proved live and caught at
   every offset.

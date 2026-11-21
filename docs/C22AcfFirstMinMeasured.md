@@ -55,13 +55,16 @@ The reference implementation is GPL-3.0 and this fork is MIT. The port was
 written from the DEFINITION — "the first local minimum of the series' own
 autocorrelation function" is public-domain mathematics, not reference
 code — and the sample-autocorrelation convention (demeaned once, divided
-by `length` at every lag, FFT-based) is the same transform and divisor
-this fork's own `firstzero_ac` already uses on the identical window of
-returns. No shipped module imports the reference:
+by `length` at every lag, FFT-based, zero-padded past `2 * length` so
+the circular wrap cannot alias) is the same estimator and divisor this
+fork's own `firstzero_ac` already uses on the identical window of
+returns (the two pad to different FFT sizes, so values agree to rounding
+rather than bit-for-bit). No shipped module imports the reference:
 `test_no_shipped_module_imports_pycatch22` sweeps every `.py` file under
-the repository root for an import statement mentioning `pycatch22` and
-finds none. ⚠ pycatch22 **is installed in this worktree**, so that guard
-is not vacuous.
+`pandas_ta/` — the shipped package — for an import statement mentioning
+`pycatch22` and finds none (the harness's own opt-in section P import
+lives under `docs/`, outside the swept tree). ⚠ pycatch22 **is installed
+in this worktree**, so that guard is not vacuous.
 
 The one place the reference is run at all is
 `docs/measure_c22_acf_first_min.py` section **P** (opt-in; a bare run
@@ -179,7 +182,10 @@ By construction: the price enters only as `close[t] / close[t-1]`, and
 
 Not promised by the arithmetic — the output is an integer decided by
 float comparisons — and the test bounds it (≤ 1% of fired bars) rather
-than pinning 0.
+than pinning 0. The ×3.7 leg and the NaN-mask equality `CLAUDE.md`'s
+Gate D table also requires are not in this harness; they are pinned by
+`tests/test_c22_acf_first_min.py::test_price_scale_within_tolerance`
+(parametrised over `k = 10.0, 3.7`), which is in the green suite below.
 
 ### D3. `0 < fires < n`, and not constant
 
@@ -208,7 +214,13 @@ through a detrending spline this feature does not apply) with the rule
 that a real strike against that pair would revert or waive one of the two.
 Gate E's comparator set is the engine ∪ manifest, not sibling-to-sibling,
 so this run does not directly test that pair; `C22ACFFIRSTMIN_100`'s own
-max |ρ| (0.1058, a price-level column) clears independently of it.
+max |ρ| (0.1058) clears independently of it.
+
+⚠ **Open item for the owner:** the launcher's Gate E structurally cannot
+run a sibling-to-sibling comparison, so a direct Spearman between
+`C22ACFFIRSTMIN_100` and `C22PERIODICITY_100` over the 89 ALTPORT-1 BIST
+frames is still owed after this ship — §E1 below is a synthetic-frame
+stand-in only, not that measurement.
 
 ### E1. A synthetic-frame advisory (NOT Gate E)
 

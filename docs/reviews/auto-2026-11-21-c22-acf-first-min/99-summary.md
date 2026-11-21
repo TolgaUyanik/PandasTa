@@ -2,7 +2,7 @@
 
 | task | status | rounds | files touched | follow-ups |
 |---|---|---|---|---|
-| Port issue #131 (`c22_acf_first_min`, catch22 `CO_FirstMin_ac`) through Gates A-D, wiring, tests, receipt | **PASS** | 2 | see below | Gate E (launcher), whole-suite runs (launcher), ledger row (next receipt session) |
+| Port issue #131 (`c22_acf_first_min`, catch22 `CO_FirstMin_ac`) through Gates A-D, wiring, tests, receipt | **PASS** | 2 | see below | Gate E (launcher), whole-suite runs (launcher), ledger row (next receipt session) -- superseded, see note below |
 
 ## Files touched
 
@@ -31,6 +31,13 @@ catch22 port in this fork so far (`c22_periodicity` matched 8,387/8,400;
    reproduces the receipt digit for digit, required test subset green.
 
 ## What is NOT done here (by design, per the system prompt's overrides)
+
+⚠ **Stale at HEAD, superseded by commit `1c71b0b`:** this section
+describes the porting session's end state, before the launcher's Gate E
+run. Commit `1c71b0b` filled the receipt's §E and recorded the
+`docs/gate_e_ledger.csv` row, so `test_every_indicator_that_needs_a_row_has_one`
+now passes. See the receipt's §E for the current state, including the
+open sibling comparison it still owes.
 
 * Gate E (BIST, the launcher's `gate_e_overlap.py` run) — the receipt's
   §E states "pending, run by issue-solver after this session," and names
