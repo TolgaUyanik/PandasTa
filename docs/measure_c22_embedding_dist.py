@@ -184,6 +184,19 @@ def section_a1_broad_sweep():
     print(f"    n={len(errs)}  max|err|={max(errs):.6f}  mean|err|={np.mean(errs):.6f}")
     print(f"    oracle's own range on these 25 frames: {min(refs):.6f} .. {max(refs):.6f}")
 
+    # Cross-check: does §A2's best reading (narrow, tau-pinned frames)
+    # also hold up here, on diverse frames with the candidate's own
+    # (not pinned) tau? If it doesn't generalise, that is further
+    # evidence against it rather than for it.
+    errs2 = []
+    for y, ref in zip(frames, refs):
+        val, _tau = candidate(y, bins=10, edges="min_to_max", metric="abs_density")
+        if not (np.isnan(val) or np.isnan(ref)):
+            errs2.append(abs(val - ref))
+    print("    same 25 frames, candidate(bins=10, min_to_max, abs_density) -- "
+          "§A2's own best reading, candidate's own tau:")
+    print(f"    n={len(errs2)}  max|err|={max(errs2):.6f}  mean|err|={np.mean(errs2):.6f}")
+
 
 def section_a2_tau_pinned():
     """8 strongly anti-persistent frames (acf(1) approx -0.9 by

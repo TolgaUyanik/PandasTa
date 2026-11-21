@@ -90,6 +90,22 @@ A max error of 1.245120 against an oracle range of 0.029989 to 1.358727
 means the candidate is not a loose approximation, it is reading a
 different quantity.
 
+**Cross-check, after §3 found its own best reading:** does the closest
+config found on the narrow tau-pinned frames (§3 below — 10 bins,
+`min_to_max` edges, density comparison) generalise to these 25 diverse
+frames, using the candidate's own (not pinned) `tau`?
+
+```
+    same 25 frames, candidate(bins=10, min_to_max, abs_density) -- §A2's own best reading, candidate's own tau:
+    n=25  max|err|=0.062813  mean|err|=0.014178
+```
+
+It generalises better than it did on the narrow set (0.063 vs. 0.029
+max error — both small, neither zero) rather than falling apart, so the
+near-miss in §3 is not an artefact of those 8 frames being unusual. It
+still never approaches the oracle's own float precision on either test
+set.
+
 ## 3. §A2 — isolating the delay parameter
 
 If `tau` were the only wrong piece, pinning it independently of the
@@ -192,7 +208,7 @@ count to guess). None of the four improves on §3's own best reading.
 
 ## 5. Why this stops here rather than continuing to guess
 
-`CLAUDE.md`'s own words: "the dominant historical defect is a claim written
+`CLAUDE.md`'s own words: "The dominant historical defect is a claim written
 before it was measured." Shipping any of the 35 structural variants tried
 above (1 broad-sweep reading, 30 histogram variants, 4 alternative
 distance/comparison readings — plus the 21-point fine bin sweep of the
