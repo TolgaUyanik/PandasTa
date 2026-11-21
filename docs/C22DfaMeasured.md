@@ -7,10 +7,14 @@ started). Section letters in brackets are the script's own, so each table can be
 re-run on its own: `python docs/measure_c22_dfa.py A D`. The GPL-3.0 sections are
 opt-in: `python docs/measure_c22_dfa.py P Q Q2 Q3 Q4 Q5 Q6 Q7`.
 
-**Gate E: pending, run by issue-solver after this session.** There is no
-`docs/gate_e_ledger.csv` row yet and `tests/test_c22_dfa.py::test_the_gate_e_row_is_owed`
-asserts there is none, which is the receipt session's cue to record one. Gate C's
-real-data limb is owed from the same run: everything below is synthetic.
+**Gate E: measured 2026-11-21 by issue-solver** on this tree (run
+`is128-c22_dfa-c4c93c4d`): `C22DFA_100` pooled max \|ρ\| **0.07073344917219926**
+vs `mad_pct_Pctl` (manifest, n = 389,949), per-frame max median
+**0.07422100112784677** vs the same comparator over 89 frames → **SHIP** under
+`r3-perframe-0.90`. §E has the full table and the ledger row; §E (context)
+below it keeps the fork-overlap reading made HERE on six synthetic frames,
+which is still not Gate E. Gate C's real-data limb is filled from the same
+run: everything else in §C is synthetic.
 
 ---
 
@@ -462,9 +466,8 @@ rates above are what they are rather than 35 of 35 everywhere.
 
 ## Gate C — reachability
 
-⚠ **The real-data limb is OWED**: it comes from the launcher's Gate E run (389,949 of
-398,849 pooled BIST bars is what the siblings' runs report for a 100-return window).
-Everything here is synthetic.
+The real-data limb is measured in §C5 below, from the launcher's Gate E run. §C1–§C4
+are synthetic.
 
 ### C1. What fires
 
@@ -493,7 +496,9 @@ everywhere, takes all six values, and reads the same median as the continuous wa
 That is the synthetic half of the answer; the other half is Gate E's comparator list,
 and the issue says what to look for there — a top comparator that is a price LEVEL
 (`mcgd`, `ROLLING_LOW_250`) or `Volume` would point at tick rounding rather than at
-return dynamics. ⚠ Owed.
+return dynamics. §C5 answers it: the top comparator is `mad_pct_Pctl`, a percent
+distance, not a price level or `Volume`, and at \|ρ\| 0.0707 it does not carry this
+column either way.
 
 ### C3. What the column can and cannot separate
 
@@ -523,6 +528,23 @@ The commonest reading of iid returns is the TOP candidate, and the centre moves 
 `length`. An iid fluctuation curve is close to one straight line, and a two-piece fit
 of a straight line puts its break wherever the residuals happen to be smallest, which
 on this ladder is biased towards the long-scale end.
+
+### C5. Real data — measured 2026-11-21 by the Gate E run
+
+Every count in §C1–§C4 is SYNTHETIC; this is the real-data limb, from run
+`is128-c22_dfa-c4c93c4d` over the 89 frozen ALTPORT-1 BIST frames:
+
+| | |
+|---|---|
+| pooled bars | 398,849 |
+| `C22DFA_100` non-NaN | **389,949** |
+| non-zero | **389,949** |
+
+**389,949 of 398,849 bars fire (97.77%)**, and the 8,900 NaN bars are `89 × 100`
+exactly — the warm-up (100 returns needed, so bars 0–99 of each frame), with
+**0 further bars blanked**. non-zero equals non-NaN, so exactly 0.0 — reachable in
+principle (§C1, only on the constant cosine frame) — was **not** read on any of
+the 389,949 BIST bars.
 
 ---
 
@@ -564,16 +586,64 @@ column reads the SHAPE of the series and not only its distribution.
 
 ---
 
-## E — context (⚠ this is NOT Gate E)
+## Gate E — measured 2026-11-21 by issue-solver → **SHIP**
+
+Run `is128-c22_dfa-c4c93c4d`
+(`gate_e_overlap.py run --module pandas_ta.statistics.c22_dfa`), made by the
+launcher against this tree: 89 frozen ALTPORT-1 BIST frames, 398,849 pooled
+bars, 329 `compute_all` + 358 `ml_features` manifest = **687** comparators
+(the run's `n_degenerate` field reads 1), canary
+`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS bit-equal`, pandas 2.3.3 / numpy 1.26.4,
+module sha1 `5d7070ff9768de6359b7a95384a5bfd9311018f7`, tree sha1
+`6cba6c53f9dfc9ad27ad5770fa7a5e3284fb5f21`, data stamp
+`1be6495ef7095ff67ad8f59a2fc0311d74f02652`.
+
+| | `C22DFA_100` |
+|---|---|
+| pooled max \|ρ\| | **0.07073344917219926** |
+| against | `mad_pct_Pctl` (manifest), n = **389,949** |
+| top within `compute_all` | `natr_percentile` 0.05635671169373602, n = 389,949 |
+| per-frame max median \|ρ\| | **0.07422100112784677** vs `mad_pct_Pctl`, 89 frames |
+| frames with a per-frame median ≥ 0.90 | **0.0%** |
+| non-NaN / non-zero | 389,949 / 389,949 (§C5) |
+| bands | `r3-perframe-0.90` → pooled 0.0707 < 0.76 and 0.0742 < 0.90 → **SHIP** |
+
+SHIP is the whole verdict: no column is removed, nothing is disclosed, no
+waiver is needed. The row is in `docs/gate_e_ledger.csv` as
+`c22_dfa,pandas_ta.statistics.c22_dfa,C22DFA_100,SHIP,…,is128-c22_dfa-c4c93c4d,2026-11-21`
+with an empty waiver field, recorded by
+`python docs/gate_e_ledger.py record … --measured 2026-11-21`, which refuses a
+row whose module sha1 is not this tree's.
+
+### E0. The prototype's figure, beside this port's
+
+The 2026-10-24 screen measured the **prototype** — the GPL-3.0 reference's
+column through pycatch22 (run `screen_r3_20261024`, same 89 frames, 398,849
+bars, 687 comparators, canary bit-equal):
+
+| | prototype, 2026-10-24 | this port, 2026-11-21 |
+|---|---|---|
+| pooled max \|ρ\| | **0.0707** | **0.0707** (0.07073344917219926) |
+| against | `mad_pct_Pctl`, n = 389,949 | the same, n = 389,949 |
+| top-5 per-frame max median | 0.0742 | 0.0742 (0.07422100112784677) |
+| next comparators | `mad_pct_State` 0.0685, `Swing_Range_pct_Pctl` 0.0659 | `natr_percentile` 0.0564 is the `compute_all` top |
+| fork overlap (stage 2, 12 frames, not Gate E) | 0.0620 vs `covariance:COV_30_1`, per-frame max median 0.0641 | not re-run (§E1 below is the in-fork reading made here) |
+
+They agree to three decimals on the same top comparator and the same sample
+size — §P1 is why that was expected: this port IS the column the screen
+measured, 0 disagreements on 8,400 of 8,400 synthetic windows. The two runs
+are still two runs, and the row above is the one that counts.
+
+### E1. In-fork overlap, measured HERE (6 synthetic frames, not Gate E)
 
 These are 1,500-bar synthetic frames, not the 89 frozen BIST ones, and the
 comparators are this fork's own columns rather than the engine's `compute_all` ∪ the
 `ml_features` manifest, so what follows is **not Gate E** and must not be quoted as
 it. It is here because issue #128 names **#112 TF-DFA-100** as a relative and
 that port SHIPPED after the 2026-10-24 screen, so the screen's own fork-overlap stage
-never saw it. Gate E, when the launcher runs it, is the measurement that counts.
+never saw it. The table in the Gate E section above is the measurement that counts.
 
-### E1. On the walk frame
+#### On the walk frame
 
 | comparator | Spearman vs C22DFA_100 | bars |
 |---|---|---|
@@ -586,7 +656,7 @@ never saw it. Gate E, when the launcher runs it, is the measurement that counts.
 | `TFSPECENT_64` | +0.0335 | 1,400 |
 | `C22PERIODICITY_100` | -0.0048 | 1,400 |
 
-### E2. Over six frames, the worst each comparator reaches
+#### Over six frames, the worst each comparator reaches
 
 | comparator | worst \|rho\| | on |
 |---|---|---|
@@ -735,7 +805,7 @@ one sum. A reassociated reduction has to close a relative gap of at least 3.598e
 |---|---|
 | A correctness | done — bit-equal to the reference on 8,400 of 8,400 windows, predicted on 3,084 of 3,084 across every ladder size, plus a plain-Python spelling and an exact-rational oracle |
 | B causality | done — 0 of 35 offsets leak on six frames under both splice strengths, a one-close-at-a-time dependency map, and fifteen mutants |
-| C reachability | synthetic limb done; **real-data limb owed** from the launcher's Gate E run |
+| C reachability | done — synthetic limb plus real-data limb from the Gate E run: 389,949 of 398,849 pooled BIST bars fire |
 | D scale-free | done — bit-identical under x8/x64/2\*\*-40/2\*\*40 and under x10/x3.7/x0.1/x1.0000001, `0 < fires < n`, not constant |
-| E attribution | **pending, run by issue-solver after this session** |
+| E attribution | **done — SHIP.** Run `is128-c22_dfa-c4c93c4d`, 2026-11-21: pooled max \|ρ\| 0.0707 vs `mad_pct_Pctl`, per-frame max median 0.0742, both well under the `r3-perframe-0.90` lines |
 | F suites | module green under both CPU dispatches; both repos' suites are the launcher's |

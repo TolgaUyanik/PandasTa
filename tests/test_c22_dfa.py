@@ -55,14 +55,20 @@ it would hurt to lose:
    candidate 0.619048 (147 of 400).
 8. The five wiring touch points, the dictionary row, and the receipt's own
    claims about what is owed.
-9. **Gate E is PENDING**, run by issue-solver after the porting session.
-   `test_the_gate_e_row_is_owed` asserts there is no ledger row yet, which
-   is the receipt session's cue to record one.
+9. **Gate E is MEASURED and says SHIP.** Run `is128-c22_dfa-c4c93c4d` of
+   2026-11-21: pooled max |rho| 0.0707 vs `mad_pct_Pctl` (n = 389,949),
+   per-frame max median 0.0742 vs the same comparator, 0 of 89 frames at
+   0.90 -- so no column is removed and no waiver is needed. The tests pin
+   the ledger row's identity and the BANDS rather than the digits, and Gate
+   C's real-data limb from the same run (389,949 of 398,849 pooled BIST
+   bars non-NaN, 389,949 non-zero), because every OTHER count in this file
+   is SYNTHETIC.
 
 Run `python docs/measure_c22_dfa.py` to regenerate every table, and
 `python docs/measure_c22_dfa_cpu.py` to re-run this module with AVX-512,
 AVX2 and FMA3 dispatch disabled.
 """
+import csv
 import importlib
 import math
 from decimal import Decimal, localcontext
@@ -1291,19 +1297,77 @@ def _receipt():
     return (ROOT / "docs" / "C22DfaMeasured.md").read_text(encoding="utf-8")
 
 
-def test_the_receipt_says_gate_e_is_pending():
-    """Gate E is run by issue-solver after this session, so the receipt must
-    SAY so rather than carry a number nobody measured."""
+def test_the_receipt_carries_the_measured_gate_e_numbers():
+    """The receipt is the deliverable the issue asks for, so the launcher's
+    run of 2026-11-21 has to live in it and not only in the ledger: the
+    pooled max with its comparator, the sample size, the per-frame max
+    median with ITS comparator, and the run id.
+
+    The 2026-10-24 screen's PROTOTYPE figure (0.0707, the same comparator)
+    stays in the receipt, labelled as the prototype's, because the agreement
+    is what §P1 predicted -- but the pending line must be gone, since that
+    line is how this document said "nobody has measured this"."""
     text = _receipt()
-    assert "Gate E: pending, run by issue-solver after this session" in text
+    assert "Gate E: measured 2026-11-21 by issue-solver" in text
+    assert "0.07073344917219926" in text          # the PORT's pooled max
+    assert "0.07422100112784677" in text          # its per-frame max median
+    assert "mad_pct_Pctl" in text
+    assert "389,949" in text
+    assert "is128-c22_dfa-c4c93c4d" in text
+    assert "r3-perframe-0.90" in text
+    assert "0.0707" in text and "prototype" in text.lower()
+    assert "Gate E: pending, run by issue-solver" not in text
 
 
-def test_the_gate_e_row_is_owed():
-    """... and there is no ledger row yet. This test is the receipt
-    session's cue: when the launcher's Gate E run is recorded, it is
-    replaced by one that pins the row."""
-    text = (ROOT / "docs" / "gate_e_ledger.csv").read_text(encoding="utf-8")
-    assert "c22_dfa" not in text
+def test_the_gate_e_row_is_recorded_and_says_ship():
+    """The ledger carries exactly one row, for the one shipped column, and
+    the `r3-perframe-0.90` bands put it at SHIP: nothing is removed, no
+    waiver is needed. The bands are asserted as bands (pooled < 0.76,
+    per-frame max median < 0.90) rather than as digits, which is what the
+    CPU-dispatch rule asks for; the run id is pinned beside them, because
+    this port's figure agrees with the 2026-10-24 screen's prototype to
+    three decimals and an expected agreement is the easiest kind of row to
+    copy in from the wrong run."""
+    path = ROOT / "docs" / "gate_e_ledger.csv"
+    with path.open(newline="", encoding="utf-8") as fh:
+        rows = [r for r in csv.DictReader(fh)
+                if r["indicator"] == "c22_dfa"]
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["column"] == "C22DFA_100"
+    assert row["module"] == "pandas_ta.statistics.c22_dfa"
+    assert row["verdict"] == "SHIP"
+    assert float(row["max_abs_rho"]) < 0.76
+    assert float(row["perframe_max_median_abs_rho"]) < 0.90
+    assert row["against"] == "mad_pct_Pctl"
+    assert row["run"] == "is128-c22_dfa-c4c93c4d"
+    assert row["measured"] == "2026-11-21"
+    assert row["waiver"] == ""                  # only STRUCK needs one
+
+
+def test_the_gate_e_row_has_no_sentinel_gap():
+    """0.0 is a legal reading of this column, not only a blank (bar 754 of
+    §G3 and the constant cosine frame of §C1), and on the 89 BIST frames it
+    was never read: the row's non-NaN and non-zero counts are EQUAL."""
+    path = ROOT / "docs" / "gate_e_ledger.csv"
+    with path.open(newline="", encoding="utf-8") as fh:
+        rows = {r["indicator"]: r for r in csv.DictReader(fh)}
+    row = rows["c22_dfa"]
+    non_nan, non_zero = int(row["non_nan"]), int(row["non_zero"])
+    assert non_nan == 389949
+    assert non_zero == non_nan
+
+
+def test_gate_cs_real_data_limb_is_in_the_receipt():
+    """Every count measured in the synthetic sections (§C1-C4) is synthetic,
+    which is the defect `CLAUDE.md` names, so Gate C's real-data limb has to
+    be stated in the receipt: 389,949 of 398,849 pooled BIST bars non-NaN,
+    which is `89 x 100` bars short of the pool -- the warm-up exactly, so
+    nothing else blanks on real data."""
+    text = _receipt()
+    assert "398,849" in text
+    assert "389,949" in text
+    assert "0 further bars blanked" in text
 
 
 def test_the_receipt_states_the_agreement_with_the_reference():
