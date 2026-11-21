@@ -324,7 +324,7 @@ Run by the issue-solver launcher, `gate_e_overlap.py run --module
 pandas_ta.statistics.c22_entropy_pairs`, 89 ALTPORT-1 frames, 398,849 pooled
 bars, 687 comparators (329 `compute_all` + 358 `ml_features` manifest),
 canary bit-equal (`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS`). Outputs:
-`is133-c22_entropy_pairs-1d07d116`, recorded in `docs/gate_e_ledger.csv`.
+`is133-c22_entropy_pairs-d0ad14ca`, recorded in `docs/gate_e_ledger.csv`.
 
 | column | max \|ρ\| | against | n | per-frame max median \|ρ\| | per-frame against | verdict |
 |---|---|---|---|---|---|---|
@@ -346,6 +346,16 @@ the recorded output fingerprint still matches this file's live output, so
 `docs/gate_e_ledger.csv`'s `module_sha1` for this row was updated to the new
 file's hash (`a9a061f1…`) without a new Gate E run — the measured numbers
 above are unchanged.
+
+**Re-run, receipt session, 2026-11-21.** The launcher re-ran Gate E on the
+tree at this branch's HEAD after the review-round commits above (run
+`is133-c22_entropy_pairs-d0ad14ca`, `pandas_ta_src_sha1`
+`763331041953e11357aa51d01675032009d4064a`, superseding the prior run's
+`257abcef…` — the whole-tree hash moved because later commits touched other
+files, not this module: `candidate_source_sha1` is still `a9a061f1…`, unchanged).
+Every measured number (max |ρ|, comparator, n, per-frame max median, verdict)
+came back identical to the numbers already in this section — SHIP confirmed,
+re-recorded in `docs/gate_e_ledger.csv` under the new run id.
 
 ---
 
