@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from .arch_lm import arch_lm
+from .c22_acf_first_min import c22_acf_first_min
 from .c22_ami2 import c22_ami2
 from .c22_ami_timescale import c22_ami_timescale
 from .c22_dfa import c22_dfa

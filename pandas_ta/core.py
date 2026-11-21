@@ -1909,6 +1909,12 @@ class AnalysisIndicators(BasePandasObject):
         result = arch_lm(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def c22_acf_first_min(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_acf_first_min(close=close, length=length, offset=offset,
+                                   **kwargs)
+        return self._post_process(result, **kwargs)
+
     def c22_ami2(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = c22_ami2(close=close, length=length, offset=offset, **kwargs)
