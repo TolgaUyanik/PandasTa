@@ -268,10 +268,13 @@ def test_the_tie_rule_is_not_the_same_as_picking_one_tied_bin():
 
 
 @pytest.mark.parametrize("frame", list(FRAMES))
-def test_z_scoring_moves_the_output_unlike_the_order_based_catch22_ports(frame):
-    """A control for item 2 above: shifting the window by a constant moves
-    this column's output (z-scoring is NOT inert), where it would be inert
-    for an order-based catch22 port such as `c22_entropy_pairs`."""
+def test_a_constant_shift_cannot_move_the_output_because_z_scoring_removes_it(frame):
+    """A control for item 2 above: shifting the window by a constant additive
+    offset cannot move this column's output, because z-scoring removes any
+    additive shift (Z(X+d) = Z(X)). What is NOT inert here, unlike an
+    order-based catch22 port such as `c22_entropy_pairs`, is the CHOICE to
+    z-score at all -- raw-unit vs z-unit bin centres (module docstring,
+    `pandas_ta/statistics/c22_mode_5.py`)."""
     win, bars = windows(FRAMES[frame])
     idx = list(range(0, win.shape[0], 11))
     mine = [float(base(frame).iloc[int(bars[i])]) for i in idx]

@@ -10,16 +10,18 @@ PandasTa issue **#134** (C22-MODE-5), ported 2026-11-22 on branch
 | source | catch22 (Lubba et al. 2019, *Data Min. Knowl. Disc.* 33:1821), feature `DN_HistogramMode_5` — the hctsa operation `DN_HistogramMode(y, 5)`; reference code pycatch22 1.0.2, **GPL-3.0** — ported from the definition |
 | tests | `tests/test_c22_mode_5.py` (111 tests) |
 | harness | `docs/measure_c22_mode_5.py` (sections A, B, C, D, G, **P**; P is opt-in and is the only part of this repository that imports the GPL-3.0 reference), `docs/measure_c22_mode_5_cpu.py` |
-| Gate A | 0 of 1,200 sampled windows (six frames) disagree with the exact-rational bin-assignment oracle beyond float noise (worst 1.9e-15); the designed 4-way tie (bins 0, 1, 3, 4) matches the oracle to 1e-10; against the actual GPL-3.0 reference, `pycatch22.catch22_all`'s `DN_HistogramMode_5`, 0 of 8,400 windows disagree beyond 1e-5 (worst 2.13e-6, consistent with the reference's own float32 internals) — §A, §P |
+| Gate A | 0 of 1,200 sampled windows (six frames) disagree with the exact-rational bin-assignment oracle beyond float noise (worst 1.9e-15); the designed 4-way tie (bins 0, 1, 3, 4) matches the oracle to 1.0e-16 (test bound 1e-9); against the actual GPL-3.0 reference, `pycatch22.catch22_all`'s `DN_HistogramMode_5`, 0 of 8,400 windows disagree beyond 1e-5 (worst 2.13e-6, consistent with the reference's own float32 internals) — §A, §P |
 | Gate B | causal; 0 of 43 offsets leak on six frames; four mutants (write-back-dated, three cross-row chunk-wide reads) all live and caught 43/43, 43/43, 43/43 and 34/43 of 43 offsets — §B |
 | Gate C | fires on every bar with a full window on all six synthetic frames; not constant on five of six (the cosine frame is near-constant at ≈0 by construction, a clean periodic signal's own symmetric histogram); the tick-rounded penny frame (21.7% exactly-zero returns) still fires on every eligible bar — §C |
-| Gate D | ×8/×64/×2⁻⁴⁰/×2⁴⁰ bit-identical; worst |diff| 1.8e-13 under ×10/×3.7/×0.1/×1.0000001 inexact return rescale on six frames; `0 < fires < n`; not constant — §D |
+| Gate D | ×8/×64/×2⁻⁴⁰/×2⁴⁰ bit-identical; worst |diff| 1.3e-13 under ×10/×3.7/×0.1/×1.0000001 inexact return rescale on the `walk` frame; `0 < fires < n`; not constant — §D |
 | Gate E | max \|ρ\| 0.1271 vs `Dist_to_SMA_200_pct` (manifest, n = 381,138), per-frame max median 0.1508 → **SHIP** — §E |
 | Gate F | PandasTa green (111 module tests, both dispatches; required subset below); whole suites run by issue-solver in clean worktrees — §F |
 
-Every number below was produced by `python docs/measure_c22_mode_5.py`
-(and, for the CI CPU-dispatch row, `docs/measure_c22_mode_5_cpu.py`) on
-this machine (numpy 1.26.4, pandas 2.3.3, Python 3.11).
+Every number below was produced by `python docs/measure_c22_mode_5.py`, by
+`docs/measure_c22_mode_5_cpu.py` for the CI CPU-dispatch row, or by
+`python -m pytest tests/test_c22_mode_5.py` for §B3, §B4, the ×2⁻⁴⁰/×2⁴⁰
+cells of §D1 and §H, on this machine (numpy 1.26.4, pandas 2.3.3, Python
+3.11).
 
 ---
 
@@ -99,7 +101,7 @@ disagreement.
 over 5 equal bins puts 2 elements in bin 0, 2 in bin 1, 1 in bin 2, 2 in
 bin 3 and 2 in bin 4 — tied bins **(0, 1, 3, 4)**, a four-way tie, not a
 two-way one. Shipped: **0.08661676591984258**; oracle:
-**0.08661676591984248** (diff 1.0e-10). `tests/test_c22_mode_5.py` also
+**0.08661676591984248** (diff 1.0e-16). `tests/test_c22_mode_5.py` also
 pins that "average all tied bins" disagrees with "pick just the first
 tied bin" and "pick just the last tied bin" on this same window by more
 than 1e-6 — the tie rule is not merely stated, it is exercised and shown
@@ -213,7 +215,8 @@ By construction: the price enters only as `close[t] / close[t-1]`, and
 `8a / 8b` is the same double as `a / b`; z-scoring then cancels the
 constant exactly in real arithmetic, and a power-of-two rescale is exact
 in floating point too. `tests/test_c22_mode_5.py` also checks ×2⁻⁴⁰ and
-×2⁴⁰ on all six frames (24 more cells), all bit-identical.
+×2⁴⁰ on all six frames (12 more cells; 24 in all, re-running ×8/×64 as
+well), all bit-identical.
 
 ### D2. Inexact rescale
 
