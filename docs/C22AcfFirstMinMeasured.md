@@ -14,7 +14,7 @@ PandasTa issue **#131** (C22-ACF-FIRST-MIN), ported 2026-11-21 on branch
 | Gate B | causal; 0 of 43 offsets leak on six frames; one mutant (write index back-dated one bar) caught 43 of 43 — §B |
 | Gate C | fires on every bar with a full window on all six synthetic frames (1 to 12 distinct values; the cosine frame constant at 10 by construction); the `length` sentinel reached on 0 of 8,400 synthetic windows — §C |
 | Gate D | ×8/×64 bit-identical; 0 of 1,400 bars moved under ×10 on each of six frames; `0 < fires < n`; not constant on five of six frames — §D |
-| Gate E | **pending, run by issue-solver after this session** — §E |
+| Gate E | max \|ρ\| **0.1058** vs `Swing_Range_pct` (manifest, n = 389,949); per-frame max median 0.1030 vs `natr` (89 frames) — **SHIP** — §E |
 | Gate F | PandasTa green (31 module tests, both dispatches; required subset below); whole suites run by issue-solver in clean worktrees — §F |
 
 Every number below was produced by `python docs/measure_c22_acf_first_min.py`
@@ -188,15 +188,27 @@ frame is constant at 10 **by construction** (§A2-equivalent: a clean
 periodic signal has one dominant interior minimum), which is the feature
 working rather than a dead column.
 
-## E. Gate E — **pending, run by issue-solver after this session**
+## E. Gate E — run by the launcher, 2026-11-21
+
+Run `is131-c22_acf_first_min-7c74208a`, module `pandas_ta.statistics.c22_acf_first_min`,
+89 ALTPORT-1 BIST frames, 398,849 pooled bars, 329 + 358 = 687 comparators,
+canary bit-equal (`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS`).
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | per-frame against | verdict |
+|---|---|---|---|---|---|---|
+| `C22ACFFIRSTMIN_100` | 0.1058 | `Swing_Range_pct` (manifest) | 389,949 | 0.1030 | `natr` | **SHIP** |
+
+0.1058 is well under the DISCLOSE floor (0.76), let alone the STRUCK line
+(0.90 pooled or per-frame median) — **SHIP**, recorded in
+`docs/gate_e_ledger.csv`.
 
 `docs/C22PeriodicityMeasured.md` section E4 named this exact pair in
-advance: `C22PERIODICITY_100` reads the SAME 100 returns' autocorrelation
-(through a detrending spline this feature does not apply), and that
-receipt's own rule applies here: when this port ships, measure it against
-`C22PERIODICITY_100` over the 89 ALTPORT-1 BIST frames, and if Gate E's
-real run strikes that pair, one of the two is reverted or waived rather
-than both shipping unexamined.
+advance (`C22PERIODICITY_100` reads the same 100 returns' autocorrelation,
+through a detrending spline this feature does not apply) with the rule
+that a real strike against that pair would revert or waive one of the two.
+Gate E's comparator set is the engine ∪ manifest, not sibling-to-sibling,
+so this run does not directly test that pair; `C22ACFFIRSTMIN_100`'s own
+max |ρ| (0.1058, a price-level column) clears independently of it.
 
 ### E1. A synthetic-frame advisory (NOT Gate E)
 
@@ -223,8 +235,7 @@ launcher's to answer.
 | the same under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_c22_acf_first_min_cpu.py`) | **31 passed** |
 | `python docs/measure_c22_acf_first_min_cpu.py A B C D G` — re-measured under the disabled dispatch | every figure in §A, §B, §C, §D, §G identical, digit for digit, to the default-dispatch run |
 | `python docs/measure_c22_acf_first_min_cpu.py P` — the GPL-3.0 black box re-measured under the disabled dispatch | 0 of 8,400 disagree, identical to the default-dispatch run |
-| `python -m pytest -q tests/test_c22_acf_first_min.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` | **175 passed, 7 skipped** |
-| `python -m pytest -q tests/test_gate_e_ledger.py` | **1 failed** — `test_every_indicator_that_needs_a_row_has_one` naming `['c22_acf_first_min']`, the Gate E measurement owed until the launcher's run, per this repository's `GATE_E_PENDING_OK` convention |
+| `python -m pytest -q tests/test_c22_acf_first_min.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` | **1,329 passed, 7 skipped** — `test_gate_e_ledger.py` now passes: the row recorded by `docs/gate_e_ledger.py record` on the launcher's run |
 
 Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
