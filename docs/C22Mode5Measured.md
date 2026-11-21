@@ -14,7 +14,7 @@ PandasTa issue **#134** (C22-MODE-5), ported 2026-11-22 on branch
 | Gate B | causal; 0 of 43 offsets leak on six frames; four mutants (write-back-dated, three cross-row chunk-wide reads) all live and caught 43/43, 43/43, 43/43 and 34/43 of 43 offsets — §B |
 | Gate C | fires on every bar with a full window on all six synthetic frames; not constant on five of six (the cosine frame is near-constant at ≈0 by construction, a clean periodic signal's own symmetric histogram); the tick-rounded penny frame (21.7% exactly-zero returns) still fires on every eligible bar — §C |
 | Gate D | ×8/×64/×2⁻⁴⁰/×2⁴⁰ bit-identical; worst |diff| 1.8e-13 under ×10/×3.7/×0.1/×1.0000001 inexact return rescale on six frames; `0 < fires < n`; not constant — §D |
-| Gate E | **pending, run by issue-solver after this session** |
+| Gate E | max \|ρ\| 0.1271 vs `Dist_to_SMA_200_pct` (manifest, n = 381,138), per-frame max median 0.1508 → **SHIP** — §E |
 | Gate F | PandasTa green (111 module tests, both dispatches; required subset below); whole suites run by issue-solver in clean worktrees — §F |
 
 Every number below was produced by `python docs/measure_c22_mode_5.py`
@@ -237,13 +237,20 @@ machine-precision noise, nowhere near the 1e-6 tolerance
 0.1 z-units; `cosine` is the one near-constant frame, by construction
 (§C).
 
-## E. Gate E — pending, run by issue-solver after this session
+## E. Gate E — attribution (run by issue-solver, recorded 2026-11-22)
 
-Not run in this session: the harness needs the private Backtesting engine
-and the 827 MB BIST cache, which this worktree does not have access to.
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails locally until the launcher's run is recorded — expected, not a
-finding, per this session's instructions.
+Run `is134-c22_mode_5-be94141e`, 89 ALTPORT-1 frames, 398,849 pooled bars,
+687 comparators (329 `compute_all` + 358 manifest), canary bit-equal
+(AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS).
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `C22MODE5_100` | 0.1271 | `Dist_to_SMA_200_pct` (manifest) | 381,138 | 0.1508 | **SHIP** |
+
+0.1271 < 0.76 (`r3-perframe-0.90` ship line). Recorded in
+`docs/gate_e_ledger.csv` (`python docs/gate_e_ledger.py record
+/home/tolga/.issue-solver/runs/20261121-234543-134/gatee/is134-c22_mode_5-be94141e
+--measured 2026-11-22`).
 
 ## F. Gate F — suites
 
@@ -254,7 +261,8 @@ finding, per this session's instructions.
 | `python docs/measure_c22_mode_5_cpu.py A B C D G` — re-measured under the disabled dispatch | every structural figure (fires, distinct-count bounds, mutant catch counts, bit-identical cells) identical to the default-dispatch run; float values agree to the same ~1e-15 noise floor, not digit-for-digit (expected: this column is several `sqrt`/reduction steps from the raw returns, unlike an integer-valued catch22 port) |
 | `python docs/measure_c22_mode_5_cpu.py P` — the GPL-3.0 black box re-measured under the disabled dispatch | identical to the default-dispatch run: 0 of 8,400 disagree beyond 1e-5, worst |diff| 2.13e-6 |
 | `python -m pytest -q tests/test_c22_mode_5.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` | **255 passed, 7 skipped** |
-| `python -m pytest -q tests/test_gate_e_ledger.py` | **1 failed** (`no Gate E ledger row for ['c22_mode_5']`) — expected and owed, not a finding; resolved by the receipt session after the launcher's Gate E run |
+| `python -m pytest -q tests/test_gate_e_ledger.py` | ran red before this receipt session (`no Gate E ledger row for ['c22_mode_5']`, expected/owed); row recorded §E |
+| `python -m pytest -q tests/test_c22_mode_5.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` (receipt session, after §E) | **1425 passed, 7 skipped** |
 
 Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
