@@ -14,8 +14,8 @@ PandasTa issue **#141** (C22-LOW-FREQ-POWER), ported 2026-11-22 on branch
 | Gate B | causal; 0 of 43 offsets leak on six frames; all four mutants caught on 43 of 43 offsets each — §B |
 | Gate C | fires on every bar with a full window (1,400 / 1,500) on all six frames; 1,400 distinct values on every stochastic frame; `penny` (21.68% zero returns) fires everywhere — §C |
 | Gate D | ×8/×64 bit-identical on 12/12 cells; ×10/×3.7 price and ×10/×3.7 return rescales move 0 bars with matching NaN masks (one cell aside, a test-series artifact: §D2); `0 < fires < n` — §D |
-| Gate E | **pending, run by issue-solver after this session** |
-| Gate F | targeted PandasTa run green (1,491 passed, 7 skipped, Gate E owed skip among them); full suites run by issue-solver |
+| Gate E | max \|ρ\| 0.2764 vs `mad_pct` (manifest, n = 389,949); per-frame max median 0.2752, 89 frames, 0% ≥ 0.90 → **SHIP** |
+| Gate F | targeted PandasTa run green (1,500 passed, 7 skipped) after the Gate E ledger row; full suites run by issue-solver |
 
 Every number below was produced by `python docs/measure_c22_low_freq_power.py`
 (wall 17.6 s, peak traced memory 4.6 MB) or by `python -m pytest
@@ -201,20 +201,36 @@ receipt documents. The test module rescales `walk` instead (×10, ×3.7, ×0.1:
 
 ## E. Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.**
+Run `is141-c22_low_freq_power-0d6288de`, `gate_e_overlap.py run --module
+pandas_ta.statistics.c22_low_freq_power`, 89 ALTPORT-1 frames, 398,849 bars,
+329 + 358 = 687 comparators, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS,
+SASA.IS).
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `C22LOWFREQPOWER_100` | 0.2764 | `mad_pct` | 389,949 | 0.2752 | **SHIP** |
+
+0 of 89 per-frame medians reach 0.90. Pooled and manifest-only max agree
+(`mad_pct` leads both); `compute_all`-only max is 0.2674 vs `BB_BWidth`. Well
+under the 0.76 ship line and close to the screen prototype's own 0.2757 vs
+the same comparator (issue #141) -- the port did not change what the column
+is close to. Ledger row recorded 2026-11-22
+(`python docs/gate_e_ledger.py record`).
 
 ## F. Gate F — suites
 
 Targeted run (`tests/test_c22_low_freq_power.py tests/test_readme_counts.py
 tests/test_altport2_ports.py tests/test_wiring_accessors.py
 tests/test_ml_companions.py tests/test_gate_e_ledger.py
-tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`):
-**1,491 passed, 7 skipped**, one failure expected and accepted --
-`test_every_indicator_that_needs_a_row_has_one` fails locally (no
-`GATE_E_PENDING_OK`), exactly as `CLAUDE.md` says it will until the
-launcher's Gate E run and the receipt record this column's ledger row.
-Re-run with `NPY_DISABLE_CPU_FEATURES=AVX512F AVX512_SKX AVX2 FMA3`
-(`docs/measure_c22_low_freq_power_cpu.py`): same result.
+tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`),
+re-run in the receipt session after the Gate E ledger row was recorded:
+**1,500 passed, 7 skipped**, no failures --
+`test_every_indicator_that_needs_a_row_has_one` now passes with the row in
+place. Prior to the ledger row the same run was 1,491 passed, 7 skipped,
+with that test failing as expected (no row yet). Re-run with
+`NPY_DISABLE_CPU_FEATURES=AVX512F AVX512_SKX AVX2 FMA3`
+(`docs/measure_c22_low_freq_power_cpu.py`): same, **1,500 passed, 7
+skipped**.
 
 Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
