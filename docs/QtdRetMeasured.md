@@ -6,7 +6,7 @@
 
 Quarter-to-date return from the quarter's first open, as a fraction. Module
 `pandas_ta/performance/qtd_ret.py`, column `QTD_RET`. Tests: `tests/test_qtd_ret.py` (24).
-Numbers: `python docs/measure_qtd_ret.py`. Environment: numpy 1.26.4; the test module and the
+Numbers: `python -m docs.measure_qtd_ret`. Environment: numpy 1.26.4; the test module and the
 CPU-restricted re-run (`python docs/measure_qtd_ret_cpu.py`, `NPY_DISABLE_CPU_FEATURES`
 `AVX512F AVX512_SKX AVX2 FMA3`) both pass. Measured 2026-11-22.
 
@@ -26,6 +26,27 @@ rather than a `period=` parameter on `mtd_ret` — the two share no code, mirror
 existing `mtd_ret`/(no `ytd_ret` shipped) split rather than adding a branch to a shipped,
 measured module.
 
+## Gate E — measured: DISCLOSE
+
+Run `is205-qtd_ret-ddf9146b` (`gate_e_overlap.py run --module pandas_ta.performance.qtd_ret`),
+default parameters (`QTD_RET`), 89 ALTPORT-1 BIST frames, 398,849 pooled bars, 329 + 358 = 687
+comparators (compute_all + manifest), canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS.
+Recorded in `docs/gate_e_ledger.csv`, measured 2026-11-22.
+
+- Pooled max |ρ| **0.7975080912149055** vs `Dist_to_SMA_50_pct` (manifest), n = 394,488.
+- Top-5 per-frame max median |ρ| **0.802193974881588**, over 89 frames; 0.0% of frames
+  at or above 0.90.
+- Reachability (same run): 398,849 of 398,849 pooled bars non-NaN, 393,683 non-zero (fires),
+  0 degenerate frames.
+
+**Band.** 0.76 ≤ 0.7975 < 0.80 is the DISCLOSE band (CLAUDE.md's Gate E row, `r3-perframe-0.90`
+ladder): ships with the comparator named here and no waiver. The per-frame median 0.8022 is
+above 0.80, but the ladder's per-frame limb only acts at 0.90 (STRUCK); it does not move the
+band, only the disclosure.
+
+`mtd_ret`'s own run (DISCLOSE, 0.7997 vs `bias`) was the closest prior guess and landed close:
+both land in DISCLOSE against a moving-average-shaped comparator, not identical numbers.
+
 ## Gates
 
 | Gate | Result | Evidence |
@@ -34,8 +55,8 @@ measured module.
 | B Causality | pass | Rewriting all bars from `j` onward, all 899 offsets: real module **0 of 899** leak. Two mutants, `exec`'d in memory, each differing from the real module. `s.iloc[0]` -> `s.iloc[-1]` (each quarter anchored on its last open) leaks at **886 of 899**; the other 13 offsets are quarters' first bars, where no partial quarter sits behind the cut. `s.iloc[0]` -> `s.iloc[min(1, len(s) - 1)]` (anchored one bar late) leaks at **14 of 899**, exactly the quarters' second bars, which is why the sweep takes every offset. Unsorted frames are refused, not swept: see below |
 | C Reachability | synthetic + real (Gate E run) | 900-bar business-day walk (seed 17), 14 calendar quarters: 900 of 900 non-NaN, 438 above the quarter's first open, 462 below, 900 distinct values, range [−0.218220, 0.332203], median −0.003209. Real data (Gate E run `is205-qtd_ret-ddf9146b`, 89 BIST frames, 398,849 pooled bars): 398,849 of 398,849 non-NaN, 393,683 non-zero (fires), 0 degenerate frames |
 | D Scale-free | pass | x8/x64 bit-identical, max\|diff\| 0.0. x10/x3.7 max\|diff\| 2.22e-16 against a 1e-9 tolerance. Run on the same frame with Q2 2022's first open blanked (65 of 900 bars NaN, Q2 2022's business-day count), so the masks have something to match; they match at all four. `0 < 438 < 900` on the unblanked frame. All of the above reproduces identically under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` |
-| E Attribution | **DISCLOSE** | Run `is205-qtd_ret-ddf9146b` (`gate_e_overlap.py run --module pandas_ta.performance.qtd_ret`, 89 ALTPORT-1 frames, 398,849 pooled bars, 329 + 358 = 687 comparators, canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS). `QTD_RET` max \|ρ\| **0.7975** vs `Dist_to_SMA_50_pct` (manifest, n = 394,488); per-frame max median **0.8022** (0.0% of 89 frames ≥ 0.90). 0.76 ≤ 0.7975 < 0.80 is the DISCLOSE band (CLAUDE.md's Gate E row): ship, disclosed, no waiver owed. `mtd_ret`'s own run (DISCLOSE, 0.7997 vs `bias`) was the closest prior guess and landed close: both land in DISCLOSE against a moving-average-shaped comparator, not identical numbers. Recorded in `docs/gate_e_ledger.csv` (measured 2026-11-22) |
-| F Suites | this repo, listed subset only | `python -m pytest -q tests/test_qtd_ret.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`: **1 failed, 1354 passed, 7 skipped**. The one failure is `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, expected until the launcher's Gate E run and a receipt session record this port's ledger row. Whole suites: run by issue-solver in clean worktrees (see the PR body) |
+| E Attribution | **DISCLOSE**, see "Gate E" above | 0.7975 vs `Dist_to_SMA_50_pct`, n = 394,488; per-frame max median 0.8022 |
+| F Suites | this repo, listed subset only | `python -m pytest -q tests/test_qtd_ret.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`: **1363 passed, 7 skipped**; `test_every_indicator_that_needs_a_row_has_one` green now that `docs/gate_e_ledger.csv` carries the `is205-qtd_ret-ddf9146b` row (1362 before this review round added `test_the_receipt_carries_the_measured_gate_e_numbers_and_not_the_pending_clause`). Whole suites: run by issue-solver in clean worktrees (see the PR body) |
 
 ## Choices a reader should check
 

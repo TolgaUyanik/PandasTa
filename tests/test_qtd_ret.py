@@ -3,14 +3,14 @@
 the quarter's first open. Issue #205; source is tier-4 Reddit crowd talk
 (module docstring), the same thread as `mtd_ret` (issue #206,
 `docs/MtdRetMeasured.md`) with the anchoring period changed from calendar
-month to calendar quarter. Numbers: `docs/QtdRetMeasured.md`. Gate E: pending,
-run by issue-solver after this session.
+month to calendar quarter. Numbers: `docs/QtdRetMeasured.md`. Gate E: DISCLOSE, 0.7975
+vs `Dist_to_SMA_50_pct` (`docs/gate_e_ledger.csv`).
 
 What these pin, in order of how much it would hurt to lose (mirrors
 `tests/test_mtd_ret.py`, with "month" replaced by "quarter" throughout; every
 leak/offset count below is computed in-test from the fixture, not typed by
 hand, so it cannot drift from the code it is checking; the numbers in this
-docstring are `python docs/measure_qtd_ret.py`'s output on the same fixture,
+docstring are `python -m docs.measure_qtd_ret`'s output on the same fixture,
 quoted for a reader, not re-derived by the assertions):
 
 * CAUSALITY: rewrite every bar from `j` onward, bars `[0:j]` bit-identical, at
@@ -35,6 +35,7 @@ quoted for a reader, not re-derived by the assertions):
 """
 import importlib
 import types
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -42,6 +43,8 @@ import pytest
 
 from .context import pandas_ta as ta
 from pandas_ta.performance.qtd_ret import qtd_ret
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _frame(n=900, seed=17, sigma=0.015):
@@ -274,3 +277,21 @@ def test_name_registration_and_accessor():
     out = df.ta.qtd_ret()
     assert out.name == "QTD_RET"
     pd.testing.assert_series_equal(out, qtd_ret(open_, close), check_freq=False)
+
+
+# ------------------------------------------------------- Gate E, measured
+
+
+def test_the_receipt_carries_the_measured_gate_e_numbers_and_not_the_pending_clause():
+    """The ledger row `is205-qtd_ret-ddf9146b` landed in docs/gate_e_ledger.csv on 2026-11-22,
+    so the receipt has to carry the measured DISCLOSE numbers rather than the "pending" line
+    it shipped with before that row existed -- the exact drift a prior review round graded
+    MAJOR (stale "Gate E pending" beside a recorded ledger row)."""
+    text = (ROOT / "docs" / "QtdRetMeasured.md").read_text(encoding="utf-8")
+    assert "DISCLOSE" in text
+    assert "0.7975080912149055" in text  # pooled max, vs Dist_to_SMA_50_pct
+    assert "0.802193974881588" in text  # per-frame max median
+    assert "Dist_to_SMA_50_pct" in text
+    assert "is205-qtd_ret-ddf9146b" in text
+    assert "Gate E: pending, run by issue-solver" not in text
+    assert "Gate E pending, run by issue-solver" not in text

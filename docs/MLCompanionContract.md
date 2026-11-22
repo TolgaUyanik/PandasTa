@@ -24,7 +24,7 @@ mechanical rather than a fresh decision each time.
 
 `docs/IndicatorDictionary.md` already classifies every shipped column by its observed ML form.
 
-Measured on the live package (parsed from the dictionary, 714 tagged columns): **137 `PX`** (price-level), **349 `SF`** (scale-free), **104 `BIN`** (binary), 58 `ORD`, 43 `CONST`, 2 `PX2`, 21 `??`. (713 -> 714 / 348 -> 349 `SF` on issue #205's `qtd_ret` port (performance): `QTD_RET` -- the return from the open of the quarter's first bar to this bar's close, as a fraction. `SF` because close divided by an anchor open is dimensionless and scale-invariant by construction, same shape as `mtd_ret`'s `MTD_RET`. Gate E pending, run by issue-solver after this session; see docs/QtdRetMeasured.md.) (712 -> 713 / 347 -> 348 `SF` on issue #137's `c22_forecast_error`
+Measured on the live package (parsed from the dictionary, 714 tagged columns): **137 `PX`** (price-level), **349 `SF`** (scale-free), **104 `BIN`** (binary), 58 `ORD`, 43 `CONST`, 2 `PX2`, 21 `??`. (713 -> 714 / 348 -> 349 `SF` on issue #205's `qtd_ret` port (performance): `QTD_RET` -- the return from the open of the quarter's first bar to this bar's close, as a fraction. `SF` because close divided by an anchor open is dimensionless and scale-invariant by construction, same shape as `mtd_ret`'s `MTD_RET`. Gate E DISCLOSE, 0.7975 vs `Dist_to_SMA_50_pct`, ships disclosed; see docs/QtdRetMeasured.md.) (712 -> 713 / 347 -> 348 `SF` on issue #137's `c22_forecast_error`
 port (statistics): `C22FORECASTERROR_100`, catch22's
 `FC_LocalSimple_mean3_stde` -- the standard deviation of the residuals of a
 trailing 3-point mean forecast on the z-scored last 100 daily returns. `SF`
