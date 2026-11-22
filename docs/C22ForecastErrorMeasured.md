@@ -17,11 +17,12 @@ PandasTa issue **#137** (C22-FORECAST-ERROR), ported 2026-11-22 on branch
 | Gate E | SHIP — max \|ρ\| 0.1832 vs `mad_pct`, n = 389,949, per-frame max median 0.1959 — §E |
 | Gate F | PandasTa green (105 module tests, both dispatches; required subset below); whole suites run by issue-solver in clean worktrees — §F |
 
-Every number below was produced by `python docs/measure_c22_forecast_error.py`,
-by `docs/measure_c22_forecast_error_cpu.py` for the CI CPU-dispatch row, or by
-`python -m pytest tests/test_c22_forecast_error.py` for §B3, §B4, the ×2⁻⁴⁰/×2⁴⁰
-cells of §D1 and §H, on this machine (numpy 1.26.4, pandas 2.3.3, Python 3.11,
-pycatch22 1.0.2 installed in this worktree).
+Every number below was produced by `python docs/measure_c22_forecast_error.py`
+(§D1's ×2⁻⁴⁰/×2⁴⁰ cells included — `section_d` measures all four rescale
+factors itself), by `docs/measure_c22_forecast_error_cpu.py` for the CI
+CPU-dispatch row, or by `python -m pytest tests/test_c22_forecast_error.py`
+for §B3, §B4, and §H, on this machine (numpy 1.26.4, pandas 2.3.3, Python
+3.11, pycatch22 1.0.2 installed in this worktree).
 
 ---
 
@@ -66,8 +67,8 @@ that guard is not vacuous.
 The one place the reference is run at all is
 `docs/measure_c22_forecast_error.py` section **P** (opt-in; a bare run skips
 it and does not import it) — MEASUREMENT only, the same use the owner's own
-screen prototype makes of it. The result is in §P: **0 of 8,400 sampled
-windows disagree beyond 1e-9**, worst absolute difference 1.1e-15 — the
+screen prototype makes of it. The result is in §P: **0 of 8,400 windows
+(every window of six frames) disagree beyond 1e-9**, worst absolute difference 1.1e-15 — the
 cleanest agreement any catch22 port in this fork has measured against the
 reference, with no residual gap left to root-cause.
 
@@ -172,6 +173,12 @@ test_the_overflow_guard_is_load_bearing_on_a_designed_adversarial_window`.
 | cosine (period 20) | 1,400 | 199 | 0.6001 .. 0.6170 | 0.6086 |
 | student-t | 1,400 | 1,400 | 0.6027 .. 1.2433 | 1.1585 |
 
+Re-measured 2026-11-22 (`python docs/measure_c22_forecast_error.py C`): `walk` and
+`student-t` genuinely share the same 1.2433 maximum to four decimals, confirmed by
+independent re-run, not a copy-paste artefact — the two frames' medians (1.1556 vs
+1.1585) and minima (1.0284 vs 0.6027) differ, so this is one coincident cell, not a
+whole-row duplication.
+
 Every bar with a full window fires on all six frames. All six stochastic/
 walk-like frames read CLOSE TO 1 (median 0.94 to 1.16) — "a 3-bar mean
 forecast cannot do much better than the window's own scale" is the "nothing
@@ -221,7 +228,10 @@ machine-precision noise, nowhere near the 1e-6 tolerance
 
 ### D3. `0 < fires < n`, and not constant
 
-`0 < 1,400 < 1,500` on the walk frame. Five of six frames (all but `cosine`)
+`0 < 1,400 < 1,500` on the `ar1` frame (§D of the harness, which measures this
+cell); the `walk` frame's own `0 < fires < n` bound is confirmed separately by
+`tests/test_c22_forecast_error.py::test_zero_lt_fires_lt_n_at_the_default_length`
+(bound only, no count printed there). Five of six frames (all but `cosine`)
 have at least 20 distinct rounded values and a range wider than 0.01
 z-units; `cosine` is near-constant by construction (§C).
 
@@ -338,7 +348,7 @@ far outside any plausible float-noise band, so this is not a close-call fit.
 Unlike this fork's other catch22 ports (`c22_mode_10`/`c22_mode_5`: a
 float32-vs-float64 boundary flip on a repeated-value frame; `c22_periodicity`:
 an unresolved biased-divisor gap), there is NO residual disagreement to
-root-cause here: every one of 8,400 sampled windows across six frames,
+root-cause here: every one of 8,400 windows (every window across six frames),
 including the tick-rounded `penny` frame the issue specifically worried
 about, agrees with the GPL-3.0 reference to machine-precision float noise
 (worst 1.1e-15). Re-run under

@@ -13,10 +13,10 @@ would hurt to lose:
    the GPL-3.0 reference (`pycatch22`) as a BLACK BOX, not read from its
    source -- `ddof=1` on BOTH is the only one of six candidates tried that
    reproduces `pycatch22.catch22_all(...)["FC_LocalSimple_mean3_stde"]`.
-   On the SHIPPED candidate's own full sweep, 8,400 of 8,400 sampled windows
-   agree (worst gap 1.1e-15); on the six-candidate fit itself (a smaller,
-   separate sample, every 23rd window of six frames, 366 windows total),
-   every other candidate disagrees on all 366 of them.
+   On the SHIPPED candidate's own full sweep, 8,400 of 8,400 windows (every
+   window of six frames) agree (worst gap 1.1e-15); on the six-candidate fit
+   itself (a smaller, separate sample, every 23rd window of six frames, 366
+   windows total), every other candidate disagrees on all 366 of them.
 2. **Causality.** A future-perturbation sweep and read-off-disk mutants,
    including two that mix data ACROSS rows of the same evaluation chunk --
    a leak this module's chunking could introduce if a per-row mean or sd
@@ -36,7 +36,7 @@ would hurt to lose:
    else.
 
 **Against the actual GPL-3.0 reference** (`pycatch22`, measured not
-assumed): 0 of 8,400 sampled windows across six synthetic frames disagree
+assumed): 0 of 8,400 windows (every window across six synthetic frames) disagree
 by more than 1e-9 (worst gap 1.1e-15, machine noise) -- the cleanest
 black-box fit of this fork's catch22 ports to date.
 
