@@ -14,7 +14,7 @@ PandasTa issue **#138** (C22-MEDIAN-FREQ), ported 2026-11-22 on branch
 | Gate B | causal; 0 of 43 offsets leak on six frames; four mutants caught on 14, 14, 40 and 43 of 43 offsets — §B |
 | Gate C | fires on every bar with a full window (1,400 / 1,500) on all six frames; 15–24 distinct values on the five stochastic frames; `penny` (21.68% zero returns) fires everywhere with 19 distinct values — §C |
 | Gate D | ×8/×64 bit-identical on 12/12 cells; ×10/×3.7 price and ×10/×3.7 return rescales move 0 bars with matching NaN masks (one cell aside, a test-series artifact: §D2); `0 < fires < n` — §D |
-| Gate E | **owed**: not run here, no ledger row — §E |
+| Gate E | **SHIP**: max \|ρ\| 0.2169 vs `Swing_Range_pct` (manifest, n = 389,949), per-frame max median 0.2158; ledger row `pr369-c22_median_freq` — §E |
 | Gate F | targeted PandasTa run green (1,385 passed, 8 skipped, Gate E owed skip among them); full suites run by issue-solver — §F |
 
 Every number below was produced by `python docs/measure_c22_median_freq.py`
@@ -179,9 +179,18 @@ bar is then correctly bad data. The test module rescales `walk` (×10, ×3.7,
 
 ## E. Gate E — attribution
 
-**Owed.** Not runnable here (private engine, BIST cache); no row in
-`docs/gate_e_ledger.csv`. `tests/test_gate_e_ledger.py` reports it as the
-"Gate E owed" skip under `GATE_E_PENDING_OK=1`.
+**SHIP** (measured 2026-11-22 by the owner, after this branch was merged
+with `dev`; row `pr369-c22_median_freq` in `docs/gate_e_ledger.csv`).
+`gate_e_overlap.py run --module pandas_ta.statistics.c22_median_freq` over
+the 89 BIST frames, 687 comparators, canary bit-equal:
+
+| column | max \|ρ\| | against | set | n | per-frame max median | verdict |
+|---|---|---|---|---|---|---|
+| `C22MEDFREQ_100` | 0.2169 | `Swing_Range_pct` | manifest | 389,949 | 0.2158 | SHIP |
+
+Against `compute_all` the top is 0.2023 vs `BB_BWidth`. 0.2169 is far under
+the 0.76 ship line; it equals the issue's prototype figure (0.2169 vs
+`Swing_Range_pct`), as expected for a port that matches the reference.
 
 ### E1. Advance warning on synthetic frames — NOT Gate E
 
