@@ -1,7 +1,7 @@
 # vpci — measured (issue #264)
 
-> **Status: Gates A–D cleared, wired, tests green. Gate E pending — owed, run by
-> issue-solver after this session; no ledger row is recorded yet.** Gate F: the targeted guard
+> **Status: Gates A–E cleared, wired, tests green. Gate E measured 2026-11-22 by the
+> owner: SHIP, max |ρ| 0.4672 vs `PVT_Slope_norm`; ledger row `pr348-vpci`.** Gate F: the targeted guard
 > run below is green; the full suite and the parent repo are the launcher's run, not this
 > session's.
 
@@ -39,7 +39,7 @@ No interpretation choice is left open by the formula.
 | B Causality | pass | Future-perturbation: close (tick-rounded) and volume rewritten from bar `j` onward, 35 offsets `range(100, 1500, 40)`. The real module leaks at **0 of 35**. Mutant (`importlib` source read, `exec`'d in memory, final write `.shift(-1)`, a 1-bar look-ahead) leaks at **35 of 35**. The test file repeats this on 900 bars over `range(40, 900, 25)` |
 | C Reachability | pass on synthetic data. Real data waits for Gate E | 1,500-bar frame (seed 11, close rounded to 0.01, volume `uniform(1e4, 1e6)` rounded to 100): **1,481 of 1,500** bars non-NaN (98.73%), exactly `n - 19`. First valid bar 19, **1,481 distinct values**, **729 positive / 752 negative / 0 exact zero**, range `[-0.0166045, 0.0136826]`, median `-6.00157e-05`. The 900-bar frame of `::test_fires_and_is_not_constant` fires on 881 = 900 − 19 bars |
 | D Scale-free | pass | Close ×k scales `VWMA` and `SMA` together, so `VPC` and `VPR` stay the same and `VM` never reads close. Volume ×k cancels inside each `VWMA` and inside `VM`. Measured: close, volume and both at **×8 / ×64 are bit-identical** (`max\|diff\| = 0`), NaN masks equal. At ×10 / ×3.7 the max `\|diff\|` is 5.71e-16 / 6.13e-16 (close), 3.42e-16 / 3.42e-16 (volume), 5.55e-16 / 6.91e-16 (both), NaN masks equal. `0 < 1,481 < 1,500` fires |
-| E Attribution | **pending**: owed, run by issue-solver | none yet. See the synthetic non-redundancy section below, which is not Gate E |
+| E Attribution | **SHIP**, measured 2026-11-22 by the owner | max \|ρ\| **0.4672** vs the manifest's `PVT_Slope_norm` over n = 396,825; top-five per-frame max median 0.4517. See Gate E below |
 | F Suites | targeted run green | see **Suite run** |
 
 ## Zero volume and exact ties
@@ -74,6 +74,20 @@ script outside the repo, so its number is quoted, not reproduced here.
 `(VWMA_20 - SMA_20) / SMA_20`. The package ships no such column (`vwma` is price-level `PX`).
 If the engine's `compute_all` or the `ml_features` manifest has a VWMA-distance column, Gate E
 may come out DISCLOSE_GAP or STRUCK. That is the launcher's measurement to make.
+(Measured 2026-11-22: it did not. No VWMA-distance column came near; see Gate E below.)
+
+## Gate E — attribution: SHIP
+
+Measured 2026-11-22 by the owner with `scripts/analysis/gate_e_overlap.py run --module
+pandas_ta.volume.vpci --name pr348-vpci` on the S&P 500 daily cache, after `dev` was merged
+into this branch. Ledger row `pr348-vpci` in `docs/gate_e_ledger.csv`.
+
+| column | max \|ρ\| | against | set | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|---|
+| `VPCI_5_20` | 0.4672 | `PVT_Slope_norm` | manifest | 396,825 | 0.4517 | SHIP |
+
+The next four: `efi_norm` 0.4307, `PVT_Slope_norm_Pctl` 0.3771, `efi_norm_Pctl` 0.3630,
+`Dist_to_ATR_Lower_pct` 0.3620. All are below the 0.76 DISCLOSE band.
 
 ## Wiring
 
