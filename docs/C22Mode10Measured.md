@@ -14,7 +14,7 @@ PandasTa issue **#136** (C22-MODE-10), ported 2026-11-22 on branch
 | Gate B | causal; 0 of 43 offsets leak on six frames; four mutants (write-back-dated, three cross-row chunk-wide reads) all live and caught 43/43, 43/43, 43/43 and 34/43 of 43 offsets — §B |
 | Gate C | fires on every bar with a full window on all six synthetic frames; not constant on five of six (the cosine frame is near-constant at ≈0 by construction, a clean periodic signal's own symmetric histogram); the tick-rounded penny frame (21.68% exactly-zero returns) still fires on every eligible bar — §C |
 | Gate D | ×8/×64/×2⁻⁴⁰/×2⁴⁰ bit-identical (24/24 cells, including on `penny`); worst |diff| 1.8e-13 under ×10/×3.7/×0.1/×1.0000001 inexact return rescale on the `walk` frame; `0 < fires < n`; not constant — §D |
-| Gate E | pending, run by issue-solver after this session — §E |
+| Gate E | max \|ρ\| 0.1829 vs `Dist_to_SMA_200_pct` (n=381,138), per-frame max median 0.1995 — **SHIP** — §E |
 | Gate F | PandasTa green (111 module tests, both dispatches; required subset below); whole suites run by issue-solver in clean worktrees — §F |
 
 Every number below was produced by `python docs/measure_c22_mode_10.py`, by
@@ -258,11 +258,18 @@ the same frame choice `c22_mode_5`'s D2 uses.
 
 ## E. Gate E — attribution
 
-**pending, run by issue-solver after this session.** This port cannot run
-the private Backtesting engine or the 827 MB BIST cache from inside this
-worktree; `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails here for exactly that reason, and a later receipt session records the
-measured row once the launcher's run lands.
+Run by the issue-solver launcher, 2026-11-22, module `pandas_ta.statistics.c22_mode_10`,
+89 ALTPORT-1 BIST frames, 398,849 pooled bars, 329 + 358 = 687 comparators,
+canary bit-equal on AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS
+(run `is136-c22_mode_10-5136c289`):
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `C22MODE10_100` | 0.1829 | `Dist_to_SMA_200_pct` (manifest, n=381,138) | 381,138 | 0.1995 (vs `dist_low_252`) | **SHIP** |
+
+Both the pooled max and the per-frame max median are well under the 0.76
+ship line (`r3-perframe-0.90` bands, CLAUDE.md Gate E row): recorded in
+`docs/gate_e_ledger.csv` as `is136-c22_mode_10-5136c289`, 2026-11-22.
 
 ## F. Gate F — suites
 
@@ -272,8 +279,7 @@ measured row once the launcher's run lands.
 | the same under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_c22_mode_10_cpu.py`) | **111 passed** |
 | `python docs/measure_c22_mode_10_cpu.py A B C D G` — re-measured under the disabled dispatch | every structural figure (fires, distinct-count bounds, mutant catch counts, bit-identical cells, designed-tie bin set) identical to the default-dispatch run; float values agree to the same ~1e-15 noise floor, not digit-for-digit (expected: this column is several `sqrt`/reduction steps from the raw returns, unlike an integer-valued catch22 port) |
 | `python docs/measure_c22_mode_10_cpu.py P` — the GPL-3.0 black box re-measured under the disabled dispatch | identical to the default-dispatch run: 39 of 8,400 disagree beyond 1e-5, worst |diff| 0.53, same root cause |
-| `python -m pytest -q tests/test_c22_mode_10.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` | **1,425 passed, 7 skipped** |
-| `python -m pytest -q tests/test_gate_e_ledger.py` | **1 failed** (`test_every_indicator_that_needs_a_row_has_one`) — expected and owed, per the rules above; no ledger row exists yet |
+| `python -m pytest -q tests/test_c22_mode_10.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` | **1,433 passed, 7 skipped** (Gate E ledger row recorded 2026-11-22, run `is136-c22_mode_10-5136c289`; `test_every_indicator_that_needs_a_row_has_one` now passes) |
 
 Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
