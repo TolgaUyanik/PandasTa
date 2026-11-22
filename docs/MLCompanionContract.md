@@ -24,7 +24,7 @@ mechanical rather than a fresh decision each time.
 
 `docs/IndicatorDictionary.md` already classifies every shipped column by its observed ML form.
 
-Measured on the live package (parsed from the dictionary, 713 tagged columns): **137 `PX`** (price-level), **348 `SF`** (scale-free), **104 `BIN`** (binary), 58 `ORD`, 43 `CONST`, 2 `PX2`, 21 `??`. (712 -> 713 / 347 -> 348 `SF` on issue #137's `c22_forecast_error`
+Measured on the live package (parsed from the dictionary, 714 tagged columns): **137 `PX`** (price-level), **349 `SF`** (scale-free), **104 `BIN`** (binary), 58 `ORD`, 43 `CONST`, 2 `PX2`, 21 `??`. (713 -> 714 / 348 -> 349 `SF` on issue #138's `c22_median_freq` port (statistics): `C22MEDFREQ_100`, hctsa's `SP_Summaries_fft_wq_50` -- the angular frequency below which half the FFT power of the z-scored last 100 daily returns lies. `SF` because the output is a frequency, and a positive rescale of the returns scales every bin's power alike.) (712 -> 713 / 347 -> 348 `SF` on issue #137's `c22_forecast_error`
 port (statistics): `C22FORECASTERROR_100`, catch22's
 `FC_LocalSimple_mean3_stde` -- the standard deviation of the residuals of a
 trailing 3-point mean forecast on the z-scored last 100 daily returns. `SF`
