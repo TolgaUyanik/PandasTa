@@ -14,7 +14,7 @@ PandasTa issue **#137** (C22-FORECAST-ERROR), ported 2026-11-22 on branch
 | Gate B | causal; 0 of 43 offsets leak on six frames; six look-ahead mutants (write-back-dated, window-one/ten-ahead, returns-rolled, two cross-row chunk-wide reads) all live and caught 43/43 of 43 offsets each; the mask-back-dated mutant is dead on a clean frame and caught 12/12 on a dirty one; the overflow guard is inert on all six synthetic frames and LOAD-BEARING on a designed adversarial window (unlike `c22_mode_10`'s equivalent guard, this module has no separate check to fall back on) — §B |
 | Gate C | fires on every bar with a full window on all six synthetic frames; not constant on five of six (the cosine frame is near-constant by construction, a clean periodic signal's own 3-point forecast tracks it closely every window); the tick-rounded penny frame (21.68% exactly-zero returns) still fires on every eligible bar — §C |
 | Gate D | ×8/×64/×2⁻⁴⁰/×2⁴⁰ bit-identical (24/24 cells, including on `penny`); worst |diff| 9.1e-15 under ×10/×3.7/×0.1/×1.0000001 inexact return rescale on the `walk` frame; `0 < fires < n`; not constant — §D |
-| Gate E | pending, run by issue-solver after this session |
+| Gate E | SHIP — max \|ρ\| 0.1832 vs `mad_pct`, n = 389,949, per-frame max median 0.1959 — §E |
 | Gate F | PandasTa green (105 module tests, both dispatches; required subset below); whole suites run by issue-solver in clean worktrees — §F |
 
 Every number below was produced by `python docs/measure_c22_forecast_error.py`,
@@ -227,7 +227,18 @@ z-units; `cosine` is near-constant by construction (§C).
 
 ## E. Gate E — attribution
 
-Pending, run by issue-solver after this session.
+Run `is137-c22_forecast_error-b3f2ffe8`, 89 frozen ALTPORT-1 BIST frames,
+398,849 pooled bars, 329 + 358 = 687 comparators, canary bit-equal
+(AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS), `pandas_ta_src_sha1`
+`f92ae67d7c331c09388e0b5bb01a6160ebb8d1fc`.
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | per-frame against | verdict |
+|---|---|---|---|---|---|---|
+| `C22FORECASTERROR_100` | 0.1832 | `mad_pct` | 389,949 | 0.1959 | `BB_BWidth` | **SHIP** |
+
+0.1832 is well under the 0.76 ship line (`r3-perframe-0.90` band); 0 of 89
+per-frame windows read ≥ 0.90 against any comparator. Recorded in
+`docs/gate_e_ledger.csv` as `c22_forecast_error:C22FORECASTERROR_100`.
 
 ## F. Gate F — suites
 
@@ -237,7 +248,7 @@ Pending, run by issue-solver after this session.
 | the same under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_c22_forecast_error_cpu.py`) | **105 passed** |
 | `python docs/measure_c22_forecast_error_cpu.py A B C D G` — re-measured under the disabled dispatch | every structural figure (fires, distinct-count bounds, mutant catch counts, bit-identical cells) identical to the default-dispatch run; float values agree to the same ~1e-15 noise floor, not digit-for-digit |
 | `python docs/measure_c22_forecast_error_cpu.py P` — the GPL-3.0 black box re-measured under the disabled dispatch | identical to the default-dispatch run: 0 of 8,400 disagree beyond 1e-9, worst |diff| 1.1e-15 |
-| `python -m pytest -q tests/test_c22_forecast_error.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` | **1,427 passed, 7 skipped, 1 failed** (`test_every_indicator_that_needs_a_row_has_one` — Gate E owed, expected until the ledger row is recorded) |
+| `python -m pytest -q tests/test_c22_forecast_error.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` | **1,435 passed, 7 skipped** — the Gate E ledger row is now recorded, so `test_every_indicator_that_needs_a_row_has_one` is green |
 
 Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
