@@ -23,8 +23,8 @@ is the only place they may come from.
 
 Measured 2026-11-18 on this machine: pandas 2.3.3, numpy 1.26.4, Python 3.11.
 
-⚠ **Every count here is SYNTHETIC.** Gate E and Gate C's real-data limb are
-**owed** (see Gate E below).
+⚠ **Every count here is SYNTHETIC except Gate E**, measured 2026-11-22 by the
+owner on BIST (DISCLOSE, see Gate E below; that run is also Gate C's real-data limb).
 
 ## The frames
 
@@ -153,12 +153,22 @@ for bit. On `walk`, adding 1 / 50 / 1e6 keeps the masks identical and moves the
 values by 3.837e-13 / 1.307e-12 / 6.354e-09 points.
 `0 < fires < n` holds on the seven firing frames (1,487 of 1,500).
 
-## Gate E — attribution: OWED
+## Gate E — attribution: DISCLOSE (ships disclosed)
 
-Not run here: the harness needs the private engine and the BIST cache. No row is
-recorded in `docs/gate_e_ledger.csv`. `tests/test_gate_e_ledger.py` reports it as
-"Gate E owed" on the way to `dev`, and a release into `main` fails until the
-owner records it.
+Measured 2026-11-22 by the owner on this module, after the branch was merged
+with `dev`; row `pr350-tao` in `docs/gate_e_ledger.csv`. `gate_e_overlap.py run
+--module pandas_ta.momentum.tao` over the 89 BIST frames, 687 comparators,
+canary bit-equal:
+
+| column | max \|ρ\| | against | set | n | per-frame max median | verdict |
+|---|---|---|---|---|---|---|
+| `TAO_10_5` | 0.7879 | `cfo` | compute_all | 397,675 | 0.7894 | DISCLOSE |
+
+Next comparators: `cfo_ta_Pctl` 0.7682 and `cfo_ta` 0.7653 (manifest),
+`Dist_to_hma_pct_Pctl` 0.7393. The band is DISCLOSE (0.76 ≤ ρ < 0.80,
+`CLAUDE.md` Gate E row): the column ships, with this overlap disclosed. The top
+comparator is the engine's Chande Forecast Oscillator. That fits the synthetic
+§F reading below, where `CFO_9` already reached 0.84 on `range-bound`.
 
 ### §F non-redundancy against the fork's own columns, synthetic
 
@@ -212,5 +222,5 @@ and the Backtesting suite are run by the orchestrator.
 
 ## Decision
 
-Ship through Gates A–D. Gate E is owed. If its run is STRUCK, the column is
-reverted (or waived) before the release, and this file stays as the receipt.
+Ship through Gates A–E. Gate E is DISCLOSE (0.7879 vs `cfo`), so the column
+ships with that overlap disclosed.
