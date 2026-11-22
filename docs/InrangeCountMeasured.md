@@ -21,15 +21,17 @@ form are the screen prototype's (issue #203).
 
 ## ⚠ What this port does NOT establish
 
-- **Gate E is owed.** It cannot run here; no row is added to `docs/gate_e_ledger.csv`, so
-  `tests/test_gate_e_ledger.py` reports `inrange_count` as a "Gate E owed" skip on the way to
-  `dev` and fails toward `main` until the owner records the run. The issue's prototype figures
-  (max |ρ| 0.4794 vs `CHOP`, n = 396,311; per-frame max median 0.4897; SHIP) were measured on
-  the **prototype**, not this module.
+- **Gate E: SHIP** (measured 2026-11-22 by the owner, after this branch was merged with `dev`;
+  row `pr356-inrange_count` in `docs/gate_e_ledger.csv`). `gate_e_overlap.py run --module
+  pandas_ta.volatility.inrange_count` over the 89 BIST frames, 687 comparators, canary bit-equal:
+  `INRC_20` max |ρ| **0.4794** vs `CHOP` (compute_all, n = 396,311), per-frame max median
+  0.4897; against the manifest the top is 0.4128 vs `BB_BWidth_Pctl`. Far under the 0.76 ship
+  line, and equal to the issue's prototype figures (0.4794 vs `CHOP`, per-frame 0.4897), so on
+  real data the prototype and this module agree at the reported precision.
 - **No tie to the prototype.** `docs/issues/screen/ind_screen_r9.py` is gitignored and is not on
   this machine, so Gate A has one limb (the poster's formula by loops), not two. Whether the
   prototype's warm-up, NaN handling and tie rule match this module is not known.
-- **Gate C on real data is owed** with the Gate E run. Every count below is synthetic.
+- **Gate C on real data** rests on the Gate E run above (n = 396,311 bars scored). Every other count below is synthetic.
 - **The poster's NaN behaviour is not reproduced.** In Pine `high < na` is false, so a bar with a
   missing envelope would cost 2. This port emits NaN on the first `length` bars and on a bar
   whose own high or low is bad, and holds the count there (§G). The fork's choice, stated.
