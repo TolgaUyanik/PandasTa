@@ -13,7 +13,7 @@ PandasTa issue **#136** (C22-MODE-10), ported 2026-11-22 on branch
 | Gate A | 0 of 1,200 sampled windows (six frames) disagree with the exact-rational bin-assignment oracle beyond float noise (worst 1.9e-15); the designed 4-way tie (bins 0, 2, 5, 8) matches the oracle to 1.7e-16 (test bound 1e-9); against the actual GPL-3.0 reference, `pycatch22.catch22_all`'s `DN_HistogramMode_10`, 39 of 8,400 windows — ALL on the degenerate `penny` frame — disagree beyond 1e-5 (worst 0.53), root-caused to a float64-vs-float32 boundary flip, not a convention mismatch — §A, §P, §P2 |
 | Gate B | causal; 0 of 43 offsets leak on six frames; four mutants (write-back-dated, three cross-row chunk-wide reads) all live and caught 43/43, 43/43, 43/43 and 34/43 of 43 offsets — §B |
 | Gate C | fires on every bar with a full window on all six synthetic frames; not constant on five of six (the cosine frame is near-constant at ≈0 by construction, a clean periodic signal's own symmetric histogram); the tick-rounded penny frame (21.68% exactly-zero returns) still fires on every eligible bar — §C |
-| Gate D | ×8/×64/×2⁻⁴⁰/×2⁴⁰ bit-identical (24/24 cells, including on `penny`); worst |diff| 1.8e-13 under ×10/×3.7/×0.1/×1.0000001 inexact return rescale on the `walk` frame; `0 < fires < n`; not constant — §D |
+| Gate D | ×8/×64/×2⁻⁴⁰/×2⁴⁰ bit-identical (24/24 cells, including on `penny`); worst |diff| 1.3e-13 under ×10/×3.7/×0.1/×1.0000001 inexact return rescale on the `walk` frame; `0 < fires < n`; not constant — §D |
 | Gate E | max \|ρ\| 0.1829 vs `Dist_to_SMA_200_pct` (n=381,138), per-frame max median 0.1995 — **SHIP** — §E |
 | Gate F | PandasTa green (111 module tests, both dispatches; required subset below); whole suites run by issue-solver in clean worktrees — §F |
 
@@ -45,6 +45,26 @@ position in z-units, and an affine map of the raw returns moves it by that
 same affine map. What IS invariant to z-scoring is the bin ASSIGNMENT (an
 order-and-ratio fact about the raw window), which is what lets §A's oracle
 be mostly exact (Fraction arithmetic) rather than only a tolerance check.
+
+**Erratum (review round 1) — DEFERRED, not fixed:** the module docstring's
+bin-edge-convention
+paragraph (`pandas_ta/statistics/c22_mode_10.py`, "The bin-edge convention
+matches...") cites MATLAB `histcounts`' own equal-width default alongside
+`numpy.histogram`'s. The `numpy.histogram` half is exact; the MATLAB half is
+not — `histcounts(X, nbins)` runs `binpicker`, which picks "nice" edges that
+generally do NOT start/end at `min(X)`/`max(X)`. The module's actual
+behaviour matches catch22's own `histcounts` helper (which DOES span
+`[min, max]` exactly, which is why §P1 agrees with the reference to ~6e-7 on
+8,361 of 8,400 windows), not MATLAB's automatic-`nbins` default. Left
+uncorrected in the module itself this round: editing that file after the
+launcher's Gate E run (`is136-c22_mode_10-5136c289`, §E) would move
+`module_sha1` and reopen Gate E as owed for a wording-only change. The false
+MATLAB attribution is STILL SHIPPING, uncorrected, in the docstring a reader
+hits via `help()` or the file itself; this paragraph is the deferral record,
+not the fix. The separate closed-last-bin remark in that same
+docstring (lines 72-73, "the same... convention MATLAB's `histcounts` and
+`numpy.histogram` both use") is correct about MATLAB and is not part of this
+erratum.
 
 ## 1. Attribution, and what it is NOT evidence of
 
@@ -94,9 +114,10 @@ final bin-centre average to z-units in floats:
 | student-t | 200 | 1.9e-15 |
 
 Every gap is at machine-precision noise (< 2e-15), not a real
-disagreement — this oracle check uses the SAME float64 formula as the
-shipped module, so it cannot see the boundary-sensitivity effect §A3/§P2
-measures against an INDEPENDENT (GPL-3.0) implementation.
+disagreement — this oracle check uses the SAME float64 precision as the
+shipped module (on an independently re-derived formula — `fsum` mean/
+variance, rational bin assignment), so it cannot see the boundary-sensitivity
+effect §A3/§P2 measures against an INDEPENDENT (GPL-3.0) implementation.
 
 ### A2. The designed 4-way tie
 
