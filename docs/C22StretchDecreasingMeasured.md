@@ -14,7 +14,7 @@ PandasTa issue **#140** (C22-STRETCH-DECREASING), ported 2026-11-22 on branch
 | Gate B | real module leaks 0/34 offsets (8 random splices each) on three frames; the PRIMARY proof is a single hand-engineered window where a one-bar look-ahead must read 5 instead of the correct 4 -- all four equivalent one-bar mutants caught there. The generic sweep catches those same mutants on only 1-2 of 34 offsets, because the column is tie-heavy (3-6 distinct values per frame, Gate C) -- measured and explained, not hidden — §B |
 | Gate C | fires on every bar with a full window (1,400/1,500) on four frames; 3-6 distinct values per frame; the tick-rounded `penny` frame (>10% exactly-zero returns) still fires everywhere with 4 distinct values — §C |
 | Gate D | bit-identical (`==`, not a tolerance) under ×8/×64 price rescale, under ×10/×3.7/×0.1 price rescale (not a power of two), AND under ×10/×3.7/×0.1/×2.5 rescale of the RETURNS themselves -- stronger than the usual tolerance claim, because the statistic depends only on the SIGN of each diff; `0 < fires < n` on all stochastic frames — §D |
-| Gate E | pending, run by issue-solver after this session |
+| Gate E | measured 2026-11-22: `C22STRETCHDEC_100` max \|ρ\| 0.1225 vs `ZIGZAG` (`compute_all`, n = 32,790), per-frame max median \|ρ\| 0.1749 vs `ZIGZAG` → **SHIP** (89 ALTPORT-1 frames, 398,849 bars, 329+358=687 comparators, canary bit-equal) — §E |
 | Gate F | targeted PandasTa run green: see §F below; full suites run by issue-solver in clean worktrees |
 
 Every number below was produced by
@@ -187,6 +187,22 @@ statistic reads only the SIGN of each diff and `diff(a*r) = a * diff(r)` for
 a constant `a > 0`, ANY positive rescale of the returns (not just a price
 rescale) cannot flip a sign. `0 < fires < n` holds on every stochastic
 frame (1,400 of 1,500).
+
+## E. Gate E — attribution
+
+Run `is140-c22_stretch_decreasing-a0365e3e`, issue-solver launcher, 2026-11-22;
+`gate_e_overlap.py run --module pandas_ta.statistics.c22_stretch_decreasing`,
+89 ALTPORT-1 frames, 398,849 pooled bars, 329 (`compute_all`) + 358
+(`ml_features` manifest) = 687 comparators, canary (AKBNK.IS, BIENY.IS,
+AGHOL.IS, SASA.IS) bit-equal.
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | per-frame against | verdict |
+|---|---|---|---|---|---|---|
+| `C22STRETCHDEC_100` | 0.1225 | `ZIGZAG` (`compute_all`) | 32,790 | 0.1749 | `ZIGZAG` | **SHIP** |
+
+Both the pooled max and the per-frame max median sit far under the 0.76
+SHIP line (`r3-perframe-0.90` bands, `CLAUDE.md`'s Gate E row). 0 of 82
+per-frame windows reached 0.90. The column ships as committed.
 
 ## F. Gate F — suites
 
