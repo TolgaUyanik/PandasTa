@@ -3496,6 +3496,12 @@ class AnalysisIndicators(BasePandasObject):
         result = volcv(volume=volume, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def vpci(self, short=None, long=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = vpci(close=close, volume=volume, short=short, long=long, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def vsumd(self, lengths=None, offset=None, **kwargs):
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = vsumd(volume=volume, lengths=lengths, offset=offset, **kwargs)
