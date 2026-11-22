@@ -80,6 +80,18 @@ def student_t(n=N, seed=19, df=3, sigma=0.01):
     return pd.Series(100.0 * np.cumprod(1.0 + np.clip(r, -0.5, 0.5)))
 
 
+def flat_tick(n=N, price=1e6, tick=0.001):
+    """A monotone one-tick-per-bar ladder at a price level where the return
+    span is below `ts_strike_20`'s NOISE_FLOOR (documented in
+    `pandas_ta/statistics/ts_strike_20.py`: price 1e6, 0.001 tick -> span
+    2.2e-16, below the 9.09e-13 floor). Mathematically every return is the
+    SAME constant, so the floor-guarded column reads 0; an unguarded oracle
+    reads float64 rounding noise instead -- this is where Gate A's "0
+    disagree" claim would be silent by construction if this frame were
+    absent."""
+    return pd.Series(price + tick * np.arange(n, dtype=float))
+
+
 FRAMES = {
     "walk": walk(),
     "tick-rounded": tick_rounded(),
@@ -87,6 +99,7 @@ FRAMES = {
     "ar1": ar1(),
     "cosine": cosine_returns(),
     "student-t": student_t(),
+    "flat-tick": flat_tick(),
 }
 
 
@@ -172,7 +185,11 @@ def section_R():
     print()
     print("Conclusion: section A shows 0 disagreement between an independent read of")
     print("catch22's own definition and this fork's shipped ts_strike_20(length=100)")
-    print("on every frame above -- the candidate IS that column under a new name.")
+    print("on every NON-DEGENERATE frame above -- the candidate IS that column under")
+    print("a new name there. The 'flat-tick' row above is the deliberate exception:")
+    print("it is designed to trip ts_strike_20's own NOISE_FLOOR, where the shipped")
+    print("column and the raw catch22 definition part ways on purpose -- see section A")
+    print("and the receipt's section 2 for that measured divergence.")
 
 
 # --------------------------------------------------------------- P (opt-in)
@@ -259,15 +276,63 @@ def section_D():
               f"flips vs the double-mean classification: {len(flips32)} at "
               f"index(es) {flips32.tolist()}; longest run under it: "
               f"{longest_run_at(above_32)}")
+
+        # The reference does not binarize the RAW window: it z-scores first
+        # (catch22's own preprocessing step) and then compares each sample to
+        # the MEAN OF THE Z-SCORED SERIES, a fresh naive summation whose
+        # residual is a fresh rounding error distinct from the raw window's
+        # mean. A sample sitting exactly at the raw mean becomes exactly 0 in
+        # z-space, so the sign of that residual -- not a tie-rule choice --
+        # decides whether it reads "above" under the SAME strict `>` this
+        # fork's module uses.
+        std64 = w.std(ddof=0)
+        z64 = (w - mu_np) / std64
+        z64_mean = z64.mean()
+        above_z64 = z64 > z64_mean
+        run_z64 = longest_run_at(above_z64)
+        print(f"  z-scored (float64) mean={z64_mean:.3e} "
+              f"({'negative' if z64_mean < 0 else 'nonnegative'}); "
+              f"longest run under z64 > its own mean: {run_z64}")
+
+        w32_z = w.astype(np.float32)
+        std32 = w32_z.std(dtype=np.float32, ddof=0)
+        z32 = (w32_z - w32_z.mean(dtype=np.float32)) / std32
+        z32_mean = z32.mean(dtype=np.float32)
+        above_z32 = z32 > z32_mean
+        run_z32 = longest_run_at(above_z32)
+        print(f"  z-scored (float32) mean={z32_mean:.3e} "
+              f"({'negative' if z32_mean < 0 else 'nonnegative'}); "
+              f"longest run under z32 > its own mean: {run_z32}")
+
         above_ge = w >= mu_np
         run_ge = longest_run_at(above_ge)
+        tie_count = int((w == mu_np).sum())
         print(f"  trying >= instead of > on the double mean: longest run = "
-              f"{run_ge} (vs the module's strict > = {longest_run_at(above_np)})")
-        if run_ge == 11:
-            print("  MATCH: the reference's 11 is reproduced by an INCLUSIVE (>=) "
-                  "tie rule, not by any float-precision difference. This window has "
-                  "4 of 100 samples exactly AT the mean (printed above); treating "
-                  "ties as \"above\" extends one of those runs by one sample.")
+              f"{run_ge} (vs the module's strict > = {longest_run_at(above_np)}); "
+              f"this window has {tie_count} of {len(w)} samples exactly AT the mean")
+
+        ref_value = None
+        if importlib.util.find_spec("pycatch22") is not None:
+            import pycatch22  # noqa: PLC0415  (opt-in only)
+            out = pycatch22.catch22_all(w.tolist(), short_names=True)
+            ref_value = out["values"][out["short_names"].index("stretch_high")]
+            print(f"  reference stretch_high on this exact window: {ref_value}")
+            if run_z64 == ref_value or run_z32 == ref_value:
+                print(f"  MATCH: the reference's {ref_value:g} is reproduced by the "
+                      "z-scored-mean residual (precision-driven), the SAME strict "
+                      "`>` rule this module uses -- not a tie-rule convention "
+                      "difference.")
+            elif run_ge == ref_value:
+                print(f"  MATCH: the reference's {ref_value:g} is reproduced by an "
+                      f"INCLUSIVE (>=) tie rule on the raw mean, not by the "
+                      f"z-scored-mean residual ({tie_count} of {len(w)} samples sit "
+                      "exactly at the raw mean, printed above).")
+            else:
+                print(f"  NEITHER the z-scored-mean residual ({run_z64}/{run_z32}) "
+                      f"nor an inclusive tie rule ({run_ge}) reproduces the "
+                      f"reference's {ref_value:g} on this window.")
+        else:
+            print("  pycatch22 not installed -- skipping the reference comparison.")
 
 
 SECTIONS = {"A": section_A, "Z": section_Z, "R": section_R, "P": section_P, "D": section_D}
