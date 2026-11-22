@@ -1885,6 +1885,12 @@ class AnalysisIndicators(BasePandasObject):
         result = mtd_ret(open_=open_, close=close, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def qtd_ret(self, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = qtd_ret(open_=open_, close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def percent_return(self, length=None, cumulative=False, percent=False, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = percent_return(close=close, length=length, cumulative=cumulative, percent=percent, offset=offset, **kwargs)
@@ -1909,10 +1915,56 @@ class AnalysisIndicators(BasePandasObject):
         result = arch_lm(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def c22_acf_first_min(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_acf_first_min(close=close, length=length, offset=offset,
+                                   **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_ami2(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_ami2(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def c22_ami_timescale(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = c22_ami_timescale(close=close, length=length, offset=offset,
                                    **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_dfa(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_dfa(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_entropy_pairs(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_entropy_pairs(close=close, length=length, offset=offset,
+                                   **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_forecast_error(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_forecast_error(close=close, length=length, offset=offset,
+                                    **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_median_freq(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_median_freq(close=close, length=length, offset=offset,
+                                 **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_mode_10(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_mode_10(close=close, length=length, offset=offset,
+                             **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_mode_5(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_mode_5(close=close, length=length, offset=offset,
+                            **kwargs)
         return self._post_process(result, **kwargs)
 
     def c22_periodicity(self, length=None, offset=None, **kwargs):
