@@ -1442,6 +1442,15 @@ class AnalysisIndicators(BasePandasObject):
         result = stochrsi(high=high, low=low, close=close, length=length, rsi_length=rsi_length, k=k, d=d, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def tao(self, length=None, ma_length=None, midpoint=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = tao(high=high, low=low, close=close, length=length,
+                     ma_length=ma_length, midpoint=midpoint, offset=offset,
+                     **kwargs)
+        return self._post_process(result, **kwargs)
+
     def td_seq(self, asint=None, offset=None, show_all=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = td_seq(close=close, asint=asint, offset=offset, show_all=show_all, **kwargs)
