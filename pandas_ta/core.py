@@ -1224,6 +1224,11 @@ class AnalysisIndicators(BasePandasObject):
                          **kwargs)
         return self._post_process(result, **kwargs)
 
+    def j_wae(self, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = j_wae(close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def kalman_rsi(self, length=None, process_noise=None, measurement_noise=None, initial_error=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = kalman_rsi(close=close, length=length, process_noise=process_noise, measurement_noise=measurement_noise, initial_error=initial_error, offset=offset, **kwargs)
@@ -1889,6 +1894,18 @@ class AnalysisIndicators(BasePandasObject):
         result = mtd_ret(open_=open_, close=close, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def qtd_ret(self, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = qtd_ret(open_=open_, close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def ytd_ret(self, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ytd_ret(open_=open_, close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def percent_return(self, length=None, cumulative=False, percent=False, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = percent_return(close=close, length=length, cumulative=cumulative, percent=percent, offset=offset, **kwargs)
@@ -1911,6 +1928,70 @@ class AnalysisIndicators(BasePandasObject):
     def arch_lm(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = arch_lm(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_acf_first_min(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_acf_first_min(close=close, length=length, offset=offset,
+                                   **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_ami2(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_ami2(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_ami_timescale(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_ami_timescale(close=close, length=length, offset=offset,
+                                   **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_dfa(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_dfa(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_entropy_pairs(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_entropy_pairs(close=close, length=length, offset=offset,
+                                   **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_forecast_error(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_forecast_error(close=close, length=length, offset=offset,
+                                    **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_median_freq(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_median_freq(close=close, length=length, offset=offset,
+                                 **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_mode_10(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_mode_10(close=close, length=length, offset=offset,
+                             **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_mode_5(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_mode_5(close=close, length=length, offset=offset,
+                            **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_periodicity(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_periodicity(close=close, length=length, offset=offset,
+                                 **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_stretch_decreasing(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_stretch_decreasing(close=close, length=length,
+                                        offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def cusum(self, length=None, offset=None, **kwargs):
@@ -2497,6 +2578,13 @@ class AnalysisIndicators(BasePandasObject):
         result = j_chandelier_dist(high=high, low=low, close=close, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def j_kaufmanstop_dist(self, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = j_kaufmanstop_dist(high=high, low=low, close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def j_safezone_dist(self, offset=None, **kwargs):
         low = self._get_column(kwargs.pop("low", "low"))
         close = self._get_column(kwargs.pop("close", "close"))
@@ -3068,6 +3156,13 @@ class AnalysisIndicators(BasePandasObject):
         low = self._get_column(kwargs.pop("low", "low"))
         close = self._get_column(kwargs.pop("close", "close"))
         result = rvi(high=high, low=low, close=close, length=length, scalar=scalar, refined=refined, thirds=thirds, mamode=mamode, drift=drift, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def inrange_count(self, length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        result = inrange_count(high=high, low=low, length=length,
+                               offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def sk_fcb_width(self, offset=None, **kwargs):

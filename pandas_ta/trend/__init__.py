@@ -26,6 +26,7 @@ from .head_shoulders import head_shoulders
 from .increasing import increasing
 from .inverse_fvg import inverse_fvg
 from .j_chandelier_dist import j_chandelier_dist
+from .j_kaufmanstop_dist import j_kaufmanstop_dist
 from .j_safezone_dist import j_safezone_dist
 from .liquidity_compression_box import liquidity_compression_box
 from .liquidity_sweep import liquidity_sweep
