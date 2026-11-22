@@ -38,7 +38,6 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import pandas_ta as ta  # noqa: E402,F401
 from pandas_ta.statistics.ts_strike_20 import ts_strike_20  # noqa: E402
 
 LENGTH = 100
@@ -84,11 +83,17 @@ def flat_tick(n=N, price=1e6, tick=0.001):
     """A monotone one-tick-per-bar ladder at a price level where the return
     span is below `ts_strike_20`'s NOISE_FLOOR (documented in
     `pandas_ta/statistics/ts_strike_20.py`: price 1e6, 0.001 tick -> span
-    2.2e-16, below the 9.09e-13 floor). Mathematically every return is the
-    SAME constant, so the floor-guarded column reads 0; an unguarded oracle
-    reads float64 rounding noise instead -- this is where Gate A's "0
-    disagree" claim would be silent by construction if this frame were
-    absent."""
+    2.2e-16, below the 9.09e-13 floor). The returns genuinely DECREASE (a
+    fixed tick is a shrinking fraction of a rising price), by ~1e-16 across
+    a 100-window -- below one ulp of the price ratio, so float64 quantises
+    them onto one or two values. `docs/TsStrike20Measured.md` measures this
+    EXACT price/tick pair, *The rounding-noise floor*, and calls reading 0
+    here "the floor doing its job": the unguarded reading is not a near-true
+    estimate spoiled by noise, it is noise across the whole attainable
+    scale -- confirmed below by a worst disagreement of 99, the theoretical
+    max on a length-100 window, not a small spread around a true value.
+    This is where Gate A's "0 disagree" claim would be silent by
+    construction if this frame were absent."""
     return pd.Series(price + tick * np.arange(n, dtype=float))
 
 

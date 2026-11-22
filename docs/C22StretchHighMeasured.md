@@ -9,7 +9,7 @@ nothing ships; this file is the receipt.
 |---|---|
 | candidate | catch22 (Lubba et al. 2019, *Data Min. Knowl. Disc.* 33:1821), feature `SB_BinaryStats_mean_longstretch1` — the hctsa operation `SB_BinaryStats(y, 'mean')` read-out `longstretch1`: binarize `y[i] > mean(y)` over a trailing window, report the longest run of consecutive 1s — proposed on the last 100 daily simple returns |
 | harness | `docs/measure_c22_stretch_high.py` (sections A, Z, R by default; P and D are opt-in — P is the only part of this repository that runs the reference implementation, present in this worktree, and D diagnoses P's one gap) |
-| Gate A | on six real-shaped frames, the candidate's own definition agrees with this fork's ALREADY SHIPPED `ts_strike_20(close, length=100)` on 0/8,400 windows disagreeing (§2) against an independent plain-Python oracle, and on 1,199/1,200 windows against the real GPL-3.0 `pycatch22` reference -- the one gap a float64/float32 last-bit residual in the mean of the Z-SCORED window, not a tie-rule convention difference (§4). On a SEVENTH, deliberately degenerate frame (a monotone one-tick ladder at a price level where the return span sits below `ts_strike_20`'s own `NOISE_FLOOR`), the unguarded oracle disagrees with the shipped column on 1,353/1,400 windows and the real reference disagrees with it on 193/200 sampled windows -- both exactly where the floor zeroes a rounding-noise window that the raw catch22 definition does not floor (§2) |
+| Gate A | on six real-shaped frames, the candidate's own definition agrees with this fork's ALREADY SHIPPED `ts_strike_20(close, length=100)` on 0/8,400 windows disagreeing (§2) against an independent plain-Python oracle, and on 1,199/1,200 windows against the real GPL-3.0 `pycatch22` reference -- the one gap a float64/float32 last-bit residual in the mean of the Z-SCORED window, not a tie-rule convention difference (§4). On a SEVENTH, deliberately degenerate frame (a monotone one-tick ladder at a price level where the return span sits below `ts_strike_20`'s own `NOISE_FLOOR`), the unguarded oracle disagrees with the shipped column on 1,353/1,400 windows (worst |diff| 99, the theoretical max) and the real reference disagrees with it on 193/200 sampled windows -- both exactly the price/tick pair `docs/TsStrike20Measured.md` calls "the floor doing its job," reading 0 instead of noise spanning the whole scale (§2) |
 | Non-redundant | **FAILED by inspection and by measurement.** `ts_strike_20` (PandasTa issue #90, tsfresh's `longest_strike_above_mean`) is the SAME statistic, already parameterized by `length`; `ts_strike_20(close, length=100)` / `df.ta.ts_strike_20(length=100)` already gives this column on every non-degenerate window measured, differing from the raw catch22 definition only on rounding-noise windows that the module's own `NOISE_FLOOR` deliberately zeroes (§2) |
 | Gate B/C/D | not attempted beyond §2/§3/§4 — no new module exists to test, and the formula is already covered by `ts_strike_20`'s own Gates (its receipt, `docs/TsStrike20Measured.md`) |
 | Gate E | not applicable — nothing new ships |
@@ -30,10 +30,14 @@ issue ported `ts_strike_20` from tsfresh's `longest_strike_above_mean` —
 "longest run of consecutive (r[i] > mean(r))" over a trailing window of
 simple returns — and shipped it already parameterized by `length` (default
 20, but callable at any window). `SB_BinaryStats_mean_longstretch1` reads,
-per hctsa's own published operation description: binarize a series by
-`y[i] > mean(y)` and report the longest run of consecutive 1s. These are
-the same two sentences describing the same statistic under two different
-library names (hctsa/catch22 and tsfresh), and `ts_strike_20`'s own module
+per the feature's one-line definition as given in the issue and in Lubba
+et al. 2019: binarize a series by `y[i] > mean(y)` and report the longest
+run of consecutive 1s, independently re-implemented in §A — hctsa's own
+source was not read in this worktree (not present, no web access); what
+pins the reading is §4's comparison against the live `pycatch22` package
+(1,199/1,200 exact on six real-shaped frames). These are the same
+statistic described under two different library names (hctsa/catch22 and
+tsfresh), and `ts_strike_20`'s own module
 explicitly documents this: "INVARIANT to any affine map of the returns,
 not just to the price level" (a z-score, which catch22's own pipeline
 applies before every feature, is one such affine map — see §3).
@@ -119,28 +123,45 @@ and none of these six windows are that degenerate, so the floor NEVER
 fires in them and the "0 disagree" table is silent on it by construction.
 A SEVENTH frame, `flat-tick` — a monotone one-tick-per-bar ladder at
 price 1e6 with a 0.001 tick, the same price/tick pair
-`docs/TsStrike20Measured.md` already measures as floor-triggering
-(mathematically constant returns, return span 2.2e-16, below the floor) —
-makes the divergence happen on purpose:
+`docs/TsStrike20Measured.md` already measures — makes the divergence
+happen on purpose. On this ladder the returns genuinely *decrease* (a
+fixed tick is a shrinking fraction of a rising price), by ~1e-16 across
+the window, which is below one ulp of the price ratio: float64 collapses
+them onto one or two quanta, so the measured return span reads 2.2e-16,
+under the module's 9.09e-13 floor. `docs/TsStrike20Measured.md`'s *The
+rounding-noise floor* section measures this EXACT price/tick pair (its
+"price 1e6, tick 0.001" row, span 2.220e-16) and calls it "**the floor
+doing its job**: the unguarded answer there is not 'about 10' [the
+exact-arithmetic value at its 20-length window], it is **the whole
+scale**" — i.e. at this span the unguarded reading is not a near-true
+estimate spoiled by noise, it is noise across the full attainable range,
+which is exactly what this receipt measures below:
 
 | frame | n | disagree | worst \|diff\| |
 |---|---|---|---|
 | flat-tick | 1,400 | 1,353 | 99.0 |
 
-**1,353 of 1,400 windows disagree, by up to 99.** The unguarded oracle
-reads a run length off float64 rounding noise (the formula has no floor
-to stop it); the shipped column reads the constant **0** its own
-`NOISE_FLOOR` reserves for exactly this case. This is NOT a formula gap —
-it is `ts_strike_20`'s own documented, deliberate choice
-(`docs/TsStrike20Measured.md`, *The rounding-noise floor*: "a window whose
-returns vary only at rounding level has no strike to read ... reported as
-0"). Restated precisely: the candidate's raw definition and the shipped
-column are the SAME statistic on every non-degenerate window measured
-(0/8,400), and differ ONLY on windows degenerate enough to trip the
-floor, where the shipped column's choice to read 0 rather than rounding
-noise is the reason to revert rather than against it — porting the
-unguarded definition under a new name would ship a column that reads
-float64 noise on flat-close or limit-locked BIST bars.
+**1,353 of 1,400 windows disagree, by up to 99** — the theoretical
+maximum possible on a length-100 window, confirming "the whole scale"
+rather than a near-true estimate. The unguarded oracle reads a run length
+off float64 quantisation noise on a decrease too small for float64 to
+resolve; the shipped column reads the constant **0** its own
+`NOISE_FLOOR` reserves for any window whose return span sits below that
+ulp. This is NOT a formula gap — it is `ts_strike_20`'s own documented,
+deliberate choice (`pandas_ta/statistics/ts_strike_20.py:14-18`: "a
+window whose returns vary only at rounding level has no strike to
+read ... reported as 0"), and on exactly this price/tick pair
+`docs/TsStrike20Measured.md` itself calls reading 0 "the floor doing its
+job," not a cost — the "honest cost" characterization in that same
+section belongs to a DIFFERENT row (price 1e6, tick 0.01, span 1.998e-15,
+unguarded "8, 9, 10, 11"), which this receipt does not measure. Restated
+precisely: the candidate's raw definition and the shipped column are the
+SAME statistic on every non-degenerate window measured (0/8,400), and
+differ ONLY on windows degenerate enough to trip the floor, where the
+shipped column reads 0 instead of noise spanning the whole scale —
+porting the unguarded definition under a new name would ship a column
+that reads sub-ulp float64 quantisation noise on a high-price,
+near-exactly-geometric or one-tick-ladder BIST bar.
 
 ## 3. Z-scoring (catch22's own preprocessing) is inert here, measured not assumed
 
@@ -204,10 +225,11 @@ happens to contain, while the shipped column reads the 0 its floor
 reserves for a degenerate window. This is the deliberate divergence §2
 explains, not a new finding about the `cosine` case.
 
-What reproduces the `cosine` t=653 gap: §D's diagnosis in §Z already
-established that z-scoring is inert EXCEPT at an exact tie with the raw
-mean, where the mean of the Z-SCORED series (a fresh floating-point sum)
-decides the comparison by its own last-bit residual — and this window has
+What reproduces the `cosine` t=653 gap: §Z already established that
+z-scoring is inert EXCEPT at an exact tie with the raw mean, which §D then
+tested on this window — the mean of the Z-SCORED series (a fresh
+floating-point sum) decides the comparison by its own last-bit residual —
+and this window has
 **4 of its 100 samples sitting EXACTLY at the raw mean** (0.0, printed by
 the harness), so it is exactly that case. Z-scoring the window the way the
 reference does (`z = (w - w.mean()) / w.std(ddof=0)`) and recomputing the
@@ -284,11 +306,15 @@ already reachable via `ta.ts_strike_20(close, length=100)`,
 `df.ta.ts_strike_20(length=100)`, or `df.ta.strategy()` with that
 parameter — on every window measured that is not degenerate enough to
 trip the shipped column's own `NOISE_FLOOR` (§2); on a window that is,
-the shipped column deliberately reads 0 rather than the raw formula's
-rounding noise, a difference documented in `docs/TsStrike20Measured.md`
-and argued there to be the reason to revert rather than against it, since
-porting the unguarded catch22 definition under a new name would ship a
-column that reads float64 noise on flat-close or limit-locked BIST bars.
+the shipped column deliberately reads 0 rather than the float64-noise
+reading its own receipt's `docs/TsStrike20Measured.md` calls "the floor
+doing its job" at exactly this price/tick pair -- the unguarded reading
+there is not a near-true estimate spoiled by noise but "the whole scale"
+itself, measured here as a worst |diff| of 99, the theoretical maximum
+on a length-100 window -- since porting the unguarded catch22 definition
+under a new name would ship a column
+that reads sub-ulp float64 quantisation noise on a high-price,
+near-exactly-geometric or one-tick-ladder BIST bar.
 Shipping a second module would, on every non-degenerate bar, restate the
 same signal under a second column name, which `CLAUDE.md`'s ML feature
 contract rules out ("A column that restates a shipped column double-weights
