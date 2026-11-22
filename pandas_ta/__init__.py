@@ -68,10 +68,10 @@ Category = {
         "frama"
     ],
     # Performance
-    "performance": ["log_return", "percent_return", "trend_return", "max_return", "mtd_ret", "seas", "ytd_ret"],
+    "performance": ["log_return", "percent_return", "trend_return", "max_return", "mtd_ret", "qtd_ret", "seas", "ytd_ret"],
     # Statistics
     "statistics": [
-        "arch_lm", "c22_ami_timescale", "c22_periodicity", "diff2_acf1", "entlz", "entropy", "ffd", "firstzero_ac", "g191_026", "g191_044", "g191_165", "g191_189", "g191_190", "ie_asym", "kpss", "kurtosis", "lean_hurst_100", "lean_tdd_20", "lot_zeroret_60", "lumpiness", "mad", "median", "median_ad_hl2", "osap_retskew_21", "quantile", "rank", "skew", "stdev",
+        "arch_lm", "c22_acf_first_min", "c22_ami2", "c22_ami_timescale", "c22_dfa", "c22_entropy_pairs", "c22_forecast_error", "c22_median_freq", "c22_mode_10", "c22_mode_5", "c22_periodicity", "c22_stretch_decreasing", "diff2_acf1", "entlz", "entropy", "ffd", "firstzero_ac", "g191_026", "g191_044", "g191_165", "g191_189", "g191_190", "ie_asym", "kpss", "kurtosis", "lean_hurst_100", "lean_tdd_20", "lot_zeroret_60", "lumpiness", "mad", "median", "median_ad_hl2", "osap_retskew_21", "quantile", "rank", "skew", "stdev",
         "tf_autocorr_1e_60", "tf_centroid_20", "tf_dfa_100", "tf_higuchi_30", "tf_iqr_ret_60", "tf_spec_entropy_64", "tf_zero_cross_20", "ts_above_mean_20", "ts_ac1_60", "ts_aggac_60", "ts_binent_20", "ts_c3_20", "ts_cid_ce_20", "ts_cross_mean_20", "ts_energy_last_20", "ts_imq_20", "ts_kurt_60", "ts_medskew_20", "ts_peaks_20",
         "ts_perment_20", "ts_q05_60", "ts_reoccur_20", "ts_strike_20", "variance", "zscore",
         "rolling_sum", "normalize", "covariance", "cusum", "trend_scan", "halflife"
@@ -93,7 +93,7 @@ Category = {
     ],
     # Volatility
     "volatility": [
-        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "corwin_schultz", "cvi", "donchian", "edge", "g191_023", "g191_109", "g191_158", "g191_160", "g191_174", "g191_188", "garman_klass", "har_park", "hwc", "j_damiani", "kc", "massi", "natr", "pdist", "range_compress_run", "range_profile", "rogers_satchell", "roll_spread", "rvi", "sk_fcb_width", "tf_median_absdiff_20", "thermo", "true_range", "ui", "volvol", "wvma", "yang_zhang",
+        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "corwin_schultz", "cvi", "donchian", "edge", "g191_023", "g191_109", "g191_158", "g191_160", "g191_174", "g191_188", "garman_klass", "har_park", "hwc", "inrange_count", "j_damiani", "kc", "massi", "natr", "pdist", "range_compress_run", "range_profile", "rogers_satchell", "roll_spread", "rvi", "sk_fcb_width", "tf_median_absdiff_20", "thermo", "true_range", "ui", "volvol", "wvma", "yang_zhang",
     ],
 
     # Volume, "vp" or "Volume Profile" is unique
