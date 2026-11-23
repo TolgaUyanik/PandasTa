@@ -6,6 +6,7 @@ from .c22_ami_timescale import c22_ami_timescale
 from .c22_dfa import c22_dfa
 from .c22_entropy_pairs import c22_entropy_pairs
 from .c22_forecast_error import c22_forecast_error
+from .c22_high_fluctuation import c22_high_fluctuation
 from .c22_low_freq_power import c22_low_freq_power
 from .c22_median_freq import c22_median_freq
 from .c22_mode_10 import c22_mode_10
