@@ -13,6 +13,7 @@ from .c22_mode_10 import c22_mode_10
 from .c22_mode_5 import c22_mode_5
 from .c22_periodicity import c22_periodicity
 from .c22_stretch_decreasing import c22_stretch_decreasing
+from .diff1_pacf5 import diff1_pacf5
 from .diff2_acf1 import diff2_acf1
 from .entlz import entlz
 from .entropy import entropy

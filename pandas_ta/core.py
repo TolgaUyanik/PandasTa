@@ -2021,6 +2021,11 @@ class AnalysisIndicators(BasePandasObject):
         result = cusum(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def diff1_pacf5(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = diff1_pacf5(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def diff2_acf1(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = diff2_acf1(close=close, length=length, offset=offset, **kwargs)
