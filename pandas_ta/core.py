@@ -3340,6 +3340,14 @@ class AnalysisIndicators(BasePandasObject):
         result = eom(high=high, low=low, close=close, volume=volume, length=length, divisor=divisor, offset=offset, drift=drift, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def fn_baspn_net(self, slow=None, fast=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = fn_baspn_net(high=high, low=low, close=close, volume=volume, slow=slow, fast=fast, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def g191_040(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
