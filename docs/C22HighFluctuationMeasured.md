@@ -14,8 +14,8 @@ PandasTa issue **#144** (C22-HIGH-FLUCTUATION), ported 2026-11-23 on branch
 | Gate B | real module leaks 0/34 offsets (8 random splices each) on three frames; four mutants (back-dated write, forward-shifted return, forward-shifted diff, forward-shifted standard deviation) are each caught on a strictly positive, pinned count of those 34 (6 to 15) — §B |
 | Gate C | fires on every bar with a full window (1,400/1,500) on four frames; 7-27 distinct values per frame; the tick-rounded `penny` frame (>10% exactly-zero returns) fires everywhere with the MOST distinct values (27) of any frame, and the lowest minimum (0.697) — §C |
 | Gate D | bit-identical (`==`, not a tolerance) under ×8/×64 price rescale, ×10/×3.7/×0.1 price rescale (not a power of two), ×10/×3.7/×0.1/×2.5 affine rescale of the RETURNS themselves (with and without a +0.01 shift), AND under a ×-1 (sign-flipping) rescale of the returns -- the share depends only on `\|diff(Z)\|`, so a negative rescale (which this fork's `c22_stretch_decreasing` is emphatically NOT invariant under) leaves it unchanged; `0 < fires < n` on all four frames — §D |
-| Gate E | pending, run by issue-solver after this session -- the `is144-c22_high_fluctuation-b6ea410b` run measured 0.5696 vs `mcgd`/0.5603 per-frame (round 1), but a post-run docstring fix (round 2) changed the module's sha1, so that row was removed from the ledger (round 3, below) rather than kept stale -- §E |
-| Gate F | targeted PandasTa run: 1,489 passed, 7 skipped (the ledger row removed, no row to go stale) -- see §F below; full suites run by issue-solver in clean worktrees |
+| Gate E | run `is144-c22_high_fluctuation-ec7ec0ce`, measured 2026-11-23 (receipt session, after round 3's ledger-row deletion): 0.5696 vs `mcgd`, per-frame max median 0.5603 -- SHIP, recorded in the ledger -- §E |
+| Gate F | see §F below; full suites run by issue-solver in clean worktrees |
 
 Every number below was produced by
 `python docs/measure_c22_high_fluctuation.py` or by
@@ -169,10 +169,12 @@ on every stochastic frame (1,400 of 1,500).
 
 ## E. Gate E — attribution
 
-Run `is144-c22_high_fluctuation-b6ea410b`, measured 2026-11-23, 89 frozen
+Round 1 run `is144-c22_high_fluctuation-b6ea410b` (round-1 module text) and
+the receipt-session run `is144-c22_high_fluctuation-ec7ec0ce` (current module
+text, post round-2 docstring fix), both measured on the same 89 frozen
 ALTPORT-1 BIST frames, 398,849 pooled bars, 687 comparators (329
 `compute_all` + 358 `ml_features` manifest), canary bit-equal on AKBNK.IS,
-BIENY.IS, AGHOL.IS, SASA.IS.
+BIENY.IS, AGHOL.IS, SASA.IS, agree on the number:
 
 | column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
 |---|---|---|---|---|---|
@@ -182,8 +184,8 @@ Pooled max \|ρ\| 0.5696 and per-frame max median 0.5603 both sit under the
 `r3-perframe-0.90` SHIP line (< 0.76): not struck, not a disclosed
 near-restatement. Band from `CLAUDE.md`'s Gate E row: STRUCK ≥0.90 pooled or
 per-frame median, DISCLOSE_GAP [0.80, 0.90), DISCLOSE [0.76, 0.80), SHIP
-<0.76. Ledger row recorded by
-`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-23`.
+<0.76. The live ledger row is the `ec7ec0ce` run, recorded by
+`python docs/gate_e_ledger.py record /home/tolga/.issue-solver/runs/20261123-074546-144/gatee/is144-c22_high_fluctuation-ec7ec0ce --measured 2026-11-23`.
 
 ### Round 2 (review fix) -- the ledger row above is stale
 
@@ -219,9 +221,17 @@ expected to fail/skip while Gate E is owed, not
 `test_row_still_describes_its_module`. Deleted the `c22_high_fluctuation` row
 from `docs/gate_e_ledger.csv` (it described code that no longer exists after
 round 2's edit, so keeping it mislabelled a stale measurement as current).
-Gate E is owed on the current module text and is run by issue-solver after
-this session; the `b6ea410b` numbers above (0.5696 vs `mcgd`, SHIP) are the
-round-1 measurement for reference, not a live ledger entry.
+Gate E was owed on the current module text at that point; it has since been
+re-run (receipt session below).
+
+### Receipt session (2026-11-23) -- Gate E re-run and recorded
+
+The launcher ran Gate E on the current module text (post round-2/3):
+run `is144-c22_high_fluctuation-ec7ec0ce`, same 0.5696 vs `mcgd` / 0.5603
+per-frame result as round 1, SHIP. Recorded into the ledger with
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-23`
+(§E above has the full numbers). Ledger now carries a live row for
+`c22_high_fluctuation:C22HIGHFLUCT_100`.
 
 ## F. Gate F — suites
 
@@ -230,15 +240,6 @@ python -m pytest -q tests/test_c22_high_fluctuation.py tests/test_readme_counts.
 ```
 
 1,481 passed, 7 skipped, 1 failed, as above, before Gate E ran.
-
-Re-run after the receipt session recorded the Gate E ledger row (2026-11-23):
-
-```
-python -m pytest -q tests/test_c22_high_fluctuation.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
-```
-
-1,489 passed, 7 skipped -- `test_every_indicator_that_needs_a_row_has_one` now
-passes, the ledger carries the `c22_high_fluctuation` row.
 
 Re-run after round 2's docstring fix (above):
 
@@ -261,6 +262,16 @@ python -m pytest -q tests/test_c22_high_fluctuation.py tests/test_readme_counts.
 `test_every_indicator_that_needs_a_row_has_one`, the expected-owed test per
 the system prompt's porting rule, now that there is no row at all rather
 than a stale one.
+
+Re-run after the receipt session recorded the `ec7ec0ce` Gate E ledger row
+(2026-11-23):
+
+```
+python -m pytest -q tests/test_c22_high_fluctuation.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
+```
+
+1,489 passed, 7 skipped -- `test_every_indicator_that_needs_a_row_has_one`
+passes again, the ledger carries a live `c22_high_fluctuation` row.
 
 Re-run under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`
 (this machine's own AVX512F/AVX512_SKX/AVX2/FMA3, confirmed present via
