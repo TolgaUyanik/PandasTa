@@ -24,8 +24,10 @@ What these tests pin, in order of how much it would hurt to lose:
   already guards a degenerate zero high-low range with a float epsilon --
   existing behaviour of a dependency, not something this module adds.
 * Wiring: the accessor, the column name `TTR_SNR_20`, and its
-  `Category['volatility']` entry. Gate E is owed: the launcher runs it
-  after this session.
+  `Category['volatility']` entry.
+* Gate E: SHIP, max |rho| 0.5640 vs `BB_BWidth_Pctl` (per-frame max median
+  0.5654), run is149-ttr_snr_20-608253f6, measured 2026-11-23; see
+  docs/TtrSnr20Measured.md.
 """
 import importlib
 import types

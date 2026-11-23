@@ -27,8 +27,8 @@ def walk(n=1200, seed=11, sigma=0.02, tick=None, wick=0.004):
     close = 100.0 * np.exp(np.cumsum(rng.normal(0.0, sigma, n)))
     if tick:
         close = np.round(close / tick) * tick
-    hi_wick = np.abs(rng.normal(0.0, wick, n))
-    lo_wick = np.abs(rng.normal(0.0, wick, n))
+    hi_wick = np.abs(rng.normal(0.0, wick, n)) + 1e-6
+    lo_wick = np.abs(rng.normal(0.0, wick, n)) + 1e-6
     high = close * (1.0 + hi_wick)
     low = close * (1.0 - lo_wick)
     return pd.Series(high), pd.Series(low), pd.Series(close)
@@ -104,11 +104,8 @@ def main():
 
     print("== frozen-AFTER-a-volatile-run edge case (TR == 0 for `length` bars, "
           "ATR decays but does not reach exactly 0 -> SNR positive, not NaN)")
-    n = 60
-    half_life_close = pd.Series(np.concatenate([
-        100.0 * np.exp(np.cumsum(np.random.default_rng(5).normal(0.0, 0.01, 30))),
-        np.full(30, 100.0),
-    ]))
+    lead = 100.0 * np.exp(np.cumsum(np.random.default_rng(5).normal(0.0, 0.01, 30)))
+    half_life_close = pd.Series(np.concatenate([lead, np.full(30, lead[-1])]))
     decayed = ttr_snr_20(half_life_close, half_life_close, half_life_close)
     tail = decayed.iloc[-9:]
     print("tail all NaN:", bool(tail.isna().all()),
