@@ -941,6 +941,11 @@ class AnalysisIndicators(BasePandasObject):
         result = ht_trendmode(close=close, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def msw_lead(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = msw_lead(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     # Momentum
     def a101_007(self, adv_length=None, delta_length=None, ts_rank_length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
