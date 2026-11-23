@@ -9,9 +9,9 @@ library the candidate was found in; per the issue, the port is written from Ehle
 formula, never from `msw.c`. Only the lead line is in scope here — the in-phase sine
 (`tl_msw_sine_20`) is a separate candidate, not ported.
 
-**Status: Gates A, B, C (synthetic), D cleared. Gate E pending** (run by issue-solver after
-this session). **Do not merge to `main` before Gate E is recorded**: `msw_lead` is in
-`Category`, so any `df.ta.strategy()` sweep in the parent repo picks it up.
+**Status: Gates A-E cleared — SHIP** (max |rho| 0.6912 vs `apo_pct`, per-frame max median
+0.6944, well under the 0.76 ship line). `msw_lead` is in `Category`, so any `df.ta.strategy()`
+sweep in the parent repo picks it up.
 
 Shipped: `pandas_ta/cycles/msw_lead.py`, one column `MSW_LEAD_<length>` (default `MSW_LEAD_20`),
 range [-1, 1]. Tests: `tests/test_msw_lead.py` (12). Numbers:
@@ -48,10 +48,10 @@ measured). The port uses `|RealPart| > 0.001 * close`, the scale-free form the i
 |---|---|---|
 | A Correctness | pass | matches an independent Python-loop re-derivation of the published pseudocode (not the module's vectorized rolling/dot form): NaN masks match, max\|diff\| 3.28e-14 on 1,200 bars (measured) |
 | B Causality | pass | 31-offset future-perturbation sweep: real module 0 leaks; two look-ahead mutants (`real_lookahead`, `write_shift`) proven live, then caught 31 of 31. A third candidate mutant (shifting the imaginary part's rolling input) was tried and rejected as degenerate: Ehlers' sine weight at the window's newest position is `sin(0) = 0`, so the one bar a 1-bar shift newly reads into that window is always multiplied by zero — live overall (1,178/1,200 bars differ) but invisible to this exact boundary test at any offset. See `tests/test_msw_lead.py` docstring. |
-| C Reachability | synthetic only | 1,200-bar GBM walk (seed 11, sigma 0.02): 1,181 of 1,200 finite, 1,181 distinct values, 576 positive / 605 negative. **Real-data counts owed** (Gate E run). |
+| C Reachability | synthetic only | 1,200-bar GBM walk (seed 11, sigma 0.02): 1,181 of 1,200 finite, 1,181 distinct values, 576 positive / 605 negative. Real-data count from the Gate E run: 397,158 of 398,849 pooled bars non-NaN / non-zero (`non_nan` = `non_zero` = 397,158 in `overlap_max.csv`). |
 | D Scale-free | pass | x8/x64 bit-identical with matching NaN masks (the guard and both dot products are linear in `close`, so a power-of-two rescale is exact); x10/x3.7 within 1e-9 (measured 1.52e-14 / 2.30e-14); `0 < fires < n` and > 100 distinct values, pinned in `test_column_fires_and_is_not_constant` |
-| E Attribution | **PENDING** — run by issue-solver after this session | `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.cycles.msw_lead --name msw_lead` |
-| F Suites | this repo, targeted only | `python -m pytest -q tests/test_msw_lead.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`: 1,414 passed, 7 skipped, 1 failed (`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, expected: no ledger row yet). Same command under `python docs/measure_msw_lead_cpu.py disable pytest` (CPU kernels without AVX-512/AVX2/FMA3): 12 of 12 `test_msw_lead.py` tests pass. Whole suites: run by issue-solver in clean worktrees (see the PR body). |
+| E Attribution | **SHIP** | `MSW_LEAD_20`: max \|rho\| 0.6912 vs `apo_pct` (manifest set, n = 396,624); per-frame max median 0.6944 vs `apo_pct` (89 ALTPORT-1 frames, 0% of frames >= 0.90). Run `is145-msw_lead-11092680`: 89 frames, 398,849 pooled bars, 329 + 358 = 687 comparators, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS), recorded in `docs/gate_e_ledger.csv` (measured 2026-11-23). |
+| F Suites | this repo, targeted only | `python -m pytest -q tests/test_msw_lead.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`: all pass with the ledger row recorded (prior round: 1,414 passed, 7 skipped, 1 failed on the missing-row check only). Same command under `python docs/measure_msw_lead_cpu.py disable pytest` (CPU kernels without AVX-512/AVX2/FMA3): 12 of 12 `test_msw_lead.py` tests pass. Whole suites: run by issue-solver in clean worktrees (see the PR body). |
 
 ## CPU-kernel check (NPY_DISABLE_CPU_FEATURES)
 
@@ -81,19 +81,11 @@ That screen is not Gate E (different frame count, not the 687-comparator manifes
 decides.
 
 The issue's measured Gate E on the prototype (`screen_r4_20261024`, 89 ALTPORT-1 frames,
-398,849 bars): max |rho| 0.6911 vs `apo_pct`, top-5 per-frame max median 0.6939 -> SHIP. That
-number is on the prototype candidate, not this module; this port changes nothing about the
-arithmetic (same formula, same scale-free guard), so no divergence from the prototype's figure is
-expected, but the port's own run is what gets recorded.
+398,849 bars): max |rho| 0.6911 vs `apo_pct`, top-5 per-frame max median 0.6939 -> SHIP. The
+port's own run (`is145-msw_lead-11092680`, above) matches within noise: 0.6912 vs 0.6911, same
+top comparator -- confirms the port changed nothing about the arithmetic.
 
-## To close
+## Closed
 
-1. Run Gate E on this module: `python scripts/analysis/gate_e_overlap.py run --module
-   pandas_ta.cycles.msw_lead --name msw_lead` from `../Backtesting/Backtesting` (rebuild the
-   cache first if a prior run is stale).
-2. Record the ledger row: `python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`.
-3. Apply CLAUDE.md's `r3-perframe-0.90` bands. On SHIP, fill in the real Gate E numbers above and
-   the Gate C real-data counts. On STRUCK (unlikely given the issue's own 0.6911 prototype
-   measurement, well under 0.90), delete the module, its wiring, and its tests, and keep this
-   file as the receipt — a measured revert closes the issue exactly as well as a ship.
-4. Run both repos' suites.
+Gate E ran SHIP (above), ledger row recorded, targeted suites green. Both repos' whole suites:
+run by issue-solver in clean worktrees (see the PR body).
