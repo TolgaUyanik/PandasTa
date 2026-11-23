@@ -27,7 +27,7 @@ own call does not pin a method, so this is a documented divergence, not a bug: s
 - Gates A, B and D are cleared, and this repo's test subset
   (`tests/test_diff1_pacf5.py` plus the wiring/count suites named below) is green,
   which is the half of Gate F that runs here.
-- **Gate E: pending, run by issue-solver after this session.**
+- **Gate E: SHIP** (max |ρ| 0.0487, well under the 0.76 ship line). Port ships.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -150,8 +150,8 @@ independent check of the ACF formula itself, not a restatement of `_loop`.
   `test_fires_and_is_not_constant`): 501 of 600 bars fire (first at bar 99), all 501
   values distinct, range [0.0031, 0.1375] on this frame — inside the column's full
   `[0, 5)` range.
-- **Real data:** not measured here. Gate E's run (pending) gives the real-data fire
-  count; this file will be updated with it once the launcher's run is recorded.
+- **Real data:** Gate E's run, 390,038 non-NaN / non-zero of 398,849 pooled bars
+  (89 ALTPORT-1 frames) — see "Gate E" below.
 
 ## Gate D — scale-free
 
@@ -175,12 +175,19 @@ peak memory from a separate run with tracemalloc on
 | 200,000 | 100 | 0.366–0.404 s | 162 MiB |
 | 200,000 | 252 | 0.829–0.866 s | 393 MiB |
 
-## Gate E — pending
+## Gate E — attribution
 
-Run by issue-solver after this session, per `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py
-run --module pandas_ta.statistics.diff1_pacf5 --name <run name>` (Backtesting #107).
-This file will be updated with the measured verdict and the ledger row
-(`docs/gate_e_ledger.csv`) once that run lands.
+Run `is151-diff1_pacf5-6ce3d0fc` (`gate_e_overlap.py run --module pandas_ta.statistics.diff1_pacf5`,
+Backtesting #107), 89 ALTPORT-1 BIST frames, 398,849 pooled bars, 390,038 non-NaN/non-zero,
+687 comparators (329 `compute_all` + 358 manifest), canary bit-equal (AKBNK.IS, BIENY.IS,
+AGHOL.IS, SASA.IS).
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | per-frame max median against | verdict |
+|---|---|---|---|---|---|---|
+| `DIFF1PACF5_100` | 0.0487 | `CKSP_Width_pct` (manifest) | 390,038 | 0.0862 | `mcgd` | SHIP |
+
+Pooled max |ρ| 0.0487 and per-frame max median 0.0862 are both well under the 0.76 ship
+line (`r3-perframe-0.90` band). Ledger row recorded 2026-11-24 (`docs/gate_e_ledger.csv`).
 
 ## Gate F — suites
 
@@ -193,10 +200,12 @@ python -m pytest -q tests/test_diff1_pacf5.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-Result: 1467 passed, 7 skipped, 1 failed —
+Previous run (pre-ledger-row): 1467 passed, 7 skipped, 1 failed —
 `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, for exactly the
-reason this file states: `diff1_pacf5` has no ledger row yet. Expected, not a finding;
-the receipt session records the row after the launcher's Gate E run.
+reason this file then stated: `diff1_pacf5` had no ledger row yet. Expected, not a
+finding.
+
+Re-run after recording the ledger row (2026-11-24): 1475 passed, 7 skipped, 0 failed.
 
 CPU-variant check (`python docs/measure_diff1_pacf5_cpu.py`, `NPY_DISABLE_CPU_FEATURES =
 "AVX512F AVX512_SKX AVX2 FMA3"`): 33 passed.
