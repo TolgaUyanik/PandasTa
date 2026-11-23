@@ -135,7 +135,7 @@ def gate_a():
          "z-score to take -- NaN, not a share read off rounding noise"),
         ([0.0, 1.0, 2.0], 1.0, "strictly monotone: z = [-1, 0, 1], both "
          "diffs are exactly 1.0, far above 0.04"),
-        ([0.0, 1.0, 1.001], None, "a tiny final step: one big diff, one "
+        ([0.0, 1.0, 1.001], 0.5, "a tiny final step: one big diff, one "
          "diff that lands below threshold -- see printed share"),
     ]
     for r, expected, why in cases:
@@ -147,6 +147,10 @@ def gate_a():
         ok = both_nan or got == orc
         print(f"  length={n} returns={r} -> port={got:g} oracle={orc:g} "
               f"[{'OK' if ok else 'MISMATCH'}]  {why}")
+        if np.isnan(expected):
+            assert both_nan
+        else:
+            assert got == expected, f"expected {expected}, got {got}"
 
     head("Gate A2 -- an independent stdlib-statistics spelling, window by "
          "window")
@@ -296,7 +300,7 @@ def gate_c_d():
                     c22_high_fluctuation(close * k))
 
     head("Gate D -- a positive affine rescale of the RETURNS themselves "
-         "(tolerance, not bit-identical)")
+         "(measured bit-identical on this frame, not a float64 proof)")
     close = walk()
     base = c22_high_fluctuation(close)
     r = (close / close.shift(1) - 1.0).to_numpy()

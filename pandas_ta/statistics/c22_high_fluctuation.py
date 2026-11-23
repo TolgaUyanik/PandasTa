@@ -172,7 +172,7 @@ arithmetic (`a > 0`: `Z' = Z`; `a < 0`: `Z' = -Z`, and the share reads only
 `|diff(Z)|`, so it is unchanged either way) -- but that is an identity in
 REAL arithmetic, not a float64 proof like the price-ratio argument above,
 since `mean`/`std`/division each round independently on the rescaled
-array. Measured bit-identical on three frames under x10/x3.7/x0.1/x2.5 and
+array. Measured bit-identical on one frame (`walk`) under x10/x3.7/x0.1/x2.5 and
 a +0.01 shift, and under a x-1 negation, because this statistic is a
 COUNT over a fixed grid (`k / (length - 1)`) that only moves when a diff
 crosses the 0.04 boundary, and none did on these frames -- see

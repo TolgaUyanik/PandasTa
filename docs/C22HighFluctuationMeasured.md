@@ -14,8 +14,8 @@ PandasTa issue **#144** (C22-HIGH-FLUCTUATION), ported 2026-11-23 on branch
 | Gate B | real module leaks 0/34 offsets (8 random splices each) on three frames; four mutants (back-dated write, forward-shifted return, forward-shifted diff, forward-shifted standard deviation) are each caught on a strictly positive, pinned count of those 34 (6 to 15) — §B |
 | Gate C | fires on every bar with a full window (1,400/1,500) on four frames; 7-27 distinct values per frame; the tick-rounded `penny` frame (>10% exactly-zero returns) fires everywhere with the MOST distinct values (27) of any frame, and the lowest minimum (0.697) — §C |
 | Gate D | bit-identical (`==`, not a tolerance) under ×8/×64 price rescale, ×10/×3.7/×0.1 price rescale (not a power of two), ×10/×3.7/×0.1/×2.5 affine rescale of the RETURNS themselves (with and without a +0.01 shift), AND under a ×-1 (sign-flipping) rescale of the returns -- the share depends only on `\|diff(Z)\|`, so a negative rescale (which this fork's `c22_stretch_decreasing` is emphatically NOT invariant under) leaves it unchanged; `0 < fires < n` on all four frames — §D |
-| Gate E | `C22HIGHFLUCT_100` max \|ρ\| 0.5696 vs `mcgd` (n=389,949); per-frame max median 0.5603 (89 frames) -- SHIP (< 0.76) — §E |
-| Gate F | targeted PandasTa run green (1,489 passed, 7 skipped) after the Gate E ledger row landed; see §F below; full suites run by issue-solver in clean worktrees |
+| Gate E | `C22HIGHFLUCT_100` max \|ρ\| 0.5696 vs `mcgd` (n=389,949); per-frame max median 0.5603 (89 frames) -- SHIP (< 0.76), run `is144-c22_high_fluctuation-b6ea410b`; **owed again** since a post-run docstring fix (round 2, below) changed the module's sha1 -- §E |
+| Gate F | targeted PandasTa run: 1,488 passed, 7 skipped, 1 failed (the now-stale ledger row, expected) -- see §F below; full suites run by issue-solver in clean worktrees |
 
 Every number below was produced by
 `python docs/measure_c22_high_fluctuation.py` or by
@@ -185,6 +185,31 @@ per-frame median, DISCLOSE_GAP [0.80, 0.90), DISCLOSE [0.76, 0.80), SHIP
 <0.76. Ledger row recorded by
 `python docs/gate_e_ledger.py record <run dir> --measured 2026-11-23`.
 
+### Round 2 (review fix) -- the ledger row above is stale
+
+A pre-push review (round 1) found a MAJOR docstring defect at
+`pandas_ta/statistics/c22_high_fluctuation.py:175`: "measured bit-identical
+on three frames" when the harness (`docs/measure_c22_high_fluctuation.py`
+`gate_c_d`, the returns-rescale and negation blocks) and the two tests
+(`test_bit_identical_under_a_positive_affine_rescale_of_the_returns`,
+`..._negative_rescale_of_the_returns`) run only `FRAMES["walk"]`. Fixed to
+"on one frame (`walk`)" -- no behaviour change, text only.
+
+Editing the module changes its bytes, so its LF-normalised sha1 no longer
+matches `9dfcc4813ae1b44dc9ae3bae0bd14cfaa0cb5836`, the sha1 the `b6ea410b`
+run above measured against. `docs/gate_e_ledger.py`'s own doctring is
+explicit that this is by design, not a loophole: "a later edit to a helper
+module the indicator imports is caught" via the module sha1 and output
+fingerprint, with no carve-out for a comment-only edit, because a reviewer
+cannot tell "comment-only" from "secretly behaviour-changing" without
+re-running the measurement. `tests/test_gate_e_ledger.py::test_row_still_describes_its_module[c22_high_fluctuation:C22HIGHFLUCT_100]`
+now fails locally (1,488 passed, 7 skipped, 1 failed -- §F below), the same
+"Gate E owed" class as a missing row: a skip under CI's
+`GATE_E_PENDING_OK=1`, a hard failure toward `main` or on any local run, per
+`CLAUDE.md`'s "Owed, not failed, on the way to dev". The row above is kept
+as the historical receipt of the `b6ea410b` run; Gate E is owed again on
+the current module text and is run by issue-solver after this session.
+
 ## F. Gate F — suites
 
 ```
@@ -201,6 +226,17 @@ python -m pytest -q tests/test_c22_high_fluctuation.py tests/test_readme_counts.
 
 1,489 passed, 7 skipped -- `test_every_indicator_that_needs_a_row_has_one` now
 passes, the ledger carries the `c22_high_fluctuation` row.
+
+Re-run after round 2's docstring fix (above):
+
+```
+python -m pytest -q tests/test_c22_high_fluctuation.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
+```
+
+1,488 passed, 7 skipped, 1 failed --
+`test_row_still_describes_its_module[c22_high_fluctuation:C22HIGHFLUCT_100]`,
+expected per Round 2 above: the module's sha1 moved, so the `b6ea410b` row
+is stale and Gate E is owed again.
 
 Re-run under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`
 (this machine's own AVX512F/AVX512_SKX/AVX2/FMA3, confirmed present via

@@ -41,8 +41,8 @@ What this file pins, in order of how much it would hurt to lose:
 5. **Gate D**, including the SIGN-ASYMMETRY this feature has that
    `c22_stretch_decreasing` does not: a positive OR a negative affine
    rescale of the returns leaves the share unchanged (the statistic reads
-   only `|diff(Z)|`), measured bit-identical on these frames, not merely
-   bounded by a tolerance.
+   only `|diff(Z)|`), measured bit-identical on this frame (`walk`), not
+   merely bounded by a tolerance.
 6. **Gate C reachability** on four frames, including the issue's own
    tick-rounding worry (a penny frame).
 7. **Five-point wiring** and the attribution in the docstring.
