@@ -72,8 +72,8 @@ Spearman rho of `MSW_SINE_20` on one synthetic GBM walk (sigma = 0.02, seed 1), 
 | `ROC_10` | 0.6728 |
 | `STOCHk_14_3_3` | 0.6444 |
 | `MSW_LEAD_20` | 0.5904 |
-| `RSI_14` | 0.3546 |
 | `HT_LEADSINE` | 0.3828 |
+| `RSI_14` | 0.3546 |
 | `CC_ANGLE_20` | -0.3842 |
 
 The issue's own measurements on the prototype: Gate E (89 ALTPORT-1 frames, 396,090 bars, run
@@ -83,7 +83,9 @@ the stage-2 fork-overlap screen (scale-free `Category` outputs at defaults, 12 f
 appears in this synthetic single-frame proxy (`STOCHRSI` needs an `rsi`-of-`rsi`, not probed here);
 `HT_SINE` ranking highest in both this proxy and `msw_lead`'s equivalent proxy, at a comparable
 magnitude to `msw_lead`'s own top synthetic comparator, is consistent with the two lines sharing
-their phase arithmetic. Gate E on the port, run by issue-solver, decides the shipped verdict.
+their phase arithmetic. The port's own run (`is146-msw_sine-00e99a5b`, above) measured 0.7460 vs
+`StochRSI_D` against the prototype's 0.7416, same top comparator -- confirms the port changed
+nothing about the arithmetic.
 
 ## Open
 

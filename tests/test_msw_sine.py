@@ -2,8 +2,8 @@
 """Tests for `pandas_ta.cycles.msw_sine` -- MESA Sine, fixed-period DFT
 form (issue #146). Published source: John Ehlers, "MESA Sine Wave
 Indicator" (Stocks & Commodities, Apr 1996) / Rocket Science for Traders
-(Wiley, 2001) ch. 11. `docs/MswSineMeasured.md` carries the measured
-numbers (Gate E pending at commit time); every number quoted here is
+(Wiley, 2001) ch. 11. Measurements and the measured Gate E (SHIP, 0.7460 vs
+`StochRSI_D`) are in `docs/MswSineMeasured.md`; every number quoted here is
 printed by `python docs/measure_msw_sine_proxy.py`.
 
 This module is the sister of `tests/test_msw_lead.py` (issue #145): same
