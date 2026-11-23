@@ -46,7 +46,7 @@ Category = {
     "cycles": [
         "correlation_cycle", "dsp", "ebsw", "ht_dcperiod", "ht_dcphase", "ht_phasor", "ht_sine",
         "ht_trendmode",
-        "ht", "msw_lead",
+        "ht", "msw_lead", "msw_sine",
     ],
     # Momentum
     "momentum": [

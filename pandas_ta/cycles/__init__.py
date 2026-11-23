@@ -9,3 +9,4 @@ from .ht_trendmode import ht_trendmode
 from .ebsw import ebsw
 from .ht import ht
 from .msw_lead import msw_lead
+from .msw_sine import msw_sine
