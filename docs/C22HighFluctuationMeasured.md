@@ -187,9 +187,10 @@ per-frame median, DISCLOSE_GAP [0.80, 0.90), DISCLOSE [0.76, 0.80), SHIP
 <0.76. The live ledger row is the `ec7ec0ce` run, recorded by
 `python docs/gate_e_ledger.py record /home/tolga/.issue-solver/runs/20261123-074546-144/gatee/is144-c22_high_fluctuation-ec7ec0ce --measured 2026-11-23`.
 
-### Round 2 (review fix) -- the ledger row above is stale
+### Round 2 (review fix) -- why the `b6ea410b` row was retired
 
-A pre-push review (round 1) found a MAJOR docstring defect at
+The `b6ea410b` run was retired because a post-run docstring fix moved the
+module's sha1. A pre-push review (round 1) found a MAJOR docstring defect at
 `pandas_ta/statistics/c22_high_fluctuation.py:175`: "measured bit-identical
 on three frames" when the harness (`docs/measure_c22_high_fluctuation.py`
 `gate_c_d`, the returns-rescale and negation blocks) and the two tests

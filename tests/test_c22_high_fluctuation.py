@@ -6,10 +6,9 @@ z-scoring) exceeding 0.04 sd, over the last 100 daily simple returns.
     C22HIGHFLUCT_100 = share of |diff(Z)| > 0.04 over the trailing 100
                         simple returns, Z = z-score(returns, ddof=1)
 
-Gate E is owed: the launcher runs `gate_e_overlap.py` after this session and
-a later session records the `docs/gate_e_ledger.csv` row, so
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails here until then (expected, per the issue-solver rules).
+Gate E ledger row recorded: run `is144-c22_high_fluctuation-ec7ec0ce`, SHIP,
+0.5696 vs `mcgd` (per-frame max median 0.5603), measured 2026-11-23. See
+docs/C22HighFluctuationMeasured.md.
 
 What this file pins, in order of how much it would hurt to lose:
 
