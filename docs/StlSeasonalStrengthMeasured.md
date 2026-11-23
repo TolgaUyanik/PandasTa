@@ -24,7 +24,8 @@ checked against statsmodels' own STL as an oracle in
 - Gates A, B and D are cleared, and this repo's test subset
   (`tests/test_stl_seasonal_strength.py` plus the wiring/count suites named below) is
   green, which is the half of Gate F that runs here.
-- **Gate E: pending, run by issue-solver after this session.**
+- **Gate E: SHIP.** Max |ρ| 0.1696 vs `natr_Chg_5d`, per-frame max median 0.1688 — below the
+  0.76 ship line. Port stays.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -165,7 +166,8 @@ second not:
 
 - **Synthetic** (`reachability`; also `test_fires_and_is_not_constant`): 501 of 600 bars
   fire (first at bar 99), all 501 values distinct, range [0.1858, 0.5291] on this frame.
-- **Real data:** Gate E's run, numbers filled in once it is measured.
+- **Real data:** Gate E's run, 390,038 bars pooled, `STLSEAS_100` non-NaN and non-zero on
+  all of them (see Gate E below).
 
 ## Gate D — scale-free
 
@@ -221,12 +223,18 @@ and with `length^2` (building the matrices) plus `n * length` (applying them) ra
 than with `n * length` STL fits the way the screen prototype's per-window
 `statsmodels.STL(...).fit()` loop did.
 
-## Gate E — attribution
+Run `is155-stl_seasonal_strength-8a978073`, 2026-11-24, 89 ALTPORT-1 frames, 398,849
+pooled bars (390,038 non-NaN/non-zero for `STLSEAS_100`), 687 comparators
+(329 `compute_all` + 358 manifest), canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS,
+SASA.IS).
 
-Pending. Run by issue-solver after this session via
-`../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module
-pandas_ta.statistics.stl_seasonal_strength`. This file and `docs/gate_e_ledger.csv` are
-updated with the measured numbers once that run completes.
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `STLSEAS_100` | 0.1696 | `natr_Chg_5d` (manifest) | 390,038 | 0.1688 | SHIP |
+
+Next comparators: `natr_Chg_5d` 0.1696, consistent with the issue's own prototype
+measurement (0.1696 vs the same comparator). Well inside the SHIP band (< 0.76).
+Recorded in `docs/gate_e_ledger.csv`.
 
 ## Gate F — suites
 
@@ -239,10 +247,7 @@ python -m pytest -q tests/test_stl_seasonal_strength.py tests/test_readme_counts
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-Result: 1 failed (`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-for exactly the reason this file states above: `stl_seasonal_strength` has no ledger row
-yet, Gate E owed). Expected, not a finding; a later receipt session records the row
-after the launcher's Gate E run.
+Result (this receipt session, after recording the ledger row above): all pass.
 
 CPU-variant check (`python docs/measure_stl_seasonal_strength_cpu.py`,
 `NPY_DISABLE_CPU_FEATURES` set to this machine's AVX-512/AVX2/FMA3 features, standing in
