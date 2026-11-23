@@ -1964,6 +1964,12 @@ class AnalysisIndicators(BasePandasObject):
                                     **kwargs)
         return self._post_process(result, **kwargs)
 
+    def c22_high_fluctuation(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_high_fluctuation(close=close, length=length,
+                                      offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def c22_low_freq_power(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = c22_low_freq_power(close=close, length=length, offset=offset,
