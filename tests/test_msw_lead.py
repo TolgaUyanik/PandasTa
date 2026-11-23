@@ -2,9 +2,9 @@
 """Tests for `pandas_ta.cycles.msw_lead` -- MESA Lead Sine, fixed-period DFT
 form (issue #145). Published source: John Ehlers, "MESA Sine Wave
 Indicator" (Stocks & Commodities, Apr 1996) / Rocket Science for Traders
-(Wiley, 2001) ch. 11. Measurements and the deferred Gate E are in
-`docs/MswLeadMeasured.md`; every number quoted here is printed by
-`python docs/measure_msw_lead_proxy.py`.
+(Wiley, 2001) ch. 11. Measurements and the measured Gate E (SHIP, 0.6912 vs
+`apo_pct`) are in `docs/MswLeadMeasured.md`; every number quoted here is
+printed by `python docs/measure_msw_lead_proxy.py`.
 
 What these tests pin, in order of how much it would hurt to lose them:
 
