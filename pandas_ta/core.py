@@ -3209,6 +3209,13 @@ class AnalysisIndicators(BasePandasObject):
         result = true_range(high=high, low=low, close=close, drift=drift, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def ttr_snr_20(self, length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ttr_snr_20(high=high, low=low, close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def ui(self, length=None, scalar=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = ui(close=close, length=length, scalar=scalar, offset=offset, **kwargs)
