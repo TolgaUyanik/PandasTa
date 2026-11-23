@@ -8,9 +8,9 @@ port is written from Ehlers' published formula, never from `msw.c`. This is the 
 issue #145's `msw_lead` (the lead line, `sin(phase + pi/4)`); this module ships the in-phase line,
 `sin(phase)`.
 
-**Status: Gates A-D cleared. Gate E: pending, run by issue-solver after this session.**
-`msw_sine` is in `Category`, so any `df.ta.strategy()` sweep in the parent repo picks it up once
-the ledger row is recorded.
+**Status: Gates A-E cleared, SHIP. Run `is146-msw_sine-00e99a5b`, recorded in the Gate E ledger
+2026-11-23.** `msw_sine` is in `Category`, so any `df.ta.strategy()` sweep in the parent repo picks
+it up.
 
 Shipped: `pandas_ta/cycles/msw_sine.py`, one column `MSW_SINE_<length>` (default `MSW_SINE_20`),
 range [-1, 1]. Tests: `tests/test_msw_sine.py` (12). Numbers:
@@ -48,10 +48,10 @@ measured). The port uses `|RealPart| > 0.001 * close`, the scale-free form the i
 |---|---|---|
 | A Correctness | pass | matches an independent Python-loop re-derivation of the published pseudocode (not the module's vectorized rolling/dot form): NaN masks match, max\|diff\| 2.36e-14 on 1,200 bars (measured, `python docs/measure_msw_sine_proxy.py`) |
 | B Causality | pass | 31-offset future-perturbation sweep: real module 0 leaks; two look-ahead mutants (`real_lookahead`, `write_shift`) proven live, then caught 31 of 31. A third candidate mutant (shifting the imaginary part's rolling input) was tried and rejected as degenerate: Ehlers' sine weight at the window's newest position is `sin(0) = 0`, so the one bar a 1-bar shift newly reads into that window is always multiplied by zero — live overall (measured: differs on 1,178 of 1,181 non-NaN bars) but invisible to this exact boundary test at any offset, same as `msw_lead`'s rejected mutant (identical phase arithmetic). See `tests/test_msw_sine.py` docstring. |
-| C Reachability | synthetic only | 1,200-bar GBM walk (seed 11, sigma 0.02): 1,181 of 1,200 finite, 1,181 distinct values, 608 positive / 572 negative (measured). Real-data count: owed with Gate E. |
+| C Reachability | synthetic + real | 1,200-bar GBM walk (seed 11, sigma 0.02): 1,181 of 1,200 finite, 1,181 distinct values, 608 positive / 572 negative (measured). Real data (Gate E run `is146-msw_sine-00e99a5b`, 89 ALTPORT-1 frames, 398,849 pooled bars): 397,158 non-NaN, 396,399 non-zero. |
 | D Scale-free | pass | x8/x64 bit-identical with matching NaN masks (the guard and both dot products are linear in `close`, so a power-of-two rescale is exact); x10/x3.7 within 1e-9 (measured 2.21e-14 / 1.75e-14); `0 < fires < n` and > 100 distinct values, pinned in `test_column_fires_and_is_not_constant` |
-| E Attribution | pending | run by issue-solver after this session via `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module pandas_ta.cycles.msw_sine --name msw_sine`; ledger row recorded by the receipt session. |
-| F Suites | this repo, targeted only | `python -m pytest -q tests/test_msw_sine.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`: all pass except `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, which fails until the Gate E row above is recorded (expected per the issue's rules, not a finding). Same command's `test_msw_sine.py` subset under `python docs/measure_msw_sine_cpu.py disable pytest` (CPU kernels without AVX-512/AVX2/FMA3): 12 of 12 pass. Whole suites: run by issue-solver in clean worktrees (see the PR body). |
+| E Attribution | SHIP | Gate E run `is146-msw_sine-00e99a5b` (89 ALTPORT-1 frames, n = 396,090, 687 comparators, canary bit-equal): `MSW_SINE_20` max \|rho\| 0.7460 vs `StochRSI_D`; per-frame max median \|rho\| 0.7463 (same comparator). Both under the 0.76 SHIP line and the 0.90 STRUCK line. Recorded in `docs/gate_e_ledger.csv` 2026-11-23. |
+| F Suites | this repo, targeted only | `python -m pytest -q tests/test_msw_sine.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`: all pass (measured on the receipt run, 2026-11-23, after the ledger row was recorded). Same command's `test_msw_sine.py` subset under `python docs/measure_msw_sine_cpu.py disable pytest` (CPU kernels without AVX-512/AVX2/FMA3): 12 of 12 pass. Whole suites: run by issue-solver in clean worktrees (see the PR body). |
 
 ## CPU-kernel check (NPY_DISABLE_CPU_FEATURES)
 
@@ -87,8 +87,5 @@ their phase arithmetic. Gate E on the port, run by issue-solver, decides the shi
 
 ## Open
 
-Gate A-D cleared on this session's run. Gate E owed: run by issue-solver via
-`gate_e_overlap.py run --module pandas_ta.cycles.msw_sine`, then recorded into
-`docs/gate_e_ledger.csv` by a receipt session. If that run is STRUCK (pooled |rho| >= 0.90, or a
-top-5 comparator's per-frame median >= 0.90), the module, its wiring and its tests are reverted and
-this file is kept as the receipt — a measured revert closes issue #146 exactly as well as a ship.
+None. Gates A-F cleared; Gate E SHIP (run `is146-msw_sine-00e99a5b`, recorded 2026-11-23). Both
+repos' whole suites are run by issue-solver in clean worktrees per the PR body.
