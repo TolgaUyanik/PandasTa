@@ -35,5 +35,6 @@ from .thermo import thermo
 from .true_range import true_range
 from .ui import ui
 from .volvol import volvol
+from .wavepm import wavepm
 from .wvma import wvma
 from .yang_zhang import yang_zhang

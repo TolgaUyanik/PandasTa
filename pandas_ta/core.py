@@ -3133,6 +3133,12 @@ class AnalysisIndicators(BasePandasObject):
         result = volvol(high=high, low=low, close=close, length=length, natr_length=natr_length, mamode=mamode, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def wavepm(self, length=None, lookback=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = wavepm(close=close, length=length, lookback=lookback,
+                        offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def wvma(self, lengths=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
