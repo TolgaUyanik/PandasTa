@@ -4,9 +4,9 @@ Technical analysis indicators as a pandas extension. Fork of
 [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, extended with
 price-action / SMC indicators and oriented toward **machine-learning feature generation**.
 
-**378 indicators** registered in `Category`, across 9 categories — that is the number
+**379 indicators** registered in `Category`, across 9 categories — that is the number
 that matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two other
-counts are true of the same package and are easy to confuse with it: **386** are callable
+counts are true of the same package and are easy to confuse with it: **387** are callable
 as `df.ta.<name>()` (`Category` plus `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`,
 `up_and_down_volume`, `volume_delta` and `vp`), and `drawdown` and `ma` are
 importable as `ta.<name>()` without being either. All of them are in the dictionary; the
@@ -142,7 +142,7 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 
 **candles (5)** — `cdl_doji` `cdl_inside` `cdl_pattern` `cdl_z` `ha`
 
-**cycles (10)** — `correlation_cycle` `dsp` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `msw_lead`
+**cycles (11)** — `correlation_cycle` `dsp` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `msw_lead` `msw_sine`
 
 **momentum (89)** — `a101_007` `a101_021` `a101_023` `a101_043` `a101_046` `a101_048` `a101_053` `ao` `apo` `bias` `bop` `brar` `cci` `cdvo` `cfo` `cg` `cmo` `coppock` `crsi` `cti` `dm` `er` `eri` `ewmac` `fisher` `g191_002` `g191_003` `g191_022` `g191_093` `g191_110` `g191_129` `g191_146` `g191_152` `g191_167` `g191_169` `g191_187` `gapm` `imi` `inertia` `j_acosc` `j_gator` `j_wae` `kalman_rsi` `kdj` `kst` `lean_momersion_20` `lrsi` `macd` `macd_area_divergence` `mom` `osap_intmom` `osap_lrrev` `osap_mrrev` `ovn_split` `pfe` `pgo` `po` `ppo` `pressure_pulse` `psl` `pvo` `pzo` `qqe` `roc` `rsi` `rsi_divergence` `rsx` `rvgi` `sk_fcb_pos` `sk_rocwb_ratio` `slope` `smi` `squeeze` `squeeze_pro` `stc` `stc_tv` `stoch` `stochrsi` `szo` `tao` `td_seq` `trix` `trixh` `tsi` `uo` `vwmacd` `wavetrend` `willr` `wpo`
 
