@@ -14,8 +14,8 @@ PandasTa issue **#144** (C22-HIGH-FLUCTUATION), ported 2026-11-23 on branch
 | Gate B | real module leaks 0/34 offsets (8 random splices each) on three frames; four mutants (back-dated write, forward-shifted return, forward-shifted diff, forward-shifted standard deviation) are each caught on a strictly positive, pinned count of those 34 (6 to 15) — §B |
 | Gate C | fires on every bar with a full window (1,400/1,500) on four frames; 7-27 distinct values per frame; the tick-rounded `penny` frame (>10% exactly-zero returns) fires everywhere with the MOST distinct values (27) of any frame, and the lowest minimum (0.697) — §C |
 | Gate D | bit-identical (`==`, not a tolerance) under ×8/×64 price rescale, ×10/×3.7/×0.1 price rescale (not a power of two), ×10/×3.7/×0.1/×2.5 affine rescale of the RETURNS themselves (with and without a +0.01 shift), AND under a ×-1 (sign-flipping) rescale of the returns -- the share depends only on `\|diff(Z)\|`, so a negative rescale (which this fork's `c22_stretch_decreasing` is emphatically NOT invariant under) leaves it unchanged; `0 < fires < n` on all four frames — §D |
-| Gate E | pending, run by issue-solver after this session |
-| Gate F | targeted PandasTa run green except the expected Gate-E-owed failure: see §F below; full suites run by issue-solver in clean worktrees |
+| Gate E | `C22HIGHFLUCT_100` max \|ρ\| 0.5696 vs `mcgd` (n=389,949); per-frame max median 0.5603 (89 frames) -- SHIP (< 0.76) — §E |
+| Gate F | targeted PandasTa run green (1,489 passed, 7 skipped) after the Gate E ledger row landed; see §F below; full suites run by issue-solver in clean worktrees |
 
 Every number below was produced by
 `python docs/measure_c22_high_fluctuation.py` or by
@@ -169,10 +169,21 @@ on every stochastic frame (1,400 of 1,500).
 
 ## E. Gate E — attribution
 
-Pending: run by issue-solver after this session
-(`gate_e_overlap.py run --module pandas_ta.statistics.c22_high_fluctuation`).
-A later session records the `docs/gate_e_ledger.csv` row and fills this
-section with the measured numbers.
+Run `is144-c22_high_fluctuation-b6ea410b`, measured 2026-11-23, 89 frozen
+ALTPORT-1 BIST frames, 398,849 pooled bars, 687 comparators (329
+`compute_all` + 358 `ml_features` manifest), canary bit-equal on AKBNK.IS,
+BIENY.IS, AGHOL.IS, SASA.IS.
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `C22HIGHFLUCT_100` | 0.5696 | `mcgd` (`compute_all`) | 389,949 | 0.5603 | SHIP |
+
+Pooled max \|ρ\| 0.5696 and per-frame max median 0.5603 both sit under the
+`r3-perframe-0.90` SHIP line (< 0.76): not struck, not a disclosed
+near-restatement. Band from `CLAUDE.md`'s Gate E row: STRUCK ≥0.90 pooled or
+per-frame median, DISCLOSE_GAP [0.80, 0.90), DISCLOSE [0.76, 0.80), SHIP
+<0.76. Ledger row recorded by
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-23`.
 
 ## F. Gate F — suites
 
@@ -180,11 +191,16 @@ section with the measured numbers.
 python -m pytest -q tests/test_c22_high_fluctuation.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-1,481 passed, 7 skipped, 1 failed
-(`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
--- expected: it fails for `c22_high_fluctuation` until Gate E is run and the
-ledger row is recorded, per `CLAUDE.md`'s "Owed, not failed" rule; the
-failure names exactly `['c22_high_fluctuation']` as the only missing row).
+1,481 passed, 7 skipped, 1 failed, as above, before Gate E ran.
+
+Re-run after the receipt session recorded the Gate E ledger row (2026-11-23):
+
+```
+python -m pytest -q tests/test_c22_high_fluctuation.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
+```
+
+1,489 passed, 7 skipped -- `test_every_indicator_that_needs_a_row_has_one` now
+passes, the ledger carries the `c22_high_fluctuation` row.
 
 Re-run under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`
 (this machine's own AVX512F/AVX512_SKX/AVX2/FMA3, confirmed present via
