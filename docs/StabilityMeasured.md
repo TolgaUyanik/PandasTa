@@ -175,12 +175,19 @@ memory from a separate run with tracemalloc on:
 
 Machine load moves these numbers; they are an order of magnitude, not a guarantee.
 
-## Gate E — pending, run by issue-solver after this session
+## Gate E — attribution
 
-Not run here (this session does not have access to `../Backtesting` and never runs
-`gate_e_overlap.py`; see `CLAUDE.md`'s "Owed, not failed, on the way to `dev`"). The
-launcher runs Gate E after this session and a later receipt session records the ledger
-row and the measured numbers here.
+Run by the launcher (`gate_e_overlap.py run --module pandas_ta.statistics.stability`),
+89 ALTPORT-1 frames, 398,849 pooled bars, 687 comparators (329 `compute_all` + 358
+manifest), canary bit-equal on AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS. Recorded in
+`docs/gate_e_ledger.csv`, measured 2026-11-24.
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `STABILITY_100` | 0.2789 | `mad_pct` | 389,949 | 0.2625 | **SHIP** |
+
+Pooled max |ρ| 0.2789 and per-frame max median 0.2625 are both well under the 0.76 SHIP
+line (`r3-perframe-0.90` bands, `CLAUDE.md`'s Gate E row). The column ships.
 
 ## Gate F — suites
 
