@@ -30,7 +30,9 @@ elsewhere (`pandas_ta/momentum/sk_fcb_pos.py` imports private helpers from
 - Gates A, B and D are cleared, and this repo's test subset
   (`tests/test_stl_trend_strength.py` plus the wiring/count suites named below) is
   green, which is the half of Gate F that runs here.
-- **Gate E: pending, run by issue-solver after this session.**
+- **Gate E: SHIP.** `STLTREND_100` max |ρ| 0.4498 vs `Cloud_Thickness_pct` (manifest,
+  n = 390,038); per-frame max median 0.4530 (89 frames, 0% of frames ≥ 0.90). Both well
+  under the 0.76 ship line. See the Gate E section below for the full run record.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -211,10 +213,19 @@ process) plus `n * length` (applying them).
 
 ## Gate E — attribution
 
-Pending. Run by issue-solver after this session via
+Run `is160-stl_trend_strength-bff8ed6e`, 2026-11-24, via
 `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module
-pandas_ta.statistics.stl_trend_strength`. This file and `docs/gate_e_ledger.csv` are
-updated with the measured numbers once that run completes.
+pandas_ta.statistics.stl_trend_strength`. 89 ALTPORT-1 BIST frames, 398,849 pooled bars,
+687 comparators (329 `compute_all` + 358 manifest), canary bit-equal (AKBNK.IS, BIENY.IS,
+AGHOL.IS, SASA.IS).
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `STLTREND_100` | 0.4498 | `Cloud_Thickness_pct` (manifest) | 390,038 | 0.4530 | **SHIP** |
+
+Next comparator: `ICHI_CLOUD_THICK` (compute_all), also 0.4498. Both well under the 0.76
+ship line (`r3-perframe-0.90` bands); 0% of the 89 frames reach the 0.90 per-frame line.
+Recorded in `docs/gate_e_ledger.csv`.
 
 ## Gate F — suites
 
