@@ -116,10 +116,10 @@ def test_matches_a_hand_run_fixed_point_recursion():
 def test_matches_statsmodels_stl(length):
     """statsmodels' `STL(window, period=5).fit()` -- the exact call the
     screen prototype made -- checked on EVERY window of a 400-bar AR(1)
-    frame (301 fits, ~0.15s), with the brute-force leave-one-out loop
+    frame (300-351 fits depending on `length` -- see docs/StlSpikinessMeasured.md's
+    Gate A table for the per-case counts), with the brute-force leave-one-out loop
     (`_brute_force_spikiness`) as the oracle for the formula itself: max
-    abs diff ~1e-23 at every length tried (see docs/StlSpikinessMeasured.md's
-    Gate A table for the measured per-case figures), including 101 (not a
+    abs diff ~1e-23 at every length tried, including 101 (not a
     multiple of 5). Independent of `_build_ops`'s own operator-construction
     code -- this compares against statsmodels' `resid` directly."""
     stl = pytest.importorskip("statsmodels.tsa.seasonal").STL

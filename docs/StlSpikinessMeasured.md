@@ -37,8 +37,8 @@ residual `R = Y - S - T`, which it feeds into a closed-form leave-one-out varian
 |---|---|---|---|
 | `pandas_ta/statistics/stl_spikiness.py` | statistics | `STLSPIKE_100` | unbounded, non-negative (a variance of variances; measured [1.46e-12, 4.92e-12] on a quiet AR(1) synthetic frame, up to 1.15e-10 on a frame with injected jumps — see Gate C) |
 
-Tests: `tests/test_stl_spikiness.py` (30 tests). Two test functions (four parametrized
-cases) call statsmodels as an oracle and skip where it is absent (CI); the rest, including
+Tests: `tests/test_stl_spikiness.py` (30 tests). Two test functions (four cases in total)
+call statsmodels as an oracle and skip where it is absent (CI); the rest, including
 a hand-run fixed-point cross-check and a closed-form-vs-brute-force check that do not
 depend on statsmodels, run everywhere.
 
@@ -59,13 +59,16 @@ check: `python docs/measure_stl_spikiness_cpu.py`. Measured 2026-11-24.
    and sum of squares `S2`, dropping element `i` leaves `n - 1` elements with sum
    `S1 - r_i` and sum of squares `S2 - r_i**2`, so that sub-array's own population mean and
    variance (`ddof=0`) follow directly with no re-summation. This is the literal leave-one-out
-   reading at `ddof=0`; Hyndman/Kats' `tsfeatures` formula for the same name instead computes
+   reading at `ddof=0`; Hyndman's R `tsfeatures` formula for the same name instead computes
    `vare = var(resid, ddof=1)`, `varloo = (vare*(n-1) - d)/(n-2)` (deviations about the full
-   mean, `ddof=1` on both legs) — algebraically the shipped value times the fixed positive
-   factor `n(n-2)^2/(n-1)^3` (0.98980 at `n=100`), so the two are rank-identical: Spearman,
-   the Gate E verdict and every band are unaffected. The issue's own cited formula
-   ("var(nanvar of leave-one-out resid)") is what is implemented here; not re-confirmed
-   against the Kats source directly (no network access this session). Checked identical to
+   mean, `ddof=1` on both legs — R's `var()` default) — algebraically the shipped value is the
+   Hyndman value times the fixed positive factor `n(n-2)^2/(n-1)^3` (0.98980 at `n=100`), so the
+   two are rank-identical regardless of direction: Spearman, the Gate E verdict and every band
+   are unaffected. The Kats Python transcription's own `ddof` was not independently re-confirmed
+   this session (no network access to the Kats source); the rank-identity argument survives
+   either choice — `ddof=0` on both legs instead gives Hyndman = shipped times
+   `(n-1)^4/(n^2(n-2)^2)`, also a fixed positive factor. The issue's own cited formula
+   ("var(nanvar of leave-one-out resid)") is what is implemented here. Checked identical to
    the brute-force loop to float rounding
    (`test_closed_form_matches_brute_force_on_an_arbitrary_array`, on plain random data with
    no STL involved; `test_matches_a_hand_run_fixed_point_recursion` and
@@ -288,6 +291,10 @@ for a GitHub runner without AVX-512): all 30 tests passed.
 Re-run after review round 1 (test-tolerance fixes, no change to the shipped module): the
 same subset above, 1544 passed / 7 skipped, and `python
 docs/measure_stl_spikiness_cpu.py` again 30 passed under the CPU-restricted environment.
+Round 1's own task log (`docs/reviews/auto-2026-11-24-kats-stl-spike-100/01-stl-spikiness.md`)
+quoted "174 passed" for this same re-run, a transcription error — re-run again in review
+round 2 against the identical subset: 1544 passed / 7 skipped, matching this line, not the
+task log's figure.
 
 Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
