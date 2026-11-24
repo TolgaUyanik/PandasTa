@@ -182,9 +182,9 @@ python -m pytest -q tests/test_level_shift_size.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-1,544 passed, 7 skipped, 1 failed (`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`)
-— measured before the ledger row was recorded; with the row now in `docs/gate_e_ledger.csv`
-(this commit), that test passes.
+Re-run after the ledger row was recorded (`docs/gate_e_ledger.csv`, receipt commit
+`cb34522`): 1,552 passed, 7 skipped, 0 failed — `test_every_indicator_that_needs_a_row_has_one`
+now passes.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 — the four features issue-solver's rules name, not this machine's
