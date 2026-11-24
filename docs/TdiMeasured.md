@@ -7,7 +7,7 @@ from the formula stated in the issue, never from `TDI.R`, and never from the pro
 script (the prototype's `mom.fillna(0)` is a screening-harness convenience, not part of
 the published formula, and is NOT reproduced here).
 
-**Status: Gates A-F cleared (SHIP). Round 4 below records the re-run Gate E.**
+**Status: Gates A-F cleared (SHIP). Round 5 below records the launcher's re-run Gate E at HEAD.**
 `tdi` is in `Category`, so any `df.ta.strategy()` sweep in the parent repo picks it up.
 
 Shipped: `pandas_ta/trend/tdi.py`, one column `TDI_<length>_<multiple>` (default
@@ -43,8 +43,8 @@ one place Gate A deliberately disagrees with the prototype rather than matching 
 | B Causality | pass | blind future-perturbation sweep, 1,499 offsets per frame: real module **0 leaks on every one of the eight frames** (`python docs/measure_tdi.py B`). Five look-ahead mutants read off the shipped source, `exec`'d in memory: proven LIVE on all eight frames, then caught on **36 of 36 tail offsets of every frame, including `flat`** — dividing by `close` (never by a high/low range) means there is no degenerate branch for a mutant to hide behind on a flat price, unlike `tao`'s partially-caught `hh-lead` mutant (`python docs/measure_tdi.py B1`) |
 | C Reachability | synthetic only | warm-up is a CONSTANT 59 bars on every one of the eight frames, including `flat`: 1,441 of 1,500 bars fire everywhere. On `flat`, `mom` is identically 0 (never NaN, since it is a plain close-minus-lagged-close difference, not a divide by a range), so the column fires at a constant 0.0 rather than going all-NaN (measured, `python docs/measure_tdi.py C`) |
 | D Scale-free | pass | x8/x64/2^-20/2^300 bit-identical on all eight frames; x10/x3.7/x0.1 within 1e-9 (measured at most 4.066e-15), identical NaN masks; `0 < fires < n` on the seven firing frames. A level shift does **NOT** cancel — measured 3.801e-02 / 9.231e-01 / 2.256 points at shift +1 / +50 / +1e6 on `walk` (column range roughly [-2, 2]) — because `mom` and both rolling sums cancel an additive constant exactly, but the `/close` divisor does not; this is the reason the issue specifies `/close` rather than a shift-invariant form, not a defect (`python docs/measure_tdi.py D`, which loops over the seven firing frames; the eighth, `flat`, is covered instead by `tests/test_tdi.py::test_scale_an_exact_binary_factor_is_bit_identical`, parametrized over all eight) |
-| E Attribution | pass (SHIP) | run `is148-tdi-a3774479` (Round 4 below), against the current module text (`candidate_source_sha1` `78fb84d9`): `TDI_20_2` max \|rho\| **0.4924** vs `mad_pct_Pctl` (manifest, n = 391,017 of 687 comparators = 329 `compute_all` + 358 manifest), per-frame max median \|rho\| **0.4915** over 89 ALTPORT-1 frames, 0.0% of frames at or above 0.90 -> **SHIP**, matching the issue's prototype measurement almost exactly. Canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). Recorded in `docs/gate_e_ledger.csv`. |
-| F Suites | this repo, targeted only | `python -m pytest -q tests/test_tdi.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` after the ledger record (Round 4, below). Same command's `test_tdi.py` subset under `python docs/measure_tdi_cpu.py disable pytest` (CPU kernels without AVX-512F/AVX512_SKX/AVX2/FMA3): 116 of 116 pass (measured 2026-11-23, Round 3). Whole suites: run by issue-solver in clean worktrees (see the PR body). |
+| E Attribution | pass (SHIP) | run `is148-tdi-b1bb91c6` (Round 5 below, the launcher's re-run on HEAD after the squash merge), against the shipped module text (`candidate_source_sha1` still `78fb84d9`, unchanged since Round 4): `TDI_20_2` max \|rho\| **0.4924** vs `mad_pct_Pctl` (manifest, n = 391,017 of 687 comparators = 329 `compute_all` + 358 manifest), per-frame max median \|rho\| **0.4915** over 89 ALTPORT-1 frames, 0.0% of frames at or above 0.90 -> **SHIP**, matching the issue's prototype measurement almost exactly. Canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). Recorded in `docs/gate_e_ledger.csv`. |
+| F Suites | this repo, targeted only | `python -m pytest -q tests/test_tdi.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` after the ledger record (Round 5, below). Same command's `test_tdi.py` subset under `python docs/measure_tdi_cpu.py disable pytest` (CPU kernels without AVX-512F/AVX512_SKX/AVX2/FMA3): 116 of 116 pass (measured 2026-11-23, Round 3). Whole suites: run by issue-solver in clean worktrees (see the PR body). |
 
 ### Round 2 (review fix) -- attribution
 
@@ -102,6 +102,29 @@ tests/test_prose_counts_match_the_csvs.py`: 1,542 passed, 7 skipped, 0 failed (m
 failure from Round 3 is gone now that `tdi:TDI_20_2` has a current row). Whole suites:
 run by issue-solver in clean worktrees (see the PR body).
 
+### Round 5 (receipt session) -- launcher's Gate E re-run at HEAD, ledger recorded, no revert
+
+The launcher ran Gate E on `pandas_ta/trend/tdi.py` at the squash-merged HEAD (`9fcbe4c`):
+run `is148-tdi-b1bb91c6`, `candidate_source_sha1` `78fb84d91c8948c93390fe89f809d9c0bddd67af`
+-- unchanged from Round 4's run, since the module's own text has not moved since the
+attribution fix -- 89 ALTPORT-1 frames, 398,849 pooled bars, 687 comparators (329
+`compute_all` + 358 manifest), canary bit-equal on AKBNK.IS / BIENY.IS / AGHOL.IS /
+SASA.IS. `TDI_20_2`: max \|rho\| 0.4924 vs `mad_pct_Pctl` (manifest, n = 391,017),
+per-frame max median \|rho\| 0.4915, 0.0% of the 89 frames at or above 0.90 ->
+**SHIP** under `r3-perframe-0.90`, identical to Round 4's numbers (the pandas_ta source
+feeding the engine did not change). Recorded with `python docs/gate_e_ledger.py record
+/home/tolga/.issue-solver/runs/20261124-120630-148/gatee/is148-tdi-b1bb91c6 --measured
+2026-11-24`, which accepted the run and replaced the ledger's `pandas_ta_src_sha1` (the
+squash merge changed the tree hash even though `tdi.py` itself did not) and run id/date.
+No column is STRUCK, so nothing is reverted; the port ships as-is.
+
+`python -m pytest -q tests/test_tdi.py tests/test_readme_counts.py
+tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py
+tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py
+tests/test_prose_counts_match_the_csvs.py`: 1,598 passed, 7 skipped, 0 failed (measured
+2026-11-24, after this round's ledger record). Whole suites: run by issue-solver in
+clean worktrees (see the PR body).
+
 ## CPU-kernel check (NPY_DISABLE_CPU_FEATURES)
 
 `python docs/measure_tdi_cpu.py disable pytest` (this machine's own features: all 116
@@ -154,6 +177,6 @@ The wall clock is this machine's and this run's.
 
 ## Open
 
-None. Gates A-F cleared (Round 4 above): Gate E re-run against the current module text
-and recorded in `docs/gate_e_ledger.csv` (SHIP, 0.4924 vs `mad_pct_Pctl`). Both repos'
-whole suites are run by issue-solver in clean worktrees per the PR body.
+None. Gates A-F cleared (Round 5 above): the launcher's Gate E re-run at HEAD recorded in
+`docs/gate_e_ledger.csv` (SHIP, 0.4924 vs `mad_pct_Pctl`, unchanged from Round 4). Both
+repos' whole suites are run by issue-solver in clean worktrees per the PR body.
