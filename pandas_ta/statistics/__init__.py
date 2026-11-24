@@ -38,6 +38,7 @@ from .quantile import quantile
 from .rank import rank
 from .skew import skew
 from .stdev import stdev
+from .stl_seasonal_strength import stl_seasonal_strength
 from .tf_autocorr_1e_60 import tf_autocorr_1e_60
 from .tf_centroid_20 import tf_centroid_20
 from .tf_dfa_100 import tf_dfa_100
