@@ -44,6 +44,7 @@ from .skew import skew
 from .stability import stability
 from .stdev import stdev
 from .stl_seasonal_strength import stl_seasonal_strength
+from .stl_spikiness import stl_spikiness
 from .stl_trend_strength import stl_trend_strength
 from .tf_autocorr_1e_60 import tf_autocorr_1e_60
 from .tf_centroid_20 import tf_centroid_20
