@@ -27,7 +27,7 @@ def _flat_spots(W):
 
 **Status:**
 - Gates A, B and D are cleared below.
-- Gate E: pending, run by issue-solver after this session.
+- Gate E: measured 2026-11-24, SHIP (see "Gate E").
 - Gate F: this repo's own suite (the module's tests plus the wiring/ledger/dictionary
   guards) is green, including under the CI CPU-feature set (see "Gate F"). Whole suites:
   run by issue-solver in clean worktrees (see the PR body).
@@ -196,7 +196,18 @@ Machine load moves these numbers; they are an order of magnitude, not a guarante
 
 ## Gate E — attribution
 
-Pending, run by issue-solver after this session.
+Run by issue-solver, Backtesting `gate_e_overlap.py run --module pandas_ta.statistics.flat_spots`,
+89 ALTPORT-1 BIST frames, 398,849 pooled bars, 687 comparators (329 `compute_all` + 358
+`ml_features` manifest), canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS. Outputs:
+`overlap_max.csv` / `meta.json`, run `is161-flat_spots-2695ebb4`.
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `FLATSPOTS_100` | 0.6192 | `ZIGZAG` | 32,802 | 0.6074 | SHIP |
+
+- 0.6192 < 0.76 (SHIP line) and the per-frame max median 0.6074 < 0.90: not a restatement
+  of any single comparator on any frame. Ledger row recorded 2026-11-24
+  (`docs/gate_e_ledger.csv`).
 
 ## Gate F — suites
 
@@ -214,6 +225,8 @@ skipped. The 1 failure is
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` on the owed
 `flat_spots` row -- expected per the issue-solver rules until the launcher's Gate E run
 and a receipt session record it, not a defect.
+
+Re-run this receipt session, after the ledger row was recorded: see "Run" below.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 -- this machine's own dispatchable set per
