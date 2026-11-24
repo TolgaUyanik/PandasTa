@@ -14,7 +14,7 @@ default) and a 100-bar outer window of log close — both choices are kept in th
 window size as a fixed module constant imported from `level_shift_idx`; the outer window
 as the `length` keyword).
 
-**Status:** shipped. Gates A–D and F measured below; Gate E pending.
+**Status:** shipped. Gates A–F all measured below.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -158,7 +158,16 @@ Machine load moves these numbers; they are an order of magnitude, not a guarante
 
 ## Gate E — attribution
 
-Gate E: pending, run by issue-solver after this session.
+Run by issue-solver (`gate_e_overlap.py run --module pandas_ta.statistics.level_shift_size`),
+89 ALTPORT-1 frames, n = 390,038, canary bit-equal, recorded in `docs/gate_e_ledger.csv`
+(measured 2026-11-25):
+
+| column | max \|rho\| | against | n | per-frame max median \|rho\| | verdict |
+|---|---|---|---|---|---|
+| `LEVELSHIFTSIZE_100` | 0.6322 | `natr` | 390,038 | 0.5951 | SHIP |
+
+Below the 0.76 ship line (CLAUDE.md Gate E bands). Matches the prototype's own screen
+measurement in issue #163 (0.6322 vs `natr`). Column ships as-is.
 
 ## Gate F — suites
 
