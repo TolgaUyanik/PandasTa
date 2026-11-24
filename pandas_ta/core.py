@@ -2063,6 +2063,11 @@ class AnalysisIndicators(BasePandasObject):
         result = firstzero_ac(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def flat_spots(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = flat_spots(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def g191_026(self, mean_length=None, corr_length=None, lag=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
