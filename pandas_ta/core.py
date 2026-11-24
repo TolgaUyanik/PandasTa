@@ -2205,6 +2205,11 @@ class AnalysisIndicators(BasePandasObject):
         result = stl_seasonal_strength(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def stl_spikiness(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = stl_spikiness(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def stl_trend_strength(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = stl_trend_strength(close=close, length=length, offset=offset, **kwargs)

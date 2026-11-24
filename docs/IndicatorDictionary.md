@@ -26,7 +26,7 @@ window per ticker before concatenating tickers.
 `*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is
 invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
-**392 indicators** probed; 1 raise on this environment (pandas 2.x) -- see [Known breaks](#known-breaks).
+**393 indicators** probed; 1 raise on this environment (pandas 2.x) -- see [Known breaks](#known-breaks).
 
 ### How many indicators is that, exactly
 
@@ -34,8 +34,8 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | surface | n | what it means |
 |---|---|---|
-| registered in `Category` | **390** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **398** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| registered in `Category` | **391** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **399** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
@@ -229,7 +229,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `trend_return` | C | `trend`, `log=True`, `asbool=None`, `trend_reset=0`, `trade_offset=None` | `TR_LOGRET_1` SF<br>`TR_CUMLOGRET_1` SF<br>`TR_Trends` BIN<br>`TR_Trades` BIN<br>`TR_Entries` BIN<br>`TR_Exits` BIN | 1 | Calculates the Returns and Cumulative Returns of a Trend as defined by a sequence of booleans called a 'trend'. One popular example in TA literature… |
 | `ytd_ret` | O/C | — | `YTD_RET` SF | 0 | The return from the open of the year's first bar to this bar's close, as a fraction. Resets on each calendar year's first bar, so on an ascending… |
 
-## statistics (78)
+## statistics (79)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -284,6 +284,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `stability` | C | `length=None` | `STABILITY_100` SF | 100 | How concentrated a persistent directional run is inside a rolling window of one-bar returns: z-score the window's returns, split them into tiles,… |
 | `stdev` | C | `length=None`, `ddof=1` | `STDEV_30` PX | 29 | Sources: |
 | `stl_seasonal_strength` | C | `length=None` | `STLSEAS_100` SF | 99 | The strength of a 5-bar (trading-week) seasonal cycle in a rolling window of log close, from an STL (Seasonal-Trend decomposition using LOESS) fit of… |
+| `stl_spikiness` | C | `length=None` | `STLSPIKE_100` CONST | 99 | The variance of the leave-one-out residual variances of a rolling window of log close, from an STL (Seasonal-Trend decomposition using LOESS) fit of… |
 | `stl_trend_strength` | C | `length=None` | `STLTREND_100` SF | 99 | The strength of the trend component in a rolling window of log close, from an STL (Seasonal-Trend decomposition using LOESS) fit of the window with a… |
 | `tf_autocorr_1e_60` | C | `length=None` | `TFAUTOCORR1E_60` SF | 59 | How long the last `length` bars of log price stay correlated with themselves: take the window's adjusted autocorrelation at lags 1, 2, ... and report… |
 | `tf_centroid_20` | C | `length=None` | `TFCENTROID_20` SF | 20 | The energy-weighted mean position of the last `length` bars' simple returns, on a 0..1 time axis where 0 is the oldest bar in the window and 1 is the… |
@@ -505,6 +506,7 @@ or delete* — was followed here, and the answer was that they are fine.
 | `rsi_divergence` | `RSIDIV_BEAR_14_4_4` | — unregistered, file one |
 | `flat_spots` | `FLATSPOTS_100` | — unregistered, file one |
 | `lot_zeroret_60` | `LOT_ZERORET_60` | — unregistered, file one |
+| `stl_spikiness` | `STLSPIKE_100` | — unregistered, file one |
 | `ts_reoccur_20` | `TS_REOCCUR_20` | — unregistered, file one |
 | `band_cross_retest` | `BANDXR_CROSS_UP_EMA_66_288` `BANDXR_CROSS_DN_EMA_66_288` `BANDXR_RETEST_FAST_EMA_66_288` `BANDXR_RETEST_SLOW_EMA_66_288` `BANDXR_GAP_ATR_EMA_66_288` | — unregistered, file one |
 | `flag_breakout` | `FLAG_CONF_BULL_12_0.85_0.15` `FLAG_CONF_BEAR_12_0.85_0.15` | — unregistered, file one |
