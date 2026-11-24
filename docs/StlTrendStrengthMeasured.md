@@ -38,9 +38,10 @@ elsewhere (`pandas_ta/momentum/sk_fcb_pos.py` imports private helpers from
 |---|---|---|---|
 | `pandas_ta/statistics/stl_trend_strength.py` | statistics | `STLTREND_100` | unbounded (Kats' own formula is not clipped; measured [0.9093, 0.9958] on this session's AR(1) synthetic frame, and exactly 1.0 for a noiseless drift — see Gate C and the drift guard table) |
 
-Tests: `tests/test_stl_trend_strength.py` (29 tests). Two call statsmodels as an oracle
-and are skipped where it is absent (CI); the rest, including a hand-run fixed-point
-cross-check that does not depend on statsmodels, run everywhere.
+Tests: `tests/test_stl_trend_strength.py` (29 tests). Two test functions (four
+parametrized cases) call statsmodels as an oracle and skip where it is absent (CI); the
+rest, including a hand-run fixed-point cross-check that does not depend on statsmodels,
+run everywhere.
 
 Numbers: `python docs/measure_stl_trend_strength.py`, from the repo root; needs
 statsmodels for the Gate A oracle. Environment: Python 3.11.2, pandas 2.3.3, numpy
@@ -152,7 +153,7 @@ shares that code — see Decision 1):
   frame (φ=0, the trend component dominates a random-walk log-price window, so the
   strength sits high — consistent with the standard tsfeatures observation that
   trend-strength of a random walk is typically close to 1).
-- **Real data:** Gate E's run, numbers filled in once it is measured.
+- **Real data:** 390,038 bars non-NaN and non-zero of 398,849 pooled (Gate E run, below).
 
 ## Gate D — scale-free
 
@@ -238,10 +239,8 @@ python -m pytest -q tests/test_stl_trend_strength.py tests/test_readme_counts.py
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-Result: 1 failed (`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-for exactly the reason this file states above: `stl_trend_strength` has no ledger row
-yet, Gate E owed), 1495 passed, 7 skipped. Expected, not a finding; a later receipt
-session records the row after the launcher's Gate E run.
+Re-run in this receipt session, after the ledger row was recorded: 1503 passed, 7
+skipped (0 failed — the ledger row closes the previously-owed failure).
 
 CPU-variant check (`python docs/measure_stl_trend_strength_cpu.py`,
 `NPY_DISABLE_CPU_FEATURES` set to this machine's AVX-512/AVX2/FMA3 features, standing in
