@@ -12,6 +12,7 @@ from .c22_median_freq import c22_median_freq
 from .c22_mode_10 import c22_mode_10
 from .c22_mode_5 import c22_mode_5
 from .c22_outlier_timing_neg import c22_outlier_timing_neg
+from .c22_outlier_timing_pos import c22_outlier_timing_pos
 from .c22_periodicity import c22_periodicity
 from .c22_stretch_decreasing import c22_stretch_decreasing
 from .diff1_pacf5 import diff1_pacf5
