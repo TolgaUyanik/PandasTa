@@ -2004,6 +2004,12 @@ class AnalysisIndicators(BasePandasObject):
                             **kwargs)
         return self._post_process(result, **kwargs)
 
+    def c22_outlier_timing_neg(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_outlier_timing_neg(close=close, length=length,
+                                        offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def c22_periodicity(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = c22_periodicity(close=close, length=length, offset=offset,
