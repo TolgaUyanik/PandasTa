@@ -33,6 +33,7 @@ from .sk_fcb_width import sk_fcb_width
 from .tf_median_absdiff_20 import tf_median_absdiff_20
 from .thermo import thermo
 from .true_range import true_range
+from .ttr_snr_20 import ttr_snr_20
 from .ui import ui
 from .volvol import volvol
 from .wvma import wvma

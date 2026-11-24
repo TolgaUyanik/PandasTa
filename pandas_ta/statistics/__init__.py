@@ -13,6 +13,7 @@ from .c22_mode_10 import c22_mode_10
 from .c22_mode_5 import c22_mode_5
 from .c22_periodicity import c22_periodicity
 from .c22_stretch_decreasing import c22_stretch_decreasing
+from .diff1_pacf5 import diff1_pacf5
 from .diff2_acf1 import diff2_acf1
 from .entlz import entlz
 from .entropy import entropy
@@ -27,6 +28,7 @@ from .kpss import kpss
 from .kurtosis import kurtosis
 from .lean_hurst_100 import lean_hurst_100
 from .lean_tdd_20 import lean_tdd_20
+from .level_shift_idx import level_shift_idx
 from .lot_zeroret_60 import lot_zeroret_60
 from .lumpiness import lumpiness
 from .mad import mad
@@ -36,7 +38,10 @@ from .osap_retskew_21 import osap_retskew_21
 from .quantile import quantile
 from .rank import rank
 from .skew import skew
+from .stability import stability
 from .stdev import stdev
+from .stl_seasonal_strength import stl_seasonal_strength
+from .stl_trend_strength import stl_trend_strength
 from .tf_autocorr_1e_60 import tf_autocorr_1e_60
 from .tf_centroid_20 import tf_centroid_20
 from .tf_dfa_100 import tf_dfa_100

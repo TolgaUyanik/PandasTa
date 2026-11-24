@@ -2021,6 +2021,11 @@ class AnalysisIndicators(BasePandasObject):
         result = cusum(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def diff1_pacf5(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = diff1_pacf5(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def diff2_acf1(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = diff2_acf1(close=close, length=length, offset=offset, **kwargs)
@@ -2116,6 +2121,11 @@ class AnalysisIndicators(BasePandasObject):
                              **kwargs)
         return self._post_process(result, **kwargs)
 
+    def level_shift_idx(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = level_shift_idx(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def lot_zeroret_60(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = lot_zeroret_60(close=close, length=length, offset=offset, **kwargs)
@@ -2163,9 +2173,24 @@ class AnalysisIndicators(BasePandasObject):
         result = skew(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def stability(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = stability(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def stdev(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = stdev(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def stl_seasonal_strength(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = stl_seasonal_strength(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def stl_trend_strength(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = stl_trend_strength(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def tf_autocorr_1e_60(self, length=None, offset=None, **kwargs):
@@ -3209,6 +3234,13 @@ class AnalysisIndicators(BasePandasObject):
         result = true_range(high=high, low=low, close=close, drift=drift, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def ttr_snr_20(self, length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = ttr_snr_20(high=high, low=low, close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def ui(self, length=None, scalar=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = ui(close=close, length=length, scalar=scalar, offset=offset, **kwargs)
@@ -3331,6 +3363,14 @@ class AnalysisIndicators(BasePandasObject):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = eom(high=high, low=low, close=close, volume=volume, length=length, divisor=divisor, offset=offset, drift=drift, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def fn_baspn_net(self, slow=None, fast=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = fn_baspn_net(high=high, low=low, close=close, volume=volume, slow=slow, fast=fast, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def g191_040(self, length=None, offset=None, **kwargs):

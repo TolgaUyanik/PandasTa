@@ -12,6 +12,7 @@ from .cmf import cmf
 from .demand import demand
 from .efi import efi
 from .eom import eom
+from .fn_baspn_net import fn_baspn_net
 from .g191_040 import g191_040
 from .g191_043 import g191_043
 from .g191_076 import g191_076
