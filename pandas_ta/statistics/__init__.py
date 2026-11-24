@@ -28,6 +28,7 @@ from .kpss import kpss
 from .kurtosis import kurtosis
 from .lean_hurst_100 import lean_hurst_100
 from .lean_tdd_20 import lean_tdd_20
+from .level_shift_idx import level_shift_idx
 from .lot_zeroret_60 import lot_zeroret_60
 from .lumpiness import lumpiness
 from .mad import mad
