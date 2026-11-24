@@ -14,7 +14,8 @@ return np.var(v)
 
 **Status:**
 - Gates A, B and D are cleared below.
-- Gate E: **pending, run by issue-solver after this session.**
+- **Gate E: SHIP.** Max |ρ| 0.2789 vs `mad_pct` (n = 389,949), per-frame max median
+  0.2625 — below the 0.76 ship line. Port ships.
 - Gate F: this repo's own suite (the module's tests plus the wiring/ledger/dictionary
   guards) is green, including under the CI CPU-feature set (see "Gate F"). Whole suites:
   run by issue-solver in clean worktrees (see the PR body).
@@ -119,8 +120,10 @@ Decision 4.
 
 - **Synthetic:** 500 of 600 bars fire (100 warm-up), and all 500 values are distinct
   (`test_fires_and_is_not_constant`).
-- **Real data:** not measured in this session — Gate E's run (pending) is also where the
-  real-data fire count will come from, the same as every other port in this repo.
+- **Real data:** Gate E's run `is158-stability-c2484f36`, 398,849 pooled bars over 89
+  ALTPORT-1 frames; `STABILITY_100` non-NaN and non-zero on 389,949 of them (the balance
+  is per-frame warm-up), so `0 < fires < n` holds on real data as well as synthetic (see
+  Gate E below).
 - What blanks a bar:
   - a bad or overflowing close blanks the `length` bars whose window holds its returns;
   - a window whose returns vary only at rounding level is NaN (Decision 4).
@@ -200,10 +203,16 @@ python -m pytest -q tests/test_stability.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-Result: 1 failed, 1479 passed, 7 skipped. The 1 failure is
+At the port commit (before the ledger row was recorded): 1 failed, 1479 passed, 7
+skipped. The 1 failure was
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` on the owed
 `stability` row — expected per the issue-solver rules until the launcher's Gate E run and
 a receipt session record it, not a defect.
+
+Result (this receipt session, after recording the ledger row above): 1487 passed, 7
+skipped, 0 failed. The jump from 1479 to 1487 passed (+8, net of the one failure flipping
+to pass) is `test_gate_e_ledger.py`'s per-row parametrization picking up the newly
+recorded `stability` row.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 — this machine's own dispatchable set per
