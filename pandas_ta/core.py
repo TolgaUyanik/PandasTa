@@ -2862,6 +2862,11 @@ class AnalysisIndicators(BasePandasObject):
         result = swing_equilibrium(high=high, low=low, close=close, left=left, right=right, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def tdi(self, length=None, multiple=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = tdi(close=close, length=length, multiple=multiple, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def tsignals(self, asbool=None, trend_reset=0, trade_offset=None, drift=None, offset=None, **kwargs):
         trend = self._get_column(kwargs.pop("close", "close"))
         result = tsignals(trend=trend, asbool=asbool, trend_reset=trend_reset, trade_offset=trade_offset, drift=drift, offset=offset, **kwargs)
