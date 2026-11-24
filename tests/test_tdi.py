@@ -49,8 +49,8 @@ What this file pins, in order of how much it would hurt to lose:
    1,500 fire). A flat price fires every bar from the warm-up on, always
    at the constant value 0.0 (`mom` is identically 0, never NaN, so unlike
    `tao`'s high/low range this column never blanks on a flat run).
-5. **Gate E, SHIP.** Run `is148-tdi-a3774479` (issue-solver launcher,
-   measured 2026-11-23, `module_sha1` `78fb84d9...`) measured `TDI_20_2`
+5. **Gate E, SHIP.** Run `is148-tdi-b1bb91c6` (issue-solver launcher,
+   measured 2026-11-24, `module_sha1` `78fb84d9...`) measured `TDI_20_2`
    max |rho| 0.4924 vs `mad_pct_Pctl` (manifest, n = 391,017), per-frame max
    median 0.4915, 0.0% of the 89 ALTPORT-1 frames at or above 0.90, 398,849
    bars, 329 + 358 = 687 comparators -- well under the 0.76 ship line. The
@@ -353,7 +353,7 @@ def test_scale_a_level_shift_does_not_cancel():
     assert _abs(col, other) > 1e-6
 
 
-@pytest.mark.parametrize("name", FIRING)
+@pytest.mark.parametrize("name", NAMES)
 def test_scale_fires_strictly_between_zero_and_n(name):
     col = _run(FRAMES[name]())
     assert 0 < int(col.notna().sum()) < col.size

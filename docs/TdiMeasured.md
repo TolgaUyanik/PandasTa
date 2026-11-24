@@ -125,6 +125,38 @@ tests/test_prose_counts_match_the_csvs.py`: 1,598 passed, 7 skipped, 0 failed (m
 2026-11-24, after this round's ledger record). Whole suites: run by issue-solver in
 clean worktrees (see the PR body).
 
+### Round 6 (review fix) -- §W numbers were a stale copy, run id was dangling
+
+A pre-push review (round 1 of the review gate) found a MAJOR: `§W Wiring` above
+had been copied from `docs/TtrSnr20Measured.md` (issue #149, seven ports ago)
+with only the trend bucket updated, so it stated `Category` total 380 and a
+census of 724 -> 725 / 358 -> 359 `SF` -- both contradicted by this same
+commit's own `tests/test_altport2_ports.py::CATEGORY_TOTAL = 387` and
+`README.md`'s "387 indicators". Re-ran `python docs/measure_tdi.py W W2` at
+HEAD and pasted its actual output into §W: `Category` total **387**, census
+**731 -> 732** tagged columns / **365 -> 366** `SF` (trend's own count of 66
+was already correct and unchanged).
+
+Two MINOR/NIT items from the same review fixed alongside: `tests/test_tdi.py`,
+`docs/MLCompanionContract.md`'s #148 clause, and `tests/test_altport2_ports.py`'s
+`CATEGORY_TOTAL` comment all still cited `is148-tdi-a3774479` (Round 4's run,
+measured 2026-11-23), replaced by `tdi` in Round 5; repointed all three to
+`is148-tdi-b1bb91c6`, measured 2026-11-24 -- the figures themselves (0.4924 /
+0.4915 / n = 391,017 / 398,849 bars / 329 + 358) were already correct and
+unchanged. `tests/test_tdi.py::test_scale_fires_strictly_between_zero_and_n`
+was parametrized over `FIRING` (excludes `flat`) for no stated reason while its
+bit-identity neighbour covers all eight frames; reparametrized over `NAMES`.
+`README.md`'s trend list carried unrelated ordering churn on three pairs
+(`fvg`/`fvg_sweep_magnet`, `vstop`/`vstop2`, `zigzag`/`zigzag_fib`) that this
+port's diff did not owe -- confirmed against the merge-base copy
+(`9b964a84`), which had all three in alphabetical order, and restored.
+
+`python -m pytest -q tests/test_tdi.py tests/test_readme_counts.py
+tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py
+tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py
+tests/test_prose_counts_match_the_csvs.py`: 1,599 passed, 7 skipped, 0 failed
+(measured 2026-11-24, after these edits).
+
 ## CPU-kernel check (NPY_DISABLE_CPU_FEATURES)
 
 `python docs/measure_tdi_cpu.py disable pytest` (this machine's own features: all 116
@@ -159,9 +191,10 @@ simple directional momentum term.
 ## §W Wiring — the five touch points
 
 1 module `pandas_ta/trend/tdi.py` · 2 `ta.trend.tdi` True · 3 `Category["trend"]` True
-(trend has 66, `Category` total 380) · 4 `df.ta.tdi` True, bit-equal to the function · 5
+(trend has 66, `Category` total 387) · 4 `df.ta.tdi` True, bit-equal to the function · 5
 `tests/test_tdi.py`. Column `TDI_20_2`. `docs/IndicatorDictionary.md` tags `TDI_20_2`
-`SF`. The census moves 724 -> 725 tagged columns and 358 -> 359 `SF`.
+`SF`. The census moves 731 -> 732 tagged columns and 365 -> 366 `SF` (measured
+2026-11-24, `python docs/measure_tdi.py W W2`, Round 6).
 
 ## §Z Cost
 
