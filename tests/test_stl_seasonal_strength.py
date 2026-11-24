@@ -27,10 +27,10 @@ What these pin, in order of how much it would hurt to lose:
   NaN (0/0), but a smooth deterministic drift of any steepness still
   fires -- STL reads log-close LEVELS directly, where a drift is real
   variation, unlike diff1_pacf5/diff2_acf1's guard on returns.
-* SCALE-FREE: x8/x64 match to ~1e-13 (not bit-identical -- the matrix
-  multiply visits rescaled values in a different magnitude, not an exact
-  power-of-two shift), x10/x3.7 within tolerance; the column fires, is not
-  constant, and a bad close nulls exactly the windows holding it.
+* SCALE-FREE: x8/x64 bit-identical (STL is fed `log(close / the window's
+  own first close)`, so a power-of-two rescale leaves every operator input
+  bit-unchanged), x10/x3.7 within 1e-10; the column fires, is not constant,
+  and a bad close nulls exactly the windows holding it.
 * Edge cases (bad closes including subnormal/infinite, short input, the
   length floor, chunk boundaries, non-multiple-of-5 lengths) and wiring
   (`Category`, the accessor, `STLSEAS_100`).
@@ -163,8 +163,8 @@ def test_a_smooth_drift_still_fires(g):
     """Unlike diff1_pacf5/diff2_acf1 (guarded on RETURNS, where a smooth
     drift is exactly constant), this reads log-close LEVELS, where a
     drift's values genuinely vary: every drift steepness fires, with
-    ordinary-looking values (measured in
-    docs/measure_stl_seasonal_strength.py: range ~[0.17, 0.38])."""
+    ordinary-looking values (measured union across the five steepnesses,
+    docs/StlSeasonalStrengthMeasured.md guard table: range [-0.04, 0.69])."""
     out = stl_seasonal_strength(Series(100 * (1 + g) ** np.arange(300.0)))
     assert out.iloc[99:].notna().all()
     assert out.iloc[99:].between(-1, 2).all()  # sanity: not numerically exploded

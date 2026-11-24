@@ -31,8 +31,9 @@ checked against statsmodels' own STL as an oracle in
 |---|---|---|---|
 | `pandas_ta/statistics/stl_seasonal_strength.py` | statistics | `STLSEAS_100` | unbounded (Kats' own formula is not clipped; measured [-0.04, 0.69] across this session's synthetic frames) |
 
-Tests: `tests/test_stl_seasonal_strength.py` (29 tests). Two call statsmodels as an oracle
-and are skipped where it is absent (CI); the rest, including a CI-runnable cross-check of
+Tests: `tests/test_stl_seasonal_strength.py` (29 tests). Four cases (two functions, one
+parametrised over lengths 50/100/101) call statsmodels as an oracle and are skipped where
+it is absent (CI); the rest, including a CI-runnable cross-check of
 `_build_ops`'s closed-form matrix-power shortcut against direct iteration (not an
 independent check of the LOESS/cycle-subseries/low-pass math itself — see Gate A, check 2),
 run everywhere.
@@ -222,6 +223,8 @@ reused for every window via a single matrix multiply per chunk, so cost scales w
 and with `length^2` (building the matrices) plus `n * length` (applying them) rather
 than with `n * length` STL fits the way the screen prototype's per-window
 `statsmodels.STL(...).fit()` loop did.
+
+## Gate E — overlap
 
 Run `is155-stl_seasonal_strength-8a978073`, 2026-11-24, 89 ALTPORT-1 frames, 398,849
 pooled bars (390,038 non-NaN/non-zero for `STLSEAS_100`), 687 comparators
