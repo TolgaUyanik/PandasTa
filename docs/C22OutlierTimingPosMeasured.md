@@ -14,7 +14,7 @@ PandasTa issue **#143** (C22-OUTLIER-TIMING-POS), ported 2026-11-23 on branch
 | Gate B | causal; 0 of 22 offsets leak on six frames; `write-back-dated`/`window-one-ahead` caught on 11 of 22, `chunk-wide-mean` caught on 22 of 22 — §B |
 | Gate C | fires on every bar with a full window (1,400 / 1,500) on all six frames; 95–192 distinct values per frame; `penny` (21.68% zero returns) still fires everywhere — §C |
 | Gate D | ×8/×64 bit-identical on 12/12 cells; ×10/×3.7 price and ×10/×3.7 return rescales move 0 bars with matching NaN masks on 23 of 24 cells (one `student-t` cell is a test-series artifact, not a scale-dependence: §D2); `0 < fires < n` on every stochastic frame — §D |
-| Gate E | **owed**: round 4 replaced the kernel, so the round-3 row was deleted; re-run by issue-solver — §Gate E |
+| Gate E | max \|ρ\| 0.4307 vs `dist_low_60`, per-frame max median 0.4467 vs `SMA_50_Slope_pct_Pctl`, n=389,949 — **SHIP** — §Gate E |
 | Gate F | targeted run after round 4: see §F; whole suites by issue-solver |
 
 Every number below was produced by `python docs/measure_c22_outlier_timing_pos.py`
@@ -246,8 +246,8 @@ tests/test_readme_counts.py tests/test_altport2_ports.py
 tests/test_wiring_accessors.py tests/test_ml_companions.py
 tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py
 tests/test_prose_counts_match_the_csvs.py`: **1,502 passed, 8 skipped, 0
-failed**. The `c22_outlier_timing_pos` Gate E row is owed until issue-solver
-re-records it.
+failed**. The `c22_outlier_timing_pos` Gate E row is now recorded
+(§Gate E).
 
 Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
@@ -264,9 +264,18 @@ in the meantime).
 
 ## Gate E
 
-**Owed.** Round 4 replaced the kernel (§0), so the round-3 row (0.0989 vs
-`mad_pct`) no longer describes this module and was deleted from
-`docs/gate_e_ledger.csv`. Gate E is re-run and recorded by issue-solver on
-this branch's resume; this section is replaced with its result then. The
-screen prototype, which called the reference library, measured 0.4307 vs
-`dist_low_60`; a port that now matches the reference should land near it.
+Run by issue-solver 2026-11-24 (`gate_e_overlap.py run --module
+pandas_ta.statistics.c22_outlier_timing_pos`), 89 ALTPORT-1 frames, 398,849
+pooled bars, 329 + 358 = 687 comparators, canary bit-equal on AKBNK.IS,
+BIENY.IS, AGHOL.IS, SASA.IS.
+
+| column | max \|ρ\| | against | n | per-frame max median | verdict |
+|---|---|---|---|---|---|
+| `C22OUTLIERTIMINGPOS_100` | 0.4307 | `dist_low_60` (compute_all) | 389,949 | 0.4467 vs `SMA_50_Slope_pct_Pctl` | **SHIP** |
+
+Both the pooled max and the per-frame max median sit far under the 0.76
+ship line (`r3-perframe-0.90` bands, `CLAUDE.md`). Matches the screen
+prototype's own reference-computed 0.4307 vs `dist_low_60` exactly — the
+top comparator is a volatility-regime column, not a price level or
+`Volume`, so the issue's tick-rounding worry is not what this column is
+tracking. Recorded in `docs/gate_e_ledger.csv`. **Ship decision: keep.**
