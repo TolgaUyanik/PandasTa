@@ -15,11 +15,7 @@ close, and rounds the diffs to 12 decimals before `argmax` — all three choices
 in this port (the window size and rounding as fixed module constants; the outer window
 as the `length` keyword).
 
-**Status:**
-- Gates A, B and D are measured below. This repo's own test subset (this port's module
-  plus the wiring/count/ledger guard modules) is green except the one expected
-  ledger-owed failure (see Gate F).
-- **Gate E: pending, run by issue-solver after this session.**
+**Status:** shipped. Gates A–F all measured below; Gate E SHIP (max |ρ| 0.4315 < 0.76).
 
 | module | category | column | range |
 |---|---|---|---|
@@ -143,7 +139,7 @@ construction above removes that confound.
 - **Synthetic:** 501 of 600 bars fire (99-bar warm-up) on a GARCH frame, 80 distinct
   values, range `[0.0000, 1.0000]` (`python docs/measure_level_shift_idx.py`,
   `reachability`).
-- **Real data:** not yet measured (Gate E owed; run by the launcher).
+- **Real data:** 390,038 bars non-NaN of 398,849 pooled (Gate E run, below).
 - What blanks a bar: a bad close blanks the `length` bars whose window holds it
   (Decision 6).
 
@@ -179,9 +175,15 @@ Machine load moves these numbers; they are an order of magnitude, not a guarante
 
 ## Gate E — attribution
 
-**Pending, run by issue-solver after this session.** This session does not run Gate E
-(no access to `../Backtesting`); a later receipt session records the measured numbers
-and the `docs/gate_e_ledger.csv` row here.
+Run by the launcher (`is159-level_shift_idx-df3bb0c6`, 89 ALTPORT-1 frames, 390,038 bars,
+687 comparators, canary bit-equal), recorded in `docs/gate_e_ledger.csv` 2026-11-24:
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `LEVELSHIFTIDX_100` | 0.4315 | `mad_pct_Pctl` (manifest) | 390,038 | 0.4354 | **SHIP** |
+
+0.4315 < 0.76 (SHIP line) — not a restatement of any existing comparator. Column ships
+as-is, no revert.
 
 ## Gate F — suites
 
@@ -194,10 +196,8 @@ python -m pytest -q tests/test_level_shift_idx.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-Result: 1 failed, 1489 passed, 7 skipped. The 1 failure is
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` on the owed
-`level_shift_idx` row — expected per the issue-solver rules until the launcher's Gate E
-run and a receipt session record it, not a defect.
+Re-run in this receipt session, after the ledger row was recorded: 1497 passed, 7
+skipped (0 failed — the ledger row closes the previously-owed failure).
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 — this machine's own dispatchable set per
