@@ -51,6 +51,7 @@ from .sr_corridor import sr_corridor
 from .sr_decay import sr_decay
 from .sr_force import sr_force
 from .swing_equilibrium import swing_equilibrium
+from .tdi import tdi
 from .tsignals import tsignals
 from .triangle_wedge import triangle_wedge
 from .triple_top_bottom import triple_top_bottom
