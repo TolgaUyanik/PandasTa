@@ -30,7 +30,8 @@ residual `R = Y - S - T`, which it feeds into a closed-form leave-one-out varian
 - Gates A, B and D are cleared, and this repo's test subset
   (`tests/test_stl_spikiness.py` plus the wiring/count suites named below) is green,
   which is the half of Gate F that runs here.
-- **Gate E: pending, run by issue-solver after this session.**
+- **Gate E: SHIP.** Max |ρ| 0.6321 vs `natr` (n = 390,038); per-frame max median 0.5918 — see
+  below.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -181,7 +182,9 @@ at every length tried.
   `measure_stl_spikiness.py`'s `reachability`, not imported — see Decision 9): 501 of 600
   bars fire, 501 distinct, range **[1.649e-13, 9.672e-13]** — the number Decision 9 cites
   for why the dictionary tags this column `CONST`.
-- **Real data:** not yet measured (Gate E pending; recorded by the receipt session).
+- **Real data (Gate E):** 390,038 of 398,849 bars non-NaN and non-zero, no degenerate.csv
+  row (`gate_e_overlap.py run`, 89 ALTPORT-1 frames, canary bit-equal on AKBNK.IS, BIENY.IS,
+  AGHOL.IS, SASA.IS).
 
 ## Gate D — scale-free
 
@@ -238,7 +241,16 @@ leave-one-out arithmetic which is linear in `n * length`.
 
 ## Gate E — attribution
 
-Pending, run by issue-solver after this session.
+Run `is162-stl_spikiness-0cd2d7cf`, `gate_e_overlap.py run --module
+pandas_ta.statistics.stl_spikiness --fn stl_spikiness`, 89 ALTPORT-1 frames, 398,849 bars,
+329 + 358 comparators (687 total), canary bit-equal on AKBNK.IS, BIENY.IS, AGHOL.IS,
+SASA.IS. Measured 2026-11-24.
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `STLSPIKE_100` | 0.6321 | `natr` | 390,038 | 0.5918 | SHIP |
+
+0.6321 < 0.76 (SHIP line, `r3-perframe-0.90` band): ship as-is, no column struck.
 
 ## Gate F — suites
 
@@ -251,9 +263,8 @@ python -m pytest -q tests/test_stl_spikiness.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails here —
-expected: `stl_spikiness` is new to `Category` and has no ledger row until the launcher's
-Gate E run and the receipt session record it.
+`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` passes as of
+this receipt session: the launcher's run recorded above into `docs/gate_e_ledger.csv`.
 
 CPU-variant check (`python docs/measure_stl_spikiness_cpu.py`,
 `NPY_DISABLE_CPU_FEATURES` set to this machine's AVX-512/AVX2/FMA3 features, standing in
