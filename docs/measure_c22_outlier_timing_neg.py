@@ -7,14 +7,19 @@
     python docs/measure_c22_outlier_timing_neg.py            # sections A-D, G, T
     python docs/measure_c22_outlier_timing_neg.py A D         # just those
 
-No reference implementation is run: pycatch22 is GPL-3.0 and is not even
-installed in this environment (not a declared dependency of this fork), and
-the only local trace of it, `docs/issues/screen/ind_screen_r3.py`, calls the
-library for MEASUREMENT ONLY and carries no algorithm. Gate A is against an
-independent SECOND SPELLING (plain Python, `statistics.median`, no numpy,
-no shared code with the shipped vectorised kernel) -- it checks the
-IMPLEMENTATION against the chosen reading of the definition, not the
-reading itself against a ground truth this session has no access to.
+No reference implementation is run BY THIS HARNESS: pycatch22 is GPL-3.0 and
+is not even installed in THIS environment (not a declared dependency of this
+fork, and this harness neither installs nor imports it), and the only local
+trace of it, `docs/issues/screen/ind_screen_r3.py`, calls the library for
+MEASUREMENT ONLY and carries no algorithm. The 26,118-window agreement
+reported in section 0 of `docs/C22OutlierTimingNegMeasured.md` was run
+separately by the owner on 2026-11-24, in a scratch environment outside this
+package, as a measure-only black-box comparison -- not by this script. Gate A
+here is against an independent SECOND SPELLING (plain Python,
+`statistics.median`, no numpy, no shared code with the shipped vectorised
+kernel) -- it checks the IMPLEMENTATION against the chosen reading of the
+definition, not the reading itself against a ground truth this session has
+no access to.
 
 Gate E is NOT here: it needs the private Backtesting engine and the 827 MB
 BIST cache, and issue-solver runs it after the porting session.

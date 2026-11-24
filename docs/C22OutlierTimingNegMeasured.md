@@ -54,12 +54,16 @@ The sweep is cut at the earlier of the last step still including more than
 2% of the `Y >= 0` count and the first step with fewer than two points. The
 column is the MEDIAN, over the steps up to that cut, of those per-step
 normalised median POSITIONS — a timing statistic, not a bar-gap statistic. Checked
-against the reference's OUTPUT (2026-11-24, owner): pycatch22 0.4.5
-(GPL-3.0), installed in a separate scratch environment and run as a black
-box on every full window of six synthetic 1,500-bar frames at lengths 100,
-10 and 37, agrees with this column on **26,118 of 26,118** windows to
-1e-12. No code was read from it and it is not a dependency. Gate A below
-is the independent plain-Python second spelling, kept as the test.
+against the reference's OUTPUT (2026-11-24, owner): pycatch22 0.4.5 from
+PyPI (GPL-3.0), installed in a separate scratch environment and run as a
+black box on every full window of six synthetic 1,500-bar frames at lengths
+100, 10 and 37, agrees with this column on **26,118 of 26,118** windows to
+1e-12. No code was read from it and it is not a dependency. `0.4.5` is the
+version actually installed and run; the issue text's "reference code
+pycatch22 1.0.2" names a different version, and this session has no way to
+check against PyPI (no web access) which is right -- flagged here, not
+silently reconciled. Gate A below is the independent plain-Python second
+spelling, kept as the test.
 
 **Round 1** (commit `11ebc10`) shipped a different quantity: a nested
 median of inter-event GAPS (`median(diff(idx(thr)))`), read off the paper's

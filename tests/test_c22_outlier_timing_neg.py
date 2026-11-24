@@ -320,9 +320,9 @@ def test_the_sweep_at_non_default_lengths(length):
                   _offsets(len(f), length)) == []
 
 
-#: How many of the 10 offsets each mutant must leak on. The corrected
-#: (round-2) column is NOT tie-heavy: walk holds 140 distinct values over
-#: 1,400 fired bars, each repeated ~10x on average -- Gate C -- so even a
+#: How many of the 10 offsets each mutant must leak on. The round-3
+#: column is NOT tie-heavy: walk holds 136 distinct values over
+#: 1,400 fired bars, each repeated ~10.3x on average -- Gate C -- so even a
 #: ONE-BAR perturbation (`write-back-dated`, `window-one-ahead`,
 #: `returns-rolled`) is caught on most offsets. Measured on this frame:
 #: write-back-dated 9/10, window-one-ahead 9/10, returns-rolled 9/10,
