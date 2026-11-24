@@ -27,7 +27,7 @@ residual `R = Y - S - T`, which it feeds into a closed-form leave-one-out varian
 (see Decision 1).
 
 **Status:**
-- Gates A, B and D are cleared, and this repo's test subset
+- Gates A, B, C and D are cleared, and this repo's test subset
   (`tests/test_stl_spikiness.py` plus the wiring/count suites named below) is green,
   which is the half of Gate F that runs here.
 - **Gate E: SHIP.** Max |ρ| 0.6321 vs `natr` (n = 390,038); per-frame max median 0.5918 — see
@@ -37,7 +37,7 @@ residual `R = Y - S - T`, which it feeds into a closed-form leave-one-out varian
 |---|---|---|---|
 | `pandas_ta/statistics/stl_spikiness.py` | statistics | `STLSPIKE_100` | unbounded, non-negative (a variance of variances; measured [1.46e-12, 4.92e-12] on a quiet AR(1) synthetic frame, up to 1.15e-10 on a frame with injected jumps — see Gate C) |
 
-Tests: `tests/test_stl_spikiness.py` (30 tests). Three test functions (five parametrized
+Tests: `tests/test_stl_spikiness.py` (30 tests). Two test functions (four parametrized
 cases) call statsmodels as an oracle and skip where it is absent (CI); the rest, including
 a hand-run fixed-point cross-check and a closed-form-vs-brute-force check that do not
 depend on statsmodels, run everywhere.
@@ -58,8 +58,15 @@ check: `python docs/measure_stl_spikiness_cpu.py`. Measured 2026-11-24.
    shipped module instead uses the closed form: for a length-`n` residual with sum `S1`
    and sum of squares `S2`, dropping element `i` leaves `n - 1` elements with sum
    `S1 - r_i` and sum of squares `S2 - r_i**2`, so that sub-array's own population mean and
-   variance (`ddof=0`, matching `numpy`'s and Kats' presumed default) follow directly with
-   no re-summation. Checked identical to the brute-force loop to float rounding
+   variance (`ddof=0`) follow directly with no re-summation. This is the literal leave-one-out
+   reading at `ddof=0`; Hyndman/Kats' `tsfeatures` formula for the same name instead computes
+   `vare = var(resid, ddof=1)`, `varloo = (vare*(n-1) - d)/(n-2)` (deviations about the full
+   mean, `ddof=1` on both legs) — algebraically the shipped value times the fixed positive
+   factor `n(n-2)^2/(n-1)^3` (0.98980 at `n=100`), so the two are rank-identical: Spearman,
+   the Gate E verdict and every band are unaffected. The issue's own cited formula
+   ("var(nanvar of leave-one-out resid)") is what is implemented here; not re-confirmed
+   against the Kats source directly (no network access this session). Checked identical to
+   the brute-force loop to float rounding
    (`test_closed_form_matches_brute_force_on_an_arbitrary_array`, on plain random data with
    no STL involved; `test_matches_a_hand_run_fixed_point_recursion` and
    `test_matches_statsmodels_stl`, through the full STL chain).
@@ -140,19 +147,24 @@ leave-one-out resid)" — rather than the module's own closed-form shortcut:
    Every difference is at the ~1e-23/1e-24 scale — far below even the magnitude of the
    values themselves (~1e-12, see Gate C), i.e. rounding, not a modelling gap.
    `test_matches_statsmodels_stl` (lengths 50/100/101) and
-   `test_a_length_not_a_multiple_of_5_still_matches` (length 53) pin this; both skip where
-   statsmodels is absent (CI).
+   `test_a_length_not_a_multiple_of_5_still_matches` (length 53) pin this with
+   `np.testing.assert_allclose(..., rtol=1e-6, atol=0)` against the collected oracle
+   values — relative, not absolute, since the quantity itself is ~1e-12: an absolute
+   tolerance in that range would pass a column wrong by orders of magnitude. Both skip
+   where statsmodels is absent (CI).
 2. **A hand-run fixed-point recursion** (`tests/test_stl_spikiness.py::_fixed_point_stl`,
    used by `test_matches_a_hand_run_fixed_point_recursion` and this script's
    `fixed_point_cross_check`): the same 5-pass inner loop iterated directly by calling
    `stl_seasonal_strength`'s own `_seasonal_op`/`_loess_weights` (not via `_build_ops`'s
    closed-form matrix powers), with the residual fed through the brute-force leave-one-out
-   loop. Matches the module to **1.44e-24** over 201 windows of a 300-bar AR(1) frame.
+   loop. Matches the module to **1.44e-24** over 201 windows of a 300-bar AR(1) frame
+   (`rtol=1e-6`, same reasoning as above).
 
-Additionally, `test_closed_form_matches_brute_force_on_an_arbitrary_array` isolates the
-closed-form leave-one-out shortcut itself (no STL at all) against the brute-force loop on
-plain random arrays of length 5, 10, 50 and 101: exact to float rounding (<1e-10 abs diff)
-at every length tried.
+Additionally, `test_closed_form_matches_brute_force_on_an_arbitrary_array` exercises
+`stl_spikiness` itself (not a re-typed copy of its arithmetic) at four window lengths not
+covered by the checks above (50, 73, 101, 150 — 73 not a multiple of 5), each compared
+against `_brute_force_spikiness` of the SAME residual obtained independently via
+`_fixed_point_stl`: matches to `rtol=1e-6`.
 
 ## Gate B — causality
 
@@ -182,9 +194,12 @@ at every length tried.
   `measure_stl_spikiness.py`'s `reachability`, not imported — see Decision 9): 501 of 600
   bars fire, 501 distinct, range **[1.649e-13, 9.672e-13]** — the number Decision 9 cites
   for why the dictionary tags this column `CONST`.
-- **Real data (Gate E):** 390,038 of 398,849 bars non-NaN and non-zero, no degenerate.csv
-  row (`gate_e_overlap.py run`, 89 ALTPORT-1 frames, canary bit-equal on AKBNK.IS, BIENY.IS,
-  AGHOL.IS, SASA.IS).
+- **Real data (Gate E):** 390,038 of 398,849 bars non-NaN and non-zero (`gate_e_overlap.py
+  run`, 89 ALTPORT-1 frames, canary bit-equal on AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). 1 of
+  the 687 comparators degenerate — `squeeze_SQZ_NO` (manifest), reason `constant`, i.e. the
+  COMPARATOR had no variation on the pooled rows; it is not a statement about `STLSPIKE_100`,
+  which `gate_e_overlap.py` would have raised on had it been constant (gate_e.py:208). The
+  remaining 686 comparators carried a correlation.
 
 ## Gate D — scale-free
 
@@ -269,6 +284,10 @@ this receipt session: the launcher's run recorded above into `docs/gate_e_ledger
 CPU-variant check (`python docs/measure_stl_spikiness_cpu.py`,
 `NPY_DISABLE_CPU_FEATURES` set to this machine's AVX-512/AVX2/FMA3 features, standing in
 for a GitHub runner without AVX-512): all 30 tests passed.
+
+Re-run after review round 1 (test-tolerance fixes, no change to the shipped module): the
+same subset above, 1544 passed / 7 skipped, and `python
+docs/measure_stl_spikiness_cpu.py` again 30 passed under the CPU-restricted environment.
 
 Whole suites: run by issue-solver in clean worktrees (see the PR body).
 

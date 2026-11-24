@@ -99,12 +99,17 @@ def test_matches_a_hand_run_fixed_point_recursion():
     close = _ar1(300, seed=2, phi=-0.2)
     logc = np.log(close.to_numpy())
     out = stl_spikiness(close, length=100).to_numpy()
-    for t in (99, 150, 220, 299):
+    ts = (99, 150, 220, 299)
+    refs = np.empty(len(ts))
+    for idx, t in enumerate(ts):
         w = logc[t - 99:t + 1]
         trend, seasonal = _fixed_point_stl(w)
         resid = w - trend - seasonal
-        ref = _brute_force_spikiness(resid)
-        assert out[t] == pytest.approx(ref, abs=1e-9)
+        refs[idx] = _brute_force_spikiness(resid)
+    # STLSPIKE_100 is ~1e-12 on these frames, so an absolute tolerance would
+    # pass values wrong by orders of magnitude: relative, against the
+    # ~1e-24 measured agreement (docs/StlSpikinessMeasured.md's Gate A table).
+    np.testing.assert_allclose(out[list(ts)], refs, rtol=1e-6, atol=0)
 
 
 @pytest.mark.parametrize("length", [50, 100, 101])
@@ -121,13 +126,15 @@ def test_matches_statsmodels_stl(length):
     close = _ar1(400, seed=1, phi=0.2)
     out = stl_spikiness(close, length=length).to_numpy()
     logc = np.log(close.to_numpy())
-    maxdiff = 0.0
+    refs = np.empty(close.size - (length - 1))
     for t in range(length - 1, close.size):
         w = logc[t - length + 1:t + 1]
         r = stl(w, period=5).fit()
-        ref = _brute_force_spikiness(r.resid)
-        maxdiff = max(maxdiff, abs(out[t] - ref))
-    assert maxdiff < 1e-6
+        refs[t - (length - 1)] = _brute_force_spikiness(r.resid)
+    # Relative, not absolute: STLSPIKE_100 is ~1e-12 here (measured agreement
+    # is rtol ~1e-11; 1e-6 leaves five orders of slack -- see
+    # docs/StlSpikinessMeasured.md's Gate A table).
+    np.testing.assert_allclose(out[length - 1:], refs, rtol=1e-6, atol=0)
     assert np.isnan(out[:length - 1]).all()
 
 
@@ -139,28 +146,34 @@ def test_a_length_not_a_multiple_of_5_still_matches():
     close = _ar1(200, seed=3, phi=0.1)
     out = stl_spikiness(close, length=53).to_numpy()
     logc = np.log(close.to_numpy())
-    for t in range(52, 200, 7):
+    ts = list(range(52, 200, 7))
+    refs = np.empty(len(ts))
+    for idx, t in enumerate(ts):
         w = logc[t - 52:t + 1]
         r = stl(w, period=5).fit()
-        ref = _brute_force_spikiness(r.resid)
-        assert out[t] == pytest.approx(ref, abs=1e-6)
+        refs[idx] = _brute_force_spikiness(r.resid)
+    np.testing.assert_allclose(out[ts], refs, rtol=1e-6, atol=0)
 
 
 def test_closed_form_matches_brute_force_on_an_arbitrary_array():
-    """The closed-form leave-one-out shortcut (`stl_spikiness.py`'s own
-    arithmetic) against the brute-force `np.delete` loop, on plain random
-    data with no STL involved at all -- isolates the closed form from the
-    STL decomposition entirely."""
-    rng = np.random.default_rng(7)
-    for n in (5, 10, 50, 101):
-        x = rng.standard_normal(n)
-        s1, s2 = x.sum(), (x * x).sum()
-        m = n - 1
-        loo_mean = (s1 - x) / m
-        loo_var = (s2 - x * x) / m - loo_mean * loo_mean
-        closed = loo_var.var()
-        brute = _brute_force_spikiness(x)
-        assert closed == pytest.approx(brute, abs=1e-10)
+    """The module's own closed-form leave-one-out shortcut, exercised
+    through `stl_spikiness` ITSELF (not re-derived in the test body) and
+    compared against the brute-force `np.delete` loop fed the SAME
+    residual, obtained independently via the hand-run fixed-point STL
+    route -- at window lengths (50, 73, 101, 150) not covered by the other
+    oracle tests, including one (73) not a multiple of 5."""
+    cases = ((50, 11, -0.05, 60), (73, 12, 0.1, 90), (101, 13, -0.15, 140), (150, 14, 0.0, 200))
+    out_vals = np.empty(len(cases))
+    refs = np.empty(len(cases))
+    for idx, (length, seed, phi, t) in enumerate(cases):
+        close = _ar1(t + 1, seed=seed, phi=phi)
+        logc = np.log(close.to_numpy())
+        out_vals[idx] = stl_spikiness(close, length=length).to_numpy()[t]
+        w = logc[t - length + 1:t + 1]
+        trend, seasonal = _fixed_point_stl(w)
+        resid = w - trend - seasonal
+        refs[idx] = _brute_force_spikiness(resid)
+    np.testing.assert_allclose(out_vals, refs, rtol=1e-6, atol=0)
 
 
 # ------------------------------------------------------- the flat/jitter guard
