@@ -18,7 +18,8 @@
   boundaries), wiring (Category + accessor).
 - `docs/measure_level_shift_size.py`, `docs/measure_level_shift_size_cpu.py` — measurement
   and CPU-feature-restricted test-runner scripts, mirroring the sibling's.
-- `docs/LevelShiftSizeMeasured.md` — the receipt. Gate E recorded as pending.
+- `docs/LevelShiftSizeMeasured.md` — the receipt. Snapshot of this port commit; Gate E
+  recorded as pending here, closed in receipt commit cb34522.
 - Wiring: `pandas_ta/statistics/__init__.py` export, `pandas_ta/__init__.py` Category
   entry, `pandas_ta/core.py` accessor — all alphabetically between `level_shift_idx` and
   `lot_zeroret_60`.

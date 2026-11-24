@@ -80,7 +80,7 @@ Kats' `max`-of-diffs formula, transcribed independently as a plain Python loop o
 iid normal, a deliberate level shift, and tick-rounded data near 5.00 on a 0.01 tick), at
 lengths 21, 50 and 100:
 
-| frame | length | bars compared | NaN masks equal | max abs diff |
+| frame | length | bars compared | NaN masks equal | max abs diff (worst of 21/50/100) |
 |---|---|---|---|---|
 | GARCH(0.10, 0.85) | 21 / 50 / 100 | 1,480 / 1,451 / 1,401 | yes / yes / yes | 2.08e-15 |
 | iid normal | 21 / 50 / 100 | 1,480 / 1,451 / 1,401 | yes / yes / yes | 2.30e-15 |
@@ -123,7 +123,8 @@ tail-perturbation probe, for the same low-power reason (Decision 7).
   values, range `[0.006342, 0.019263]` (`python docs/measure_level_shift_size.py`,
   `reachability`). All fired values are `>= 0`, as the formula guarantees
   (`test_fires_and_is_not_constant`).
-- Real-data reachability: pending the Gate E run (below).
+- **Real data:** 390,038 bars non-NaN of 398,849 pooled, all 390,038 non-zero (Gate E run
+  `is163-level_shift_size-3f437536`, below).
 - What blanks a bar: a bad close blanks the `length` bars whose window holds it
   (Decision 6).
 
@@ -167,7 +168,8 @@ Run by issue-solver (`gate_e_overlap.py run --module pandas_ta.statistics.level_
 | `LEVELSHIFTSIZE_100` | 0.6322 | `natr` | 390,038 | 0.5951 | SHIP |
 
 Below the 0.76 ship line (CLAUDE.md Gate E bands). Matches the prototype's own screen
-measurement in issue #163 (0.6322 vs `natr`). Column ships as-is.
+measurement in issue #163 (0.6322 vs `natr`). Column ships as-is. One degenerate
+comparator row (`squeeze_SQZ_NO`, constant); the shipped column is not degenerate.
 
 ## Gate F — suites
 
@@ -180,9 +182,9 @@ python -m pytest -q tests/test_level_shift_size.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-1,544 passed, 7 skipped, 1 failed (`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-— expected and documented in this issue's rules: the ledger row is recorded in a later
-receipt session, after the launcher's Gate E run).
+1,544 passed, 7 skipped, 1 failed (`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`)
+— measured before the ledger row was recorded; with the row now in `docs/gate_e_ledger.csv`
+(this commit), that test passes.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 — the four features issue-solver's rules name, not this machine's
@@ -200,7 +202,8 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
   chain).
 - `docs/IndicatorDictionary.md`, regenerated with this environment's package. Its diff is
   the `level_shift_size` row (`LEVELSHIFTSIZE_100` SF, 99 warm-up), the three header
-  counts, the statistics section count, and the SF shortlist, and nothing else.
+  counts, the statistics section count, the SF shortlist, and the probe-run date line
+  (2026-11-24 → 2026-11-25), and nothing else.
 - `Category`: `level_shift_size` is placed alphabetically, after `level_shift_idx` and
   before `lot_zeroret_60`.
 
