@@ -9,9 +9,10 @@ What these pin, in order of how much it would hurt to lose:
 * CORRECTNESS against the source: the prototype's own `_flat_spots`
   (`docs/issues/screen/ind_screen_r5.py` L107-116), transcribed verbatim
   as a per-window oracle, compared bit-identically to the module at every
-  bar on five synthetic frames, lengths 20/30/100. A closed form: a
-  window with one 10-bar chunk forced flat reads exactly that chunk's
-  size (10), every other chunk strictly increasing (run 0).
+  bar on three synthetic frames (one ticky at lengths 20/30/100, plus a
+  continuous and a ticky frame at length 20). A closed form: a window
+  with one 10-bar chunk forced flat reads exactly that chunk's size (10),
+  every other chunk strictly increasing (run 0).
 * CAUSALITY by future-perturbation over 16 offsets, and a mutant (the
   write index moved one bar earlier) proved live and caught at every
   offset. A bad tick moves exactly the bars whose window holds it.

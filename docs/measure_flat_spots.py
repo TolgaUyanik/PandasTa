@@ -55,7 +55,7 @@ def scale_tolerance():
 def reachability():
     print("== Gate C: synthetic reachability ==")
     out = T.flat_spots(T._ticky(seed=4))
-    print(f"  600 bars, 100 warm-up: {out.notna().sum()} fire, {out.dropna().nunique()} distinct values, "
+    print(f"  600 bars, 99 warm-up (length - 1): {out.notna().sum()} fire, {out.dropna().nunique()} distinct values, "
           f"range [{out.min():.0f}, {out.max():.0f}]")
 
 

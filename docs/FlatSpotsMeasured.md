@@ -26,7 +26,7 @@ def _flat_spots(W):
 ```
 
 **Status:**
-- Gates A, B and D are cleared below.
+- Gates A, B, C and D are cleared below.
 - Gate E: measured 2026-11-24, SHIP (see "Gate E").
 - Gate F: this repo's own suite (the module's tests plus the wiring/ledger/dictionary
   guards) is green, including under the CI CPU-feature set (see "Gate F"). Whole suites:
@@ -131,7 +131,12 @@ on three synthetic frames (one continuous-float, two tick-rounded) at lengths 20
 - **Synthetic:** 501 of 600 bars fire (99-bar warm-up, `length - 1`), 4 distinct values,
   range [2, 5], on a ticky 0.01-tick frame near price 5
   (`test_fires_and_is_not_constant`, `measure_flat_spots.py`'s `reachability`).
-- **Real data:** Gate E's run, pending (see "Status").
+- **Real data** (Gate E run `is161-flat_spots-2695ebb4`, 89 ALTPORT-1 frames,
+  398,849 pooled bars): 390,038 non-NaN, the same 390,038 non-zero
+  (`overlap_max.csv` `non_nan`/`non_zero`); `FLATSPOTS_100` is not in
+  `degenerate.csv` (its one row is the comparator `squeeze_SQZ_NO`), so the
+  column is non-constant on real data -- the `CONST` dictionary tag is the
+  probe fixture, as §Gate C ⚠ below argues.
 - What blanks a bar: a non-finite close (NaN or ±inf) blanks the `length` bars whose
   window holds it (`test_a_non_finite_close_blanks_its_windows`).
 - ⚠ **The generated `docs/IndicatorDictionary.md` tags `FLATSPOTS_100` as `CONST`.** Its
@@ -147,9 +152,8 @@ on three synthetic frames (one continuous-float, two tick-rounded) at lengths 20
 
 ## Gate D — scale-free
 
-- ×8 and ×64: bit-identical, with matching NaN masks
-  (`test_price_scale_is_bit_identical`).
-- ×8 and ×64: bit-identical (boolean `==` comparison, `test_price_scale_is_bit_identical`).
+- ×8 and ×64: bit-identical with matching NaN masks (boolean `==`,
+  `test_price_scale_is_bit_identical`).
 - ×10 and ×3.7: measured max abs diff exactly 0.0, not merely within a tolerance --
   `==` is a deterministic function of its operands' bits, so it survives ANY uniform
   rescale exactly (Decision 4; `test_price_scale_within_tolerance`,
@@ -226,7 +230,10 @@ skipped. The 1 failure is
 `flat_spots` row -- expected per the issue-solver rules until the launcher's Gate E run
 and a receipt session record it, not a defect.
 
-Re-run this receipt session, after the ledger row was recorded: see "Run" below.
+Re-run, this receipt session, after the ledger row was recorded (same command as
+above): 1530 passed, 7 skipped, 0 failed -- the one pre-ledger failure
+(`test_every_indicator_that_needs_a_row_has_one`) now passes with the recorded
+row. Whole-suite comparison is the launcher's (`tests.md`), not re-run here.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 -- this machine's own dispatchable set per
