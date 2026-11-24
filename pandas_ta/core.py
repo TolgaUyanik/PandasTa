@@ -2168,6 +2168,11 @@ class AnalysisIndicators(BasePandasObject):
         result = skew(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def stability(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = stability(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def stdev(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = stdev(close=close, length=length, offset=offset, **kwargs)

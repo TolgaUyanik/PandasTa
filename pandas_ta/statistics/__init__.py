@@ -37,6 +37,7 @@ from .osap_retskew_21 import osap_retskew_21
 from .quantile import quantile
 from .rank import rank
 from .skew import skew
+from .stability import stability
 from .stdev import stdev
 from .stl_seasonal_strength import stl_seasonal_strength
 from .tf_autocorr_1e_60 import tf_autocorr_1e_60
