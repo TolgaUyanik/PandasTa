@@ -26,7 +26,7 @@ window per ticker before concatenating tickers.
 `*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is
 invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
-**391 indicators** probed; 1 raise on this environment (pandas 2.x) -- see [Known breaks](#known-breaks).
+**392 indicators** probed; 1 raise on this environment (pandas 2.x) -- see [Known breaks](#known-breaks).
 
 ### How many indicators is that, exactly
 
@@ -34,8 +34,8 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | surface | n | what it means |
 |---|---|---|
-| registered in `Category` | **389** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **397** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| registered in `Category` | **390** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **398** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
@@ -229,7 +229,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `trend_return` | C | `trend`, `log=True`, `asbool=None`, `trend_reset=0`, `trade_offset=None` | `TR_LOGRET_1` SF<br>`TR_CUMLOGRET_1` SF<br>`TR_Trends` BIN<br>`TR_Trades` BIN<br>`TR_Entries` BIN<br>`TR_Exits` BIN | 1 | Calculates the Returns and Cumulative Returns of a Trend as defined by a sequence of booleans called a 'trend'. One popular example in TA literature… |
 | `ytd_ret` | O/C | — | `YTD_RET` SF | 0 | The return from the open of the year's first bar to this bar's close, as a fraction. Resets on each calendar year's first bar, so on an ascending… |
 
-## statistics (77)
+## statistics (78)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -257,6 +257,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `entropy` | C | `length=None`, `base=None` | `ENTP_10` SF | 18 | Introduced by Claude Shannon in 1948, entropy measures the unpredictability of the data, or equivalently, of its average information. A die has… |
 | `ffd` | C | `d=None`, `threshold=None` | `FFD_0.4_0.0001` SF | 281 | A rolling linear filter of log price that keeps more memory than a one-bar return: `FFD_t = sum_{k=0}^{W-1} w_k * y_{t-k}`, where `y = log(close /… |
 | `firstzero_ac` | C | `length=None` | `FIRSTZEROAC_100` ORD | 100 | Over a rolling window of one-bar returns, take the sample autocorrelation at every lag 1 .. length - 1 and report the first lag whose autocorrelation… |
+| `flat_spots` | C | `length=None` | `FLATSPOTS_100` CONST | 99 | Over a rolling window of closes, split the window into 10 equal-size chunks and, inside each chunk, find the longest run of consecutive bars whose… |
 | `g191_026` | H/L/C | `mean_length=None`, `corr_length=None`, `lag=None` | `G191_026_7_230_5` SF | 234 | Guotai Junan's (2017, "GTJA191") alpha `#26`, per issue #56. A mean-reversion gap (how far the close sits below its own trailing 7-bar average, as a… |
 | `g191_044` | H/L/C/V | `mean_v_length=None`, `corr_length=None`, `decay1_length=None`, `tsrank1_length=None`, `delta_length=None`, `decay2_length=None`, `tsrank2_length=None` | `G191_044_10_7_6_4_3_10_15` SF | 26 | Guotai Junan's (2017, "GTJA191") alpha `#44`, per issue #60. Sums two time-series percentile ranks: how unusually high the (6-bar decay-smoothed)… |
 | `g191_165` | C | `length=None` | `G191_165_48` SF | 47 | Guotai Junan's (2017, "GTJA191") alpha `#165`, per issue #55. The classical rescaled-range (R/S) statistic (Hurst 1951) over a trailing window: the… |
@@ -502,6 +503,7 @@ or delete* — was followed here, and the answer was that they are fine.
 | `cdl_pattern` | `CDL_3BLACKCROWS` `CDL_3LINESTRIKE` `CDL_3STARSINSOUTH` `CDL_3WHITESOLDIERS` `CDL_ABANDONEDBABY` `CDL_ADVANCEBLOCK` `CDL_BREAKAWAY` `CDL_CONCEALBABYSWALL` `CDL_DARKCLOUDCOVER` `CDL_EVENINGDOJISTAR` `CDL_EVENINGSTAR` `CDL_HIKKAKEMOD` `CDL_IDENTICAL3CROWS` `CDL_KICKING` `CDL_KICKINGBYLENGTH` `CDL_MATHOLD` `CDL_MORNINGDOJISTAR` `CDL_PIERCING` `CDL_RISEFALL3METHODS` `CDL_STICKSANDWICH` `CDL_THRUSTING` `CDL_TRISTAR` `CDL_UNIQUE3RIVER` | none — fixture artifact, 0 of 62 constant on 91,197 real BIST bars (CANDLE-0) |
 | `macd_area_divergence` | `MADIV_TOP_20_60_120` `MADIV_BOT_20_60_120` | — unregistered, file one |
 | `rsi_divergence` | `RSIDIV_BEAR_14_4_4` | — unregistered, file one |
+| `flat_spots` | `FLATSPOTS_100` | — unregistered, file one |
 | `lot_zeroret_60` | `LOT_ZERORET_60` | — unregistered, file one |
 | `ts_reoccur_20` | `TS_REOCCUR_20` | — unregistered, file one |
 | `band_cross_retest` | `BANDXR_CROSS_UP_EMA_66_288` `BANDXR_CROSS_DN_EMA_66_288` `BANDXR_RETEST_FAST_EMA_66_288` `BANDXR_RETEST_SLOW_EMA_66_288` `BANDXR_GAP_ATR_EMA_66_288` | — unregistered, file one |

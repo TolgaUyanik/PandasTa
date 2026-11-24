@@ -20,6 +20,7 @@ from .diff2_acf1 import diff2_acf1
 from .entlz import entlz
 from .entropy import entropy
 from .firstzero_ac import firstzero_ac
+from .flat_spots import flat_spots
 from .g191_026 import g191_026
 from .g191_044 import g191_044
 from .g191_165 import g191_165
