@@ -16,8 +16,7 @@ formula, not the prototype"), not from the screen prototype
 (`docs/issues/screen/ind_screen_r6.py`'s `rd_vwio_10`, which is mathematically the same
 reading but is not what Gate A cites).
 
-**Status:** Gates A–D measured this session. Gate E owed; run by issue-solver after this
-session.
+**Status:** Gates A–F measured. Gate E SHIP (0.6542 vs `qstick_pct`). Shipped.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -141,17 +140,18 @@ values (not a constant column) — the same frame as Gate C.
 
 ## Gate E — attribution
 
-Pending, run by issue-solver after this session.
+Run by issue-solver (launcher), recorded in `docs/gate_e_ledger.csv`. Run dir
+`is173-rd_vwio_10-cbadc748`, 89 ALTPORT-1 frames, 398,849 pooled bars, 687 comparators
+(329 `compute_all` + 358 manifest), canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS.
 
-Prior-session context (prototype screen run, not Gate E itself; issue text, quoted, not
-re-measured): max |ρ| 0.6543 vs `qstick_pct` (manifest, n = 398,048; top-5 per-frame max
-median 0.6430) — SHIP. Next comparators: `qstick_pct_Pctl` 0.5826, `qstick` 0.5802.
-Fork overlap (stage 2, not Gate E; scale-free `Category` outputs at defaults, 12 frames):
-max |ρ| 0.6546 vs `imi:IMI_14`, per-frame max median 0.6263 — not a restatement at the
-0.90 line. These numbers describe the screen prototype's plain-`ewm` reading of "EMA", not
-this module's SMA-seeded reading; Gate A above measures the two as the same number after
-warm-up (max |diff| 1.144e-09), so they should carry over, but the receipt session's own
-Gate E run is the number that counts.
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `RD_VWIO_10` | 0.6542274872500634 | `qstick_pct` (manifest) | 398,048 | 0.642992334952896 | **SHIP** |
+
+0.6542 < 0.76 ship line (`CLAUDE.md`'s Gate E bands) — not DISCLOSE, not STRUCK. Matches
+the prior-session screen prototype's number (0.6543 vs `qstick_pct`) to 4 decimal places,
+consistent with Gate A's measurement that the two "EMA" readings agree after warm-up (max
+|diff| 1.144e-09).
 
 ## Gate F — suites
 
@@ -164,11 +164,8 @@ python -m pytest -q tests/test_rd_vwio_10.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,599 passed, 7 skipped, 1 failed** —
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails with
-"no Gate E ledger row for ['rd_vwio_10']", expected per the issue-solver rules until the
-launcher's Gate E run and the receipt session record the ledger row.
-`tests/test_rd_vwio_10.py` alone: 21 passed.
+**1,607 passed, 7 skipped, 0 failed** — this receipt session, after recording the Gate E
+ledger row above. `tests/test_rd_vwio_10.py` alone: 21 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 — the four features issue-solver's rules name, not this machine's
@@ -198,5 +195,4 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
 ## Open
 
-Gate E owed — run by issue-solver after this session, then recorded by the receipt
-session. Everything else (Gates A–D, the wiring, the tests) is measured and green above.
+None. Gates A–F measured, ledger row recorded, SHIP.
