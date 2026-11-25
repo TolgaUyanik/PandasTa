@@ -113,11 +113,11 @@ def _load_mutant():
 
 
 OFFSETS = range(650, 1150, 70)  # past the 598-bar warm-up (`length - 1 = 99`
-# NaN `R` bars, then 500 valid `R` values ending at index 598); none
-# of these 8 positions sits at the base series' own rank ceiling (1.0) --
-# verified once against this fixed seed, since a rank already pinned at
-# 1.0 cannot visibly rise further under either perturbation below (see
-# `_leaks`'s docstring)
+# NaN `R` bars, then 500 valid `R` values ending at index 598); a plain
+# arithmetic stride, not a curated set -- `_leaks` asserts below that none
+# of these 8 positions happens to sit at the base series' own rank ceiling
+# (1.0), since a rank already pinned at 1.0 cannot visibly rise further
+# under either perturbation (see `_leaks`'s docstring)
 
 
 def _leaks(fn):
@@ -136,6 +136,10 @@ def _leaks(fn):
     before the spike, which cannot rise further."""
     high, low = _walk()
     base = fn(high, low)
+    assert (base.iloc[list(OFFSETS)] < 1.0).all(), (
+        "an OFFSETS position sits at the rank ceiling (1.0) -- the spike "
+        "below cannot show a leak there; pick a different stride"
+    )
     hits = 0
     for j in OFFSETS:
         ph = high.copy()
