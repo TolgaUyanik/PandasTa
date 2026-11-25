@@ -15,8 +15,8 @@ instruction: "Gate A starts from the source formula, not the prototype"), not fr
 screen prototype (`docs/issues/screen/ind_screen_r6.py`'s `rd_horseshoe`, which is
 mathematically the same reading but is not what Gate A cites).
 
-**Status:** ported through Gates A–D; Gate E owed (run by issue-solver after this
-session, per the issue-solver rules; a later receipt session records the ledger row).
+**Status:** shipped through Gates A–F. Gate E measured 2026-11-25, max |ρ| 0.2168 <
+0.76, SHIP.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -106,8 +106,13 @@ outer-bound check alone would pass (`test_a_doji_breaks_the_colour_requirement`)
 
 ## Gate C — reachability
 
-Synthetic only in this session (no real-data cache in this worktree; the receipt session
-adds the Gate E run's real-data count):
+Real data, from the Gate E run (`is164-rd_horseshoe-4232c7c2`, 89 ALTPORT-1 BIST frames,
+398,849 pooled bars): `RD_HORSESHOE` is non-NaN on 398,582 of the pooled cells and
+non-zero (fires, either sign) on 13,290 of those — both bounded away from 0 and from
+`n`, so not constant on real data either.
+
+Synthetic, from this session (no real-data cache in this worktree when this section was
+first written):
 
 - **2,000-bar frame (seed 4):** 1,997 of 2,000 bars fire (3-bar warm-up); **79 bull, 84
   bear, 1,834 at zero** — both signs reachable, and the column is not constant
@@ -133,10 +138,18 @@ adds the Gate E run's real-data count):
 
 ## Gate E — attribution
 
-Pending, run by issue-solver after this session (`gate_e_overlap.py run --module
-pandas_ta.candles.rd_horseshoe`). This is why `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails on this branch today — expected, not a finding; a later receipt session records
-the measured numbers and the ledger row once that run exists.
+Run `is164-rd_horseshoe-4232c7c2` (`gate_e_overlap.py run --module
+pandas_ta.candles.rd_horseshoe`), 89 ALTPORT-1 BIST frames, 687 comparators (329
+`compute_all` + 358 `ml_features` manifest), canary bit-equal on AKBNK.IS, BIENY.IS,
+AGHOL.IS, SASA.IS. Recorded in `docs/gate_e_ledger.csv` (measured 2026-11-25).
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `RD_HORSESHOE` | 0.2168 | `VOL_DELTA_APPROX` (compute_all) | 397,171 | 0.2248 | SHIP |
+
+0.2168 < 0.76 (SHIP band, `r3-perframe-0.90`): not struck, not disclosed, ships as-is.
+Next comparators: `bop_Pctl` (manifest) 0.2099, n 393,598. 0 degenerate comparators;
+398,582 non-NaN of the pooled cells, 13,290 non-zero.
 
 ## Gate F — suites
 
@@ -149,9 +162,10 @@ python -m pytest -q tests/test_rd_horseshoe.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,543 passed, 7 skipped, 1 failed** — the one failure is
-`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, expected per the
-Gate E section above. `tests/test_rd_horseshoe.py` alone: 21 passed.
+**1,551 passed, 7 skipped** (re-run 2026-11-25 after the Gate E ledger row above was
+recorded — the prior round's one expected failure,
+`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, is now green).
+`tests/test_rd_horseshoe.py` alone: 21 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 — the four features issue-solver's rules name, not this machine's
