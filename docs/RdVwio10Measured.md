@@ -23,7 +23,7 @@ session.
 |---|---|---|---|
 | `pandas_ta/volume/rd_vwio_10.py` | volume | `RD_VWIO_10` | roughly `[-1, 1]` or NaN |
 
-Tests: `tests/test_rd_vwio_10.py` (20 tests). Numbers: `python
+Tests: `tests/test_rd_vwio_10.py` (21 tests). Numbers: `python
 docs/measure_rd_vwio_10.py`, run from the repo root. Environment: Python 3.11.2, pandas
 2.3.3, numpy 1.26.4. Measured 2026-11-26.
 
@@ -124,16 +124,20 @@ factor:
 | price | `open *= k`, `close *= k` (together) | bit-identical (0) | bit-identical (0) | bit-identical (0) | bit-identical (0) |
 | volume | `volume *= k` | bit-identical (0) | bit-identical (0) | max\|diff\| 3.331e-16 | max\|diff\| 3.331e-16 |
 
-**Price scale is bit-identical at ALL four factors, including the non-power-of-two ones**
-— stronger than this fork's other price/volume ratios (`rd_wick_pressure_10`,
-`rd_corr_c_obv_20`), whose denominators are themselves built from price and only match to
-float tolerance at a non-power-of-two factor. The reason: `close > open` / `close < open`
-is a comparison, invariant to ANY positive rescale of both operands together (no price
-MAGNITUDE enters the arithmetic at all, only the sign of the difference) — so scaling
-price changes nothing this column computes, not even in the last bit. Volume-scale
-non-power-of-two differences (3.331e-16) are float epsilon, far under the tests' 1e-9
-tolerance. NaN masks match exactly at every factor, both inputs. `0 < 1,191 fires <
-1,200` bars, 1,191 distinct values (not a constant column) — the same frame as Gate C.
+**Price scale measured bit-identical at all four tested factors on this frame**,
+including the non-power-of-two ones — stronger than this fork's other price/volume ratios
+(`rd_wick_pressure_10`, `rd_corr_c_obv_20`), whose denominators are themselves built from
+price and only match to float tolerance at a non-power-of-two factor. The reason:
+`close > open` / `close < open` is a comparison, invariant to ANY positive rescale of both
+operands together IN EXACT REAL-NUMBER ARITHMETIC (no price magnitude enters the formula
+past the sign of the difference). This is NOT a floating-point guarantee for every
+possible input: a non-power-of-two `k` rounds `open*k` and `close*k` independently, so an
+`open`/`close` pair within a few ULPs of each other could in principle have its comparison
+flipped — the claim above is what was measured on the tested frame and factors, not a
+proof that no input can ever flip a comparison. Volume-scale non-power-of-two differences
+(3.331e-16) are float epsilon, far under the tests' 1e-9 tolerance. NaN masks match
+exactly at every factor, both inputs. `0 < 1,191 fires < 1,200` bars, 1,191 distinct
+values (not a constant column) — the same frame as Gate C.
 
 ## Gate E — attribution
 
@@ -160,16 +164,16 @@ python -m pytest -q tests/test_rd_vwio_10.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,598 passed, 7 skipped, 1 failed** —
+**1,599 passed, 7 skipped, 1 failed** —
 `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails with
 "no Gate E ledger row for ['rd_vwio_10']", expected per the issue-solver rules until the
 launcher's Gate E run and the receipt session record the ledger row.
-`tests/test_rd_vwio_10.py` alone: 20 passed.
+`tests/test_rd_vwio_10.py` alone: 21 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 — the four features issue-solver's rules name, not this machine's
 full dispatchable set, which also has `AVX512CD`/`AVX512_CLX`/`AVX512_CNL`/`AVX512_ICL`
-enabled): `python docs/measure_rd_vwio_10_cpu.py` — **20 passed** (just
+enabled): `python docs/measure_rd_vwio_10_cpu.py` — **21 passed** (just
 `tests/test_rd_vwio_10.py`; the ledger/readme/wiring modules above are not CPU-sensitive
 and are not re-run under this flag).
 

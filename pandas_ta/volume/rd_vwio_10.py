@@ -64,14 +64,21 @@ bit-identical) and a mutant that shifts the final ratio `.shift(-1)` (reading
 one bar ahead) before returning it.
 
 SCALE-FREE. `buys`/`sells`/`imbalance` are built from `volume` alone, gated
-by the SIGN of `close - open` -- a comparison invariant to any POSITIVE
-rescale of `open` and `close` together, since `(open*k)` and `(close*k)`
-keep the same order as `open` and `close` for `k > 0`. So a price rescale
-changes NO value this column computes: it is bit-identical under x8, x64,
-x10 AND x3.7 price rescales, which is stronger than most of this fork's
-other price/volume ratios (`rd_wick_pressure_10`, `rd_corr_c_obv_20`), whose
-denominators are themselves price-built and only match to float tolerance at
-a non-power-of-two factor. A volume rescale by `k` scales `buys`, `sells`,
+by the SIGN of `close - open` -- in EXACT real-number arithmetic this
+comparison is invariant to any POSITIVE rescale of `open` and `close`
+together, since `(open*k)` and `(close*k)` keep the same order as `open` and
+`close` for `k > 0`. In FLOATING-POINT arithmetic this is not a universal
+guarantee: a non-power-of-two `k` rounds `open*k` and `close*k`
+independently, so a pair sitting within a few ULPs of each other could in
+principle have its comparison flipped by that rounding. What is actually
+MEASURED, on the frame `tests/test_rd_vwio_10.py` builds: bit-identical
+under x8, x64, x10 AND x3.7 price rescales (`docs/measure_rd_vwio_10.py`),
+which is stronger than most of this fork's other price/volume ratios
+(`rd_wick_pressure_10`, `rd_corr_c_obv_20`), whose denominators are
+themselves price-built and only match to float tolerance (not bit-identity)
+at a non-power-of-two factor -- but this is a measured fact about the tested
+frame and factors, not a proof that no input could ever flip a comparison.
+A volume rescale by `k` scales `buys`, `sells`,
 `imbalance` and the `EMA(volume, length)` denominator all by exactly `k` (EMA
 is linear: `EMA(k*x) = k*EMA(x)`), so the ratio is unchanged -- bit-identical
 at x8/x64, within float tolerance at x10/x3.7 (each scaled operand carries

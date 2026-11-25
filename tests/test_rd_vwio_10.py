@@ -264,6 +264,44 @@ def test_doji_bars_contribute_zero_imbalance():
     assert (out.abs() < 1e-9).all()
 
 
+def test_doji_contributes_zero_among_directional_neighbours():
+    """A doji bar sitting among ordinary directional bars must contribute
+    exactly 0 to `imbalance` while its non-tied neighbours still contribute
+    their own +-volume sign -- unlike the all-equal frame above, where a bug
+    that only zeroes EVERY bar uniformly would still pass. This runs the
+    REAL module (not a hand re-derivation) on a frame with forced ties
+    mixed among ordinary bars, against an independent per-bar reference
+    that has the same ties forced into it, so a module bug in how it
+    combines tied and untied bars would show up as a mismatch."""
+    open_, close, volume = _frame(200)
+    close = close.copy()
+    tie_positions = [20, 75, 130]
+    for i in tie_positions:
+        close.iloc[i] = open_.iloc[i]  # force an exact tie at these bars
+
+    n = 10
+    o, c, v = open_.values, close.values, volume.values
+    for i in tie_positions:
+        assert c[i] == o[i]  # the forced tie actually landed
+
+    def ema_ref(x, length):
+        out = np.full(len(x), np.nan)
+        out[length - 1] = np.mean(x[:length])
+        alpha = 2.0 / (length + 1.0)
+        for i in range(length, len(x)):
+            out[i] = alpha * x[i] + (1 - alpha) * out[i - 1]
+        return out
+
+    imbalance_ref = np.where(c > o, v, np.where(c < o, -v, 0.0))
+    for i in tie_positions:
+        assert imbalance_ref[i] == 0.0  # the reference itself zeroes the tie
+    ref = ema_ref(imbalance_ref, n) / ema_ref(v, n)
+
+    out = rd_vwio_10(open_, close, volume, length=n)
+    assert (np.isnan(ref) == out.isna().values).all()
+    assert np.nanmax(np.abs(out.values - ref)) < 1e-9
+
+
 def test_offset():
     open_, close, volume = _frame(300)
     out0 = rd_vwio_10(open_, close, volume, length=10)
