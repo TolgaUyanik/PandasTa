@@ -25,7 +25,7 @@ SHIP.
 
 | module | category | column | range |
 |---|---|---|---|
-| `pandas_ta/candles/rd_wick_pressure_10.py` | candles | `RD_WICK_PRESSURE_10` | unbounded, typically `[-1, 1]`; NaN if the window's range sum is 0 |
+| `pandas_ta/candles/rd_wick_pressure_10.py` | candles | `RD_WICK_PRESSURE_10` | bounded in `[-1, 1]` — each wick is bounded by its own bar's range, so neither leg of the numerator can exceed the denominator (see Decision 4); NaN if the window's range sum is 0 |
 
 Tests: `tests/test_rd_wick_pressure_10.py` (19 tests). Numbers: `python
 docs/measure_rd_wick_pressure_10.py`, run from the repo root. Environment: Python 3.11.2,
@@ -98,18 +98,21 @@ bars, NaN masks identical, max|diff| = 0.000e+00** (`test_matches_an_independent
 
 ## Gate C — reachability
 
-Synthetic, from this session (no real-data cache in this worktree; the receipt session
-adds the Gate E run's real-data reachability count):
+Synthetic, from this session (no real-data cache in this worktree):
 
 - **1,600-bar frame (seed 4), default length 10:** 1,591 of 1,600 bars fire (9-bar
   warm-up); values range −0.2261 to 0.2139 across **1,591 distinct values** — not constant.
 - **10 independent 600-bar frames (seeds 100–109):** every frame fires on 591 of 600 bars
-  (fixed 9-bar warm-up), with the range spanning roughly −0.23 to +0.30 across seeds —
-  both signs reached on every seed tried, not just one.
+  (fixed 9-bar warm-up), with the range spanning −0.2276 (seed 109) to 0.3013 (seed 106)
+  across seeds — both signs reached on every seed tried, not just one.
 - **Zero-range NaN** is reachable by construction
   (`test_zero_range_window_reads_nan`); not observed on the random synthetic frames above
   (independently-drawn, continuous-valued wicks essentially never all collapse to 0 in a
   10-bar window), which is expected, not a defect.
+- **Real data** (Gate E run `is170-rd_wick_pressure_10-c96ae347`, 89 ALTPORT-1 frames,
+  398,849 pooled bars): `RD_WICK_PRESSURE_10` is non-NaN on 398,043 of 398,849 pooled
+  cells (801 of the 806 NaNs are the 89 frames' 9-bar warm-up) and non-zero on 337,496 of
+  those; no `degenerate.csv` row for this column.
 
 ## Gate D — scale-free
 
