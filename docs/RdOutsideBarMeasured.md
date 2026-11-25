@@ -93,8 +93,11 @@ fixtures reproduce the table above exactly.
 
 ## Gate C — reachability
 
-Synthetic, from this session (no real-data cache in this worktree; the receipt session
-adds the Gate E run's real-data reachability count):
+Real data (run `is167-rd_outside_bar-3a7baac5`, 89 ALTPORT-1 BIST frames, 398,849
+pooled bars): `RD_OUTSIDE_BAR` is non-NaN on 398,760 of 398,849 pooled cells and
+non-zero on 33,715 of those; no `degenerate.csv` row for this column.
+
+Synthetic, from this session (no real-data cache in this worktree):
 
 - **2,000-bar frame (seed 4):** 1,999 of 2,000 bars fire-eligible (1-bar warm-up);
   **242 outside bars, 1,757 at zero** — not constant
@@ -143,10 +146,8 @@ python -m pytest -q tests/test_rd_outside_bar.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,566 passed, 7 skipped, 1 failed** (`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-— expected per the issue-solver rules: this port has no ledger row until the launcher's
-Gate E run and the receipt session record it). `tests/test_rd_outside_bar.py` alone:
-20 passed.
+Re-measured after the ledger row landed: **1,574 passed, 7 skipped, 0 failed**.
+`tests/test_rd_outside_bar.py` alone: 20 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 — the four features issue-solver's rules name, not this machine's

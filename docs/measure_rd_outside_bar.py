@@ -5,8 +5,8 @@
 
 Run from the repo root. Uses tests/test_rd_outside_bar.py's synthetic OHLC
 generator; no real-data cache is available in this worktree, so Gate C here
-is synthetic-only -- the receipt session adds the Gate E run's real-data
-reachability count.
+is synthetic-only. The real-data reachability count comes from the launcher's
+Gate E run (see docs/RdOutsideBarMeasured.md).
 """
 import os
 import sys
