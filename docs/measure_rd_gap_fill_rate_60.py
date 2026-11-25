@@ -4,9 +4,8 @@
     python docs/measure_rd_gap_fill_rate_60.py
 
 Run from the repo root. Uses tests/test_rd_gap_fill_rate_60.py's synthetic
-OHLC generator; no real-data cache is available in this worktree, so Gate C
-here is synthetic-only -- the receipt session adds the Gate E run's
-real-data reachability count.
+OHLC generator; the real-data reachability count comes from the Gate E run
+recorded in docs/gate_e_ledger.csv, not from this script.
 """
 import os
 import sys

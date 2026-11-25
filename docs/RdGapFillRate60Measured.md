@@ -56,7 +56,11 @@ pandas 2.3.3, numpy 1.26.4. Measured 2026-11-25.
    the screen prototype's own math bar-for-bar (it applies the identical `rolling(60).sum()`
    over the same boolean construction, with no masking of the first bar either) — the port
    is not introducing a new warm-up assumption, only citing the poster's words for the
-   gap/fill *definitions* while keeping the prototype's own warm-up arithmetic.
+   gap/fill *definitions* while keeping the prototype's own warm-up arithmetic. The same
+   mechanism applies to any mid-series NaN in `open`/`high`/`low`/`close` on a gappy real
+   frame, not only the first bar: a NaN anywhere in those four inputs makes both `is_gap`
+   and `filled` `False`, so the bar reads "no gap" rather than NaN — this would understate
+   NaN on a gappy frame with real-world missing data.
 5. **Column name carries both parameters**, `RD_GAP_FILL_RATE_{length}_{min_gap*100:g}` —
    e.g. `RD_GAP_FILL_RATE_60_0.3` at defaults, `RD_GAP_FILL_RATE_20_1` at `length=20,
    min_gap=0.01` — following the fork's convention of encoding every parameter that
@@ -113,8 +117,13 @@ within `rtol=1e-12` (`test_matches_an_independent_loop`,
 
 ## Gate C — reachability
 
-Synthetic, from this session (no real-data cache in this worktree when this section was
-first written):
+**Real data** (run `is165-rd_gap_fill_rate_60-0bbf164d`, 89 ALTPORT-1 BIST frames, 398,849
+pooled bars): `RD_GAP_FILL_RATE_60_0.3` is non-NaN on 393,598 of the 398,849 pooled cells, and
+every one of those 393,598 is non-zero — bounded away from both 0 and `n` on real prices. The
+single `degenerate.csv` row in that run is comparator-side (`squeeze_SQZ_NO`, constant), not
+this column.
+
+Synthetic, from this session:
 
 - **1,600-bar frame (seed 4):** 1,541 of 1,600 bars fire (59-bar warm-up); values range
   0.4706–0.8649 across 181 distinct values — not constant, and never exactly 0 or 1 on this
@@ -148,9 +157,9 @@ first written):
 
 ## Gate E — attribution
 
-Run by issue-solver (launcher), `screen_r6`-style harness, 89 ALTPORT-1 BIST frames,
-398,849 pooled bars, 687 comparators (329 `compute_all` + 358 `ml_features` manifest),
-canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS. Recorded in
+Run `is165-rd_gap_fill_rate_60-0bbf164d` by issue-solver (launcher), `screen_r6`-style
+harness, 89 ALTPORT-1 BIST frames, 398,849 pooled bars, 687 comparators (329 `compute_all` +
+358 `ml_features` manifest), canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS. Recorded in
 `docs/gate_e_ledger.csv` (`python docs/gate_e_ledger.py record ... --measured 2026-11-25`).
 
 | column | max \|ρ\| | against | n | per-frame max median \|ρ\| | per-frame max median against | verdict |
@@ -172,9 +181,9 @@ python -m pytest -q tests/test_rd_gap_fill_rate_60.py tests/test_readme_counts.p
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,549 passed, 7 skipped, 1 failed** — the one failure is
-`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, expected until the
-launcher's Gate E run and the receipt session record the ledger row (see Gate E above).
+**1,549 passed, 7 skipped, 1 failed** — the one failure was
+`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, expected before the
+ledger row existed and resolved by the row recorded above (see Gate E above).
 `tests/test_rd_gap_fill_rate_60.py` alone: 19 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub

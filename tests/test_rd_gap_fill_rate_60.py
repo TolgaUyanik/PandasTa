@@ -3,7 +3,7 @@
 share of 0.3%+ overnight gaps whose same bar's high/low touches back to the
 prior close (issue #165, RD-GAP-FILL-RATE-60; Reddit, tier 4, untested by
 any poster). Measurements are in docs/RdGapFillRate60Measured.md. Gate E is
-pending (CLAUDE.md, "Owed, not failed").
+SHIP (0.2644 vs `ZIGZAG`), recorded in docs/gate_e_ledger.csv.
 
 What these pin, in order of how much it would hurt to lose:
 

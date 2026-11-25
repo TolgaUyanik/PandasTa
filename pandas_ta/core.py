@@ -2204,7 +2204,7 @@ class AnalysisIndicators(BasePandasObject):
         low = self._get_column(kwargs.pop("low", "low"))
         close = self._get_column(kwargs.pop("close", "close"))
         result = rd_gap_fill_rate_60(open_=open_, high=high, low=low, close=close,
-                                      length=length, min_gap=min_gap, offset=offset, **kwargs)
+                                     length=length, min_gap=min_gap, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def skew(self, length=None, offset=None, **kwargs):

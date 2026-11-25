@@ -162,6 +162,7 @@ Kwargs:
 
 Returns:
     pd.Series: RD_GAP_FILL_RATE_{length}_{min_gap*100}, a scale-free
-        (dimensionless) share in [0, 1]. NaN for the first bar (no prior
-        close) and for any window holding no gap at all.
+        (dimensionless) share in [0, 1]. NaN for the first `length - 1` bars
+        (the rolling window's warm-up) and for any window holding no gap at
+        all.
 """
