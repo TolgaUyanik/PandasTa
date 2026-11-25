@@ -20,8 +20,8 @@ cites). The 10-bar window and the sum-of-ranges denominator are not in the poste
 divided by the sum of ranges"), kept here as the `length` default (not hard-coded) and the
 normalisation that turns the column into a feature at all.
 
-**Status:** shipped through Gates A–D plus wiring and tests. Gate E: pending, run by
-issue-solver after this session.
+**Status:** shipped through Gates A–F plus wiring and tests. Gate E measured 2026-11-25:
+SHIP.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -129,15 +129,23 @@ adds the Gate E run's real-data reachability count):
 
 ## Gate E — attribution
 
-Pending, run by issue-solver after this session.
+Run by issue-solver, `gate_e_overlap.py run --module pandas_ta.candles.rd_wick_pressure_10`,
+89 ALTPORT-1 frames, 398,849 bars, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS).
+Output: `is170-rd_wick_pressure_10-c96ae347/overlap_max.csv`.
 
-Quoted from the issue (NOT re-measured in this session — the prototype's own screen run,
-cited for context only): Gate E max |ρ| 0.4599 vs `qstick_pct` (manifest, n = 398,043),
-top-5 per-frame max median 0.4585 → SHIP in that run. Next comparators: `qstick_pct_Pctl`
-0.4253, `brar_AR_26` 0.4055. Fork overlap (stage 2, not Gate E, scale-free `Category`
-outputs at defaults, 12 frames): max |ρ| 0.5029 vs `imi:IMI_14`, per-frame max median
-0.4725 — not a restatement at the 0.90 line. Pre-flight on 6 frames (`sanity_r6.csv`):
-prefix-causal, unchanged under price ×8 and volume ×8.
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `RD_WICK_PRESSURE_10` | 0.4599 | `qstick_pct` (manifest) | 398,043 | 0.4585 | SHIP |
+
+0.4599 < 0.76 (SHIP band, `r3-perframe-0.90`): not a restatement of any shipped column.
+Recorded in `docs/gate_e_ledger.csv` (measured 2026-11-25).
+
+Quoted from the issue for context only (the prototype's own screen run, not this Gate E
+run): same max |ρ| 0.4599 vs `qstick_pct`, next comparators `qstick_pct_Pctl` 0.4253,
+`brar_AR_26` 0.4055. Fork overlap (stage 2, not Gate E, scale-free `Category` outputs at
+defaults, 12 frames): max |ρ| 0.5029 vs `imi:IMI_14`, per-frame max median 0.4725 — not a
+restatement at the 0.90 line. Pre-flight on 6 frames (`sanity_r6.csv`): prefix-causal,
+unchanged under price ×8 and volume ×8.
 
 ## Gate F — suites
 
@@ -150,9 +158,8 @@ python -m pytest -q tests/test_rd_wick_pressure_10.py tests/test_readme_counts.p
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,581 passed, 7 skipped, 1 failed** (`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-— expected per the issue-solver rules: this port has no ledger row until the launcher's
-Gate E run and the receipt session record it). `tests/test_rd_wick_pressure_10.py` alone:
+Re-measured after the ledger row was recorded (receipt session, 2026-11-25):
+**1,589 passed, 7 skipped, 0 failed.** `tests/test_rd_wick_pressure_10.py` alone:
 19 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
@@ -183,6 +190,4 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
 ## Open
 
-Gate E owed (this session cannot run it; see the rules at the top of this repo's
-issue-solver prompt). The receipt session records the ledger row and the real Gate E
-numbers, then closes #170 either as a ship or as a measured revert.
+None. Gate E measured SHIP, ledger row recorded, #170 closes as a ship.
