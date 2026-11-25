@@ -914,6 +914,14 @@ class AnalysisIndicators(BasePandasObject):
         result = rd_outside_bar(high=high, low=low, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rd_wick_pressure_10(self, length=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_wick_pressure_10(open_=open_, high=high, low=low, close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     # Cycles
     def correlation_cycle(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))

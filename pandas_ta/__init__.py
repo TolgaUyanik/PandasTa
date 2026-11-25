@@ -41,7 +41,7 @@ Category = {
     # Candles
     "candles": [
         "cdl_doji", "cdl_inside", "cdl_pattern", "cdl_z", "ha", "rd_horseshoe",
-        "rd_outside_bar"
+        "rd_outside_bar", "rd_wick_pressure_10"
     ],
     # Cycles
     "cycles": [
