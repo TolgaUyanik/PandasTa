@@ -4,9 +4,9 @@ Technical analysis indicators as a pandas extension. Fork of
 [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, extended with
 price-action / SMC indicators and oriented toward **machine-learning feature generation**.
 
-**398 indicators** registered in `Category`, across 9 categories — that is the number
+**399 indicators** registered in `Category`, across 9 categories — that is the number
 that matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two other
-counts are true of the same package and are easy to confuse with it: **406** are callable
+counts are true of the same package and are easy to confuse with it: **407** are callable
 as `df.ta.<name>()` (`Category` plus `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`,
 `up_and_down_volume`, `volume_delta` and `vp`), and `drawdown` and `ma` are
 importable as `ta.<name>()` without being either. All of them are in the dictionary; the
@@ -140,8 +140,8 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 
 `help(ta.<name>)` for the same per indicator.
 
-**candles (8)** — `cdl_doji` `cdl_inside` `cdl_pattern` `cdl_z` `clv_abs` `ha` `rd_horseshoe`
-`rd_outside_bar`
+**candles (9)** — `cdl_doji` `cdl_inside` `cdl_pattern` `cdl_z` `clv_abs` `ha` `rd_horseshoe`
+`rd_outside_bar` `rd_wick_pressure_10`
 
 **cycles (11)** — `correlation_cycle` `dsp` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `msw_lead` `msw_sine`
 

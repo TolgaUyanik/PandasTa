@@ -7,3 +7,4 @@ from .cdl_z import cdl_z
 from .clv_abs import clv_abs
 from .rd_horseshoe import rd_horseshoe
 from .rd_outside_bar import rd_outside_bar
+from .rd_wick_pressure_10 import rd_wick_pressure_10
