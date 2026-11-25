@@ -900,6 +900,28 @@ class AnalysisIndicators(BasePandasObject):
         result = ha(open_=open_, high=high, low=low, close=close, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rd_horseshoe(self, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_horseshoe(open_=open_, high=high, low=low, close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def rd_outside_bar(self, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        result = rd_outside_bar(high=high, low=low, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def rd_wick_pressure_10(self, length=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_wick_pressure_10(open_=open_, high=high, low=low, close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     # Cycles
     def correlation_cycle(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
@@ -2004,6 +2026,18 @@ class AnalysisIndicators(BasePandasObject):
                             **kwargs)
         return self._post_process(result, **kwargs)
 
+    def c22_outlier_timing_neg(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_outlier_timing_neg(close=close, length=length,
+                                        offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def c22_outlier_timing_pos(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_outlier_timing_pos(close=close, length=length, offset=offset,
+                                        **kwargs)
+        return self._post_process(result, **kwargs)
+
     def c22_periodicity(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = c22_periodicity(close=close, length=length, offset=offset,
@@ -2019,6 +2053,11 @@ class AnalysisIndicators(BasePandasObject):
     def cusum(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = cusum(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def diff1_pacf5(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = diff1_pacf5(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def diff2_acf1(self, length=None, offset=None, **kwargs):
@@ -2044,6 +2083,11 @@ class AnalysisIndicators(BasePandasObject):
     def firstzero_ac(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = firstzero_ac(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def flat_spots(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = flat_spots(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def g191_026(self, mean_length=None, corr_length=None, lag=None, offset=None, **kwargs):
@@ -2116,6 +2160,16 @@ class AnalysisIndicators(BasePandasObject):
                              **kwargs)
         return self._post_process(result, **kwargs)
 
+    def level_shift_idx(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = level_shift_idx(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def level_shift_size(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = level_shift_size(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def lot_zeroret_60(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = lot_zeroret_60(close=close, length=length, offset=offset, **kwargs)
@@ -2158,14 +2212,49 @@ class AnalysisIndicators(BasePandasObject):
         result = rank(close=close, lengths=lengths, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rd_gap_fill_rate_60(self, length=None, min_gap=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_gap_fill_rate_60(open_=open_, high=high, low=low, close=close,
+                                     length=length, min_gap=min_gap, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def rd_knot_pos_40(self, length=None, knot_margin=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_knot_pos_40(close=close, length=length, knot_margin=knot_margin,
+                                offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def skew(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = skew(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def stability(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = stability(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def stdev(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = stdev(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def stl_seasonal_strength(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = stl_seasonal_strength(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def stl_spikiness(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = stl_spikiness(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def stl_trend_strength(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = stl_trend_strength(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def tf_autocorr_1e_60(self, length=None, offset=None, **kwargs):
@@ -2837,6 +2926,11 @@ class AnalysisIndicators(BasePandasObject):
         result = swing_equilibrium(high=high, low=low, close=close, left=left, right=right, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def tdi(self, length=None, multiple=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = tdi(close=close, length=length, multiple=multiple, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def tsignals(self, asbool=None, trend_reset=0, trade_offset=None, drift=None, offset=None, **kwargs):
         trend = self._get_column(kwargs.pop("close", "close"))
         result = tsignals(trend=trend, asbool=asbool, trend_reset=trend_reset, trade_offset=trade_offset, drift=drift, offset=offset, **kwargs)
@@ -3340,6 +3434,14 @@ class AnalysisIndicators(BasePandasObject):
         result = eom(high=high, low=low, close=close, volume=volume, length=length, divisor=divisor, offset=offset, drift=drift, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def fn_baspn_net(self, slow=None, fast=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = fn_baspn_net(high=high, low=low, close=close, volume=volume, slow=slow, fast=fast, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def fve(self, length=None, cutoff=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
@@ -3480,6 +3582,12 @@ class AnalysisIndicators(BasePandasObject):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = pvt(close=close, volume=volume, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def rd_corr_c_obv_20(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = rd_corr_c_obv_20(close=close, volume=volume, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def tod_profile(self, length=None, bb_length=None, bb_std=None,
