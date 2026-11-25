@@ -914,6 +914,12 @@ class AnalysisIndicators(BasePandasObject):
         result = rd_outside_bar(high=high, low=low, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def b3_outside_pivot3(self, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        result = b3_outside_pivot3(high=high, low=low, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     # Cycles
     def correlation_cycle(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
