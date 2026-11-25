@@ -26,7 +26,7 @@ window per ticker before concatenating tickers.
 `*(standalone)*` after an indicator name = it has NO `df.ta.<name>()` method, so it is
 invisible to `ta.Strategy`; call `ta.<name>(...)` and join the result yourself.
 
-**398 indicators** probed; 1 raise on this environment (pandas 2.x) -- see [Known breaks](#known-breaks).
+**399 indicators** probed; 1 raise on this environment (pandas 2.x) -- see [Known breaks](#known-breaks).
 
 ### How many indicators is that, exactly
 
@@ -34,8 +34,8 @@ Three numbers are all true of this package and are easy to quote at each other. 
 
 | surface | n | what it means |
 |---|---|---|
-| registered in `Category` | **396** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
-| callable as `df.ta.<name>()` | **404** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
+| registered in `Category` | **397** | the headline — exactly what `df.ta.strategy()` and the category runs sweep |
+| callable as `df.ta.<name>()` | **405** | adds `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `up_and_down_volume`, `volume_delta`, `vp`, which have an accessor but no `Category` entry, so a strategy run skips them |
 | callable as `ta.<name>()` only | **2** | `drawdown`, `ma` — no accessor either; call and join the result yourself |
 
 `tests/test_readme_counts.py` asserts the README's copy of these against the live package, so the section cannot drift from the code.
@@ -318,7 +318,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `variance` | C | `length=None`, `ddof=None` | `VAR_30` PX2 | 29 | Sources: |
 | `zscore` | C | `length=None`, `std=None` | `Z_30` SF | 29 | Sources: |
 
-## trend (66)
+## trend (67)
 
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
@@ -339,6 +339,7 @@ Three numbers are all true of this package and are easy to quote at each other. 
 | `dtdb` | H/L/C | `pivots=None`, `tol_atr=None`, `buf_atr=None`, `void_atr=None`, `max_wait=None`, `track_bars=None`, `max_keep=None`, `atr_length=None`, `mode=None`, `dbl_mode=None` | `DTDB_CONF_BEAR_8_0.5_0.15` BIN<br>`DTDB_CONF_BULL_8_0.5_0.15` BIN<br>`DTDB_TGT_PCT_8_0.5_0.15` ??<br>`DTDB_PEND_8_0.5_0.15` ORD<br>`DTDB_RES_8_0.5_0.15` BIN | 16 | The first CHART-PATTERN SHAPE MATCHER in this fork. A confirmed pivot zigzag is matched against the two-peak / two-trough template, and the resulting… |
 | `dx` | H/L/C | `length=None`, `scalar=None`, `mamode=None`, `drift=None` | `DX_14` SF | 14 | DX is the unsmoothed directional movement index: Wilder's +DI and -DI collapsed to a single 0-100 reading of how lopsided the two are, one bar at a… |
 | `equal_highs_lows` | H/L/C | `left=None`, `right=None`, `tol_mode=None`, `atr_length=None`, `atr_mult=None`, `pct_tol=None`, `lookback_pivots=None` | `EQH_5_5` BIN<br>`EQL_5_5` BIN<br>`EQH_DIST_5_5` ??<br>`EQL_DIST_5_5` SF<br>`EQH_BROKEN_5_5` BIN<br>`EQL_BROKEN_5_5` BIN | 292 | Detects "equal highs"/"equal lows" -- a widely-used SMC/ICT liquidity-pool concept: a confirmed swing pivot that lands within a small tolerance… |
+| `expand3_3pct` | H/L | `pct=None` | `EXPAND3_3.0` CONST | 2 | +1 on a bar whose high closes a run of three highs, each at least `pct` percent above the one before; -1 on a bar whose low closes a run of three… |
 | `flag_breakout` | H/L/C | `staff_min_atr=None`, `staff_min_bars=None`, `staff_max_bars=None`, `staff_max_opposite=None`, `staff_min_r2=None`, `edge_min_bars=None`, `edge_max_bars=None`, `edge_max_width_pct=None`, `max_edge_slope_ratio=None`, `min_slope_atr=None`, `breakout_atr_mult=None`, `atr_length=None`, `width_mode=None`, `emit_pole=False` | `FLAG_CONF_BULL_12_0.85_0.15` CONST<br>`FLAG_CONF_BEAR_12_0.85_0.15` CONST<br>`FLAG_PEND_12_0.85_0.15` BIN | 14 | A port of TradingView `tMHhzI6j` "Flag Pattern Breakout [Dots3Red]" (MPL-2.0, (c) Dots3Red). It detects the classic flag: a steep, straight IMPULSE… |
 | `fvg` | H/L/C | `max_zones=None` | `FVG_BULL` BIN<br>`FVG_BEAR` BIN<br>`IN_FVG_BULL` BIN<br>`IN_FVG_BEAR` BIN | 0 | Detects 3-bar Fair Value Gaps (imbalances) and tracks whether the current bar is inside an active (unfilled) FVG zone. |
 | `fvg_sweep_magnet` | O/H/L/C/V | `fvg_lookback=None`, `disp_atr_mult=None`, `atr_len=None`, `min_gap_atr=None`, `require_disp=None`, `max_fvg_age=None`, `pivot_len=None`, `liq_keep=None`, `sweep_wick_mult=None`, `sweep_confirm=None`, `magnet_window=None`, `min_score=None` | `FSME_MAG_BULL_5` CONST<br>`FSME_MAG_BEAR_5` CONST<br>`FSME_CE_DIST_BULL_5` ??<br>`FSME_CE_DIST_BEAR_5` ??<br>`FSME_CE_SCORE_BULL_5` ??<br>`FSME_CE_SCORE_BEAR_5` ?? | 0 | Two engines coupled into one signal: (1) displacement-validated Fair Value Gaps (3-bar imbalances that also clear a minimum ATR-scaled size AND, by… |
@@ -514,6 +515,7 @@ or delete* — was followed here, and the answer was that they are fine.
 | `stl_spikiness` | `STLSPIKE_100` | — unregistered, file one |
 | `ts_reoccur_20` | `TS_REOCCUR_20` | — unregistered, file one |
 | `band_cross_retest` | `BANDXR_CROSS_UP_EMA_66_288` `BANDXR_CROSS_DN_EMA_66_288` `BANDXR_RETEST_FAST_EMA_66_288` `BANDXR_RETEST_SLOW_EMA_66_288` `BANDXR_GAP_ATR_EMA_66_288` | — unregistered, file one |
+| `expand3_3pct` | `EXPAND3_3.0` | — unregistered, file one |
 | `flag_breakout` | `FLAG_CONF_BULL_12_0.85_0.15` `FLAG_CONF_BEAR_12_0.85_0.15` | — unregistered, file one |
 | `fvg_sweep_magnet` | `FSME_MAG_BULL_5` `FSME_MAG_BEAR_5` | — unregistered, file one |
 | `volume_sr_zones` | `VOLSR_RES_BROKEN_10_20` | — unregistered, file one |

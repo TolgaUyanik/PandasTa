@@ -14,6 +14,7 @@ from .decay import decay
 from .decreasing import decreasing
 from .dpo import dpo
 from .dtdb import dtdb
+from .expand3_3pct import expand3_3pct
 from .dx import dx
 from .equal_highs_lows import equal_highs_lows
 from .flag_breakout import flag_breakout
