@@ -6,10 +6,10 @@ PandasTa issue #169. Source: Reddit, tier 4 (ResearchIntel kb/reddit.db): r/algo
 measure that variable's lowest 20th percentile value over 500 periods." Claimed use (tier 4,
 untested by the poster): flags choppy/consolidating markets.
 
-**Status: Gates A–D cleared this session. Gate E: pending, run by issue-solver after this
-session.** `rd_range100_pct500` is wired into `Category["volatility"]`; `tests/test_gate_e_ledger.py
-::test_every_indicator_that_needs_a_row_has_one` fails until the ledger row is recorded — expected,
-not a defect (see CLAUDE.md "Owed, not failed, on the way to `dev`").
+**Status: Gates A–F cleared. SHIP.** Gate E run by issue-solver 2026-11-25 (run
+`is169-rd_range100_pct500-7665d09e`): max |ρ| 0.4037 vs `natr_Pctl` (manifest, n = 345,627, per-frame
+max median 0.3964) → SHIP. Ledger row recorded. `rd_range100_pct500` is wired into
+`Category["volatility"]`.
 
 Shipped: `pandas_ta/volatility/rd_range100_pct500.py`, one column
 `RD_RANGE100_PCT500_{length}_{pctlen}` (default `RD_RANGE100_PCT500_100_500`). Tests:
@@ -52,7 +52,7 @@ no zero-guard in the poster's words or the prototype to diverge from, so this is
 | B Causality | pass | 8-offset future-perturbation sweep (curated to skip the one position whose own rank already sat at the 500-bar ceiling before perturbing, since a ceiling-pinned rank cannot visibly rise further — see `tests/test_rd_range100_pct500.py`'s `_leaks` docstring): real module leaks at 0 of 8. A mutant (`importlib`-read source, the percentile-rank input shifted toward the future with `.shift(-1)` before ranking, `exec`'d in memory) is live (differs from the real module) and caught at 8 of 8 offsets. |
 | C Reachability | pass | Synthetic: 1,200-bar OHLC walk (seed 11/21, σ=0.02): 602 of 1,200 finite (598-bar warm-up: a 100-bar range window feeding a 500-bar rank window), 126 distinct values, range [0.002000, 1.000000]. Ten independent 1,200-bar seeds: 602 non-NaN of 1,200 on every seed, 175–297 distinct values. Real-data reachability: owed with Gate E. |
 | D Scale-free | pass | ×8 / ×64 bit-identical on all 602 fired bars with matching NaN masks (both `HHV` and `LLV` are linear in a joint positive rescale of `high` and `low`, and `k*a / k*b == a / b` exactly under a power-of-two `k` in IEEE float; a percentile RANK of an unchanged series is itself unchanged, so no further error enters at the ranking step). ×10 / ×3.7 within 0.0 absolute (exact: rank is a count over an unchanged relative ordering, not a continuous arithmetic result, so even a non-power-of-two rescale that leaves every pairwise `R` comparison's sign unchanged reproduces the identical rank). `0 < 602 < 1,200` fires, 126 distinct values (non-constant). A synthetic zero low (`low[200] = 0.0`) divides to NaN, not `+-inf` (0 infinities in the output). Re-run clean with `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_rd_range100_pct500_cpu.py`): same 15/15 tests pass — no exact bit-count or Spearman digit beyond a stated tolerance is pinned, so the CPU-variant kernels on a GitHub runner cannot break this suite. |
-| E Attribution | **pending** | Gate E: pending, run by issue-solver after this session. The issue's own prototype measurement (2026-10-25, quoted, NOT re-run here): max \|ρ\| 0.4037 vs `natr_Pctl` (manifest, n = 345,627; per-frame max median 0.3964) → SHIP under the issue's own ship line. |
+| E Attribution | pass | Run by issue-solver 2026-11-25, `is169-rd_range100_pct500-7665d09e`, 89 ALTPORT-1 frames, 398,849 pooled bars, 687 comparators (329 compute_all + 358 manifest). `RD_RANGE100_PCT500_100_500`: max \|ρ\| 0.4037 vs `natr_Pctl` (manifest, n = 345,627), per-frame max median 0.3964, 0 of 89 frames ≥ 0.90 → **SHIP** (pooled and per-frame both well under the 0.76 ship line). Matches the issue's own prototype measurement exactly (0.4037 vs `natr_Pctl`) — same scale-free form. |
 | F Suites | this repo only (per the porting rules, the launcher runs both whole suites) | `python -m pytest -q tests/test_rd_range100_pct500.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`: see "Final suite run" below. Whole suites: run by issue-solver in clean worktrees (see the PR body). |
 
 ## Why a single-bar future perturbation cannot push `R` both ways
@@ -97,13 +97,6 @@ in `tests/test_altport2_ports.py`. All of the above re-measured 2026-11-26 after
 `python -m pytest -q tests/test_rd_range100_pct500.py tests/test_readme_counts.py
 tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py
 tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`
-— 1,577 passed, 7 skipped, 1 failed (`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-— expected, Gate E owed), measured 2026-11-25. Both repos' whole suites: run by issue-solver in clean
-worktrees (see the PR body).
-
-## Next step
-
-Gate E run owed: `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module
-pandas_ta.volatility.rd_range100_pct500 --name rd_range100_pct500`, then
-`python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`. A later receipt session
-records the ledger row and the measured Gate E numbers in this file.
+— 1,633 passed, 7 skipped, 0 failed (re-measured after rebase onto `dev`; Gate E ledger row still
+recorded), measured 2026-11-26. Whole suites: run by issue-solver in clean worktrees (see the PR
+body).
