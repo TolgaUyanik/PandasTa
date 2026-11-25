@@ -41,6 +41,7 @@ from .median_ad_hl2 import median_ad_hl2
 from .osap_retskew_21 import osap_retskew_21
 from .quantile import quantile
 from .rank import rank
+from .rd_gap_fill_rate_60 import rd_gap_fill_rate_60
 from .skew import skew
 from .stability import stability
 from .stdev import stdev
