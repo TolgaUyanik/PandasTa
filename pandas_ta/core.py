@@ -908,6 +908,12 @@ class AnalysisIndicators(BasePandasObject):
         result = rd_horseshoe(open_=open_, high=high, low=low, close=close, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rd_outside_bar(self, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        result = rd_outside_bar(high=high, low=low, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     # Cycles
     def correlation_cycle(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))

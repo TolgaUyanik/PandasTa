@@ -5,3 +5,4 @@ from .cdl_inside import cdl_inside
 from .cdl_pattern import cdl_pattern
 from .cdl_z import cdl_z
 from .rd_horseshoe import rd_horseshoe
+from .rd_outside_bar import rd_outside_bar
