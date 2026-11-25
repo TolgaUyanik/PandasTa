@@ -33,6 +33,7 @@ from .pvi import pvi
 from .pvol import pvol
 from .pvr import pvr
 from .pvt import pvt
+from .rd_corr_c_obv_20 import rd_corr_c_obv_20
 from .tod_profile import tod_profile
 from .tri_dir_pressure import tri_dir_pressure
 from .vfi import vfi
