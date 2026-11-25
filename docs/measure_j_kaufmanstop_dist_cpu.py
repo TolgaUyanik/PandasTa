@@ -1,0 +1,72 @@
+# -*- coding: utf-8 -*-
+"""J-KAUFMANSTOP-DIST: run `tests/test_j_kaufmanstop_dist.py` with numpy's
+`AVX512F`, `AVX512_SKX`, `AVX2` and `FMA3` dispatch disabled -- the list
+issue-solver re-runs port test modules under, standing in for a GitHub
+runner without AVX-512.
+
+    python docs/measure_j_kaufmanstop_dist_cpu.py          # the test module
+    python docs/measure_j_kaufmanstop_dist_cpu.py A1 D2    # measured sections
+
+⚠ That is those four features, not "non-AVX kernels": the run prints the
+dispatchable features that are STILL enabled, so the claim cannot drift
+from what was actually turned off.
+
+`NPY_DISABLE_CPU_FEATURES` is read by numpy during its CPU-dispatch init,
+so it has to be in the environment BEFORE numpy is imported -- hence this
+file rather than a flag.
+
+Why it matters here. The frames are built with `np.exp` and `np.cumsum`, so
+a reduced kernel can move a price in its last bits, and every figure taken
+over those prices can move with it. The bit-equality limbs are kept only
+where the operations are identical by construction -- the x8/x64 rescale,
+and `sma` against the `rolling` call it makes -- and everything else is a
+bound or a shape: §A1's oracle is asserted at 1e-12 absolute against a
+measured 0.0, and §D2's inexact rescale at 1e-9 against a measured
+5.160e-14.
+"""
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+os.environ["NPY_DISABLE_CPU_FEATURES"] = "AVX512F AVX512_SKX AVX2 FMA3"
+
+import numpy as np  # noqa: E402  (must follow the environment edit)
+import pytest  # noqa: E402
+
+
+def _measure():
+    """`docs/measure_j_kaufmanstop_dist.py`, imported by path so this works
+    whether or not `docs/` is on `sys.path` as a package."""
+    path = Path(__file__).resolve().with_name("measure_j_kaufmanstop_dist.py")
+    spec = importlib.util.spec_from_file_location("_measure_jkaufmanstop",
+                                                  path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+if __name__ == "__main__":
+    dispatch = getattr(np.core._multiarray_umath, "__cpu_dispatch__", [])
+    enabled = [f for f in dispatch
+               if np.core._multiarray_umath.__cpu_features__.get(f)]
+    print(f"numpy {np.__version__}")
+    print(f"NPY_DISABLE_CPU_FEATURES = "
+          f"{os.environ['NPY_DISABLE_CPU_FEATURES']!r}")
+    print(f"dispatchable features still enabled: {enabled}")
+    for feature in ("AVX512F", "AVX512_SKX", "AVX2", "FMA3"):
+        if feature in enabled:
+            raise SystemExit(f"{feature} is still enabled -- the environment "
+                             f"edit did not take, so this run proves nothing")
+
+    want = [a.upper() for a in sys.argv[1:]]
+    if want:
+        sections = _measure().SECTIONS
+        for key in want:
+            if key not in sections:
+                raise SystemExit(f"unknown section {key!r};"
+                                 f" pick from {list(sections)}")
+            sections[key]()
+        sys.exit(0)
+    sys.exit(pytest.main(["tests/test_j_kaufmanstop_dist.py", "-q",
+                          "--no-header"]))

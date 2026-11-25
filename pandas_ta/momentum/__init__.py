@@ -40,6 +40,7 @@ from .inertia import inertia
 from .imi import imi
 from .j_acosc import j_acosc
 from .j_gator import j_gator
+from .j_wae import j_wae
 from .kalman_rsi import kalman_rsi
 from .kdj import kdj
 from .kst import kst
@@ -84,5 +85,6 @@ from .wavetrend import wavetrend
 from .willr import willr
 from .pzo import pzo
 from .szo import szo
+from .tao import tao
 from .wpo import wpo
 from .stc_tv import stc_tv

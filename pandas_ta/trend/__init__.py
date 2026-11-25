@@ -27,6 +27,7 @@ from .head_shoulders import head_shoulders
 from .increasing import increasing
 from .inverse_fvg import inverse_fvg
 from .j_chandelier_dist import j_chandelier_dist
+from .j_kaufmanstop_dist import j_kaufmanstop_dist
 from .j_safezone_dist import j_safezone_dist
 from .liquidity_compression_box import liquidity_compression_box
 from .liquidity_sweep import liquidity_sweep
@@ -51,6 +52,7 @@ from .sr_corridor import sr_corridor
 from .sr_decay import sr_decay
 from .sr_force import sr_force
 from .swing_equilibrium import swing_equilibrium
+from .tdi import tdi
 from .tsignals import tsignals
 from .triangle_wedge import triangle_wedge
 from .triple_top_bottom import triple_top_bottom

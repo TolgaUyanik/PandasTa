@@ -40,20 +40,21 @@ Imports = {
 Category = {
     # Candles
     "candles": [
-        "cdl_doji", "cdl_inside", "cdl_pattern", "cdl_z", "ha"
+        "cdl_doji", "cdl_inside", "cdl_pattern", "cdl_z", "ha", "rd_horseshoe",
+        "rd_outside_bar", "rd_wick_pressure_10"
     ],
     # Cycles
     "cycles": [
         "correlation_cycle", "dsp", "ebsw", "ht_dcperiod", "ht_dcphase", "ht_phasor", "ht_sine",
         "ht_trendmode",
-        "ht",
+        "ht", "msw_lead", "msw_sine",
     ],
     # Momentum
     "momentum": [
         "a101_007", "a101_021", "a101_023", "a101_043", "a101_046", "a101_048", "a101_053", "ao", "apo", "bias", "bop", "brar", "cci", "cdvo", "cfo", "cg", "cmo",
-        "coppock", "crsi", "cti", "dm", "er", "eri", "ewmac", "fisher", "g191_002", "g191_003", "g191_022", "g191_093", "g191_110", "g191_129", "g191_146", "g191_152", "g191_167", "g191_169", "g191_187", "gapm", "imi", "inertia", "j_acosc", "j_gator", "kalman_rsi", "kdj", "kst", "lean_momersion_20", "lrsi", "macd", "macd_area_divergence",
+        "coppock", "crsi", "cti", "dm", "er", "eri", "ewmac", "fisher", "g191_002", "g191_003", "g191_022", "g191_093", "g191_110", "g191_129", "g191_146", "g191_152", "g191_167", "g191_169", "g191_187", "gapm", "imi", "inertia", "j_acosc", "j_gator", "j_wae", "kalman_rsi", "kdj", "kst", "lean_momersion_20", "lrsi", "macd", "macd_area_divergence",
         "mom", "osap_intmom", "osap_lrrev", "osap_mrrev", "ovn_split", "pfe", "pgo", "po", "ppo", "pressure_pulse", "psl", "pvo", "qqe", "roc", "rsi", "rsi_divergence", "rsx", "rvgi", "sk_fcb_pos", "sk_rocwb_ratio",
-        "slope", "smi", "squeeze", "squeeze_pro", "stc", "stoch", "stochrsi", "td_seq", "trix",
+        "slope", "smi", "squeeze", "squeeze_pro", "stc", "stoch", "stochrsi", "tao", "td_seq", "trix",
         "trixh", "tsi", "uo", "vwmacd", "wavetrend", "willr",
         "pzo", "szo", "wpo", "stc_tv"
     ],
@@ -68,10 +69,10 @@ Category = {
         "frama"
     ],
     # Performance
-    "performance": ["log_return", "percent_return", "trend_return", "max_return", "mtd_ret", "seas"],
+    "performance": ["log_return", "percent_return", "trend_return", "max_return", "mtd_ret", "qtd_ret", "seas", "ytd_ret"],
     # Statistics
     "statistics": [
-        "arch_lm", "diff2_acf1", "entlz", "entropy", "ffd", "firstzero_ac", "g191_026", "g191_044", "g191_165", "g191_189", "g191_190", "ie_asym", "kpss", "kurtosis", "lean_hurst_100", "lean_tdd_20", "lot_zeroret_60", "lumpiness", "mad", "median", "median_ad_hl2", "osap_retskew_21", "quantile", "rank", "skew", "stdev",
+        "arch_lm", "c22_acf_first_min", "c22_ami2", "c22_ami_timescale", "c22_dfa", "c22_entropy_pairs", "c22_forecast_error", "c22_high_fluctuation", "c22_low_freq_power", "c22_median_freq", "c22_mode_10", "c22_mode_5", "c22_outlier_timing_neg", "c22_outlier_timing_pos", "c22_periodicity", "c22_stretch_decreasing", "diff1_pacf5", "diff2_acf1", "entlz", "entropy", "ffd", "firstzero_ac", "flat_spots", "g191_026", "g191_044", "g191_165", "g191_189", "g191_190", "ie_asym", "kpss", "kurtosis", "lean_hurst_100", "lean_tdd_20", "level_shift_idx", "level_shift_size", "lot_zeroret_60", "lumpiness", "mad", "median", "median_ad_hl2", "osap_retskew_21", "quantile", "rank", "rd_gap_fill_rate_60", "rd_knot_pos_40", "skew", "stability", "stdev", "stl_seasonal_strength", "stl_spikiness", "stl_trend_strength",
         "tf_autocorr_1e_60", "tf_centroid_20", "tf_dfa_100", "tf_higuchi_30", "tf_iqr_ret_60", "tf_spec_entropy_64", "tf_zero_cross_20", "ts_above_mean_20", "ts_ac1_60", "ts_aggac_60", "ts_binent_20", "ts_c3_20", "ts_cid_ce_20", "ts_cross_mean_20", "ts_energy_last_20", "ts_imq_20", "ts_kurt_60", "ts_medskew_20", "ts_peaks_20",
         "ts_perment_20", "ts_q05_60", "ts_reoccur_20", "ts_strike_20", "variance", "zscore",
         "rolling_sum", "normalize", "covariance", "cusum", "trend_scan", "halflife"
@@ -79,11 +80,11 @@ Category = {
     # Trend
     "trend": [
         "adx", "adxr", "amat", "aroon", "atr_push", "band_cross_retest", "bdi4kewl", "bos", "bos_causal", "choch", "chop", "cksp", "decay", "decreasing", "dtdb",
-        "dpo", "dx", "equal_highs_lows", "flag_breakout", "fvg", "fvg_sweep_magnet", "g191_069", "g191_098", "halftrend", "increasing", "inverse_fvg", "j_chandelier_dist", "j_safezone_dist", "liquidity_compression_box",
+        "dpo", "dx", "equal_highs_lows", "flag_breakout", "fvg", "fvg_sweep_magnet", "g191_069", "g191_098", "halftrend", "increasing", "inverse_fvg", "j_chandelier_dist", "j_kaufmanstop_dist", "j_safezone_dist", "liquidity_compression_box",
         "head_shoulders",
         "liquidity_sweep", "long_run",
         "nwog", "ob", "pmax", "priorday_fib", "priormonth_range", "psar", "qstick", "rejection_blocks", "renko_trend",
-        "ribbon_concordance", "sd_zone_pro", "short_run", "smc_sweep", "sphinx_unicorn", "sr_corridor", "sr_decay", "sr_force", "swing_equilibrium", "tsignals",
+        "ribbon_concordance", "sd_zone_pro", "short_run", "smc_sweep", "sphinx_unicorn", "sr_corridor", "sr_decay", "sr_force", "swing_equilibrium", "tdi", "tsignals",
         "rounding_cup",
         "triangle_wedge", "triple_top_bottom",
         "ttm_trend", "tvstop",
@@ -93,12 +94,12 @@ Category = {
     ],
     # Volatility
     "volatility": [
-        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "corwin_schultz", "cvi", "donchian", "edge", "g191_023", "g191_109", "g191_158", "g191_160", "g191_174", "g191_188", "garman_klass", "har_park", "hwc", "j_damiani", "kc", "massi", "natr", "pdist", "range_compress_run", "range_profile", "rogers_satchell", "roll_spread", "rvi", "sk_fcb_width", "tf_median_absdiff_20", "thermo", "true_range", "ui", "volvol", "wvma", "yang_zhang",
+        "aberration", "accbands", "atr", "atr2", "atr_ma_multiple", "bbands", "corwin_schultz", "cvi", "donchian", "edge", "g191_023", "g191_109", "g191_158", "g191_160", "g191_174", "g191_188", "garman_klass", "har_park", "hwc", "inrange_count", "j_damiani", "kc", "massi", "natr", "pdist", "range_compress_run", "range_profile", "rogers_satchell", "roll_spread", "rvi", "sk_fcb_width", "tf_median_absdiff_20", "thermo", "true_range", "ttr_snr_20", "ui", "volvol", "wvma", "yang_zhang",
     ],
 
     # Volume, "vp" or "Volume Profile" is unique
     "volume": [
-        "a101_026", "a101_035", "a101_058", "ad", "adosc", "amihud", "aobv", "avwap_z", "bw_mfi", "cmf", "demand", "efi", "eom", "g191_040", "g191_043", "g191_076", "g191_080", "g191_111", "g191_144", "g191_145", "g191_191", "kvo", "maxvol_adv", "mfi", "nvi", "obv", "osap_voltrend_60", "pocket_pivot", "pvcorr", "pvi", "pvol", "pvr", "pvt", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "vol_sign_rev", "volcv", "vsumd", "weis_wave",
+        "a101_026", "a101_035", "a101_058", "ad", "adosc", "amihud", "aobv", "avwap_z", "bw_mfi", "cmf", "demand", "efi", "eom", "fn_baspn_net", "g191_040", "g191_043", "g191_076", "g191_080", "g191_111", "g191_144", "g191_145", "g191_191", "kvo", "maxvol_adv", "mfi", "nvi", "obv", "osap_voltrend_60", "pocket_pivot", "pvcorr", "pvi", "pvol", "pvr", "pvt", "rd_corr_c_obv_20", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "vol_sign_rev", "volcv", "vpci", "vsumd", "weis_wave",
         "vzo", 
         # `up_and_down_volume` and `volume_delta` are deliberately NOT here.
         # They REQUIRE a second (lower-timeframe) frame, which `df.ta.strategy()`
