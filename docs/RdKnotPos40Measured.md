@@ -17,7 +17,7 @@ mathematically the same reading but is not what Gate A cites). The 40-bar window
 5..34 knot search range are not in the poster's words — the issue discloses both as the
 prototype's own choice, kept here as the `length`/`knot_margin` defaults, not hard-coded.
 
-**Status:** Gates A–D measured. **Gate E: pending, run by issue-solver after this session.**
+**Status:** Gates A–F measured. **Gate E: SHIP** (max |ρ| 0.2849 vs `CHOP`).
 
 | module | category | column | range |
 |---|---|---|---|
@@ -136,12 +136,17 @@ issue-solver after this session):
 
 ## Gate E — attribution
 
-**Pending, run by issue-solver after this session.** The harness
-(`../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module
-pandas_ta.statistics.rd_knot_pos_40`) needs the private Backtesting engine and the 89-frame
-BIST cache, neither available in this worktree; this port's own rules forbid running or
-reading it here. `module_sha1` for the ledger row (`python docs/measure_rd_knot_pos_40.py`):
-`64f0f86a9a55b7f154711d22abc454b7c9199846`.
+Run by issue-solver (launcher), not in this worktree: `gate_e_overlap.py run --module
+pandas_ta.statistics.rd_knot_pos_40`, 89 ALTPORT-1 BIST frames, 398,849 pooled bars, 329 +
+358 = 687 comparators, canary bit-equal (`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS`). Run id
+`is166-rd_knot_pos_40-c0ab11bd`, measured 2026-11-25, recorded in `docs/gate_e_ledger.csv`.
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `RD_KNOT_POS_40_5` | 0.2849 | `CHOP` | 395,255 | 0.2885 | **SHIP** |
+
+Both the pooled max and the per-frame max median sit far below the 0.76 ship line
+(`r3-perframe-0.90` bands). Column ships as measured; no revert needed.
 
 ## Gate F — suites
 
@@ -154,11 +159,10 @@ python -m pytest -q tests/test_rd_knot_pos_40.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,558 passed, 7 skipped, 1 failed** — the one failure is
-`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, expected before the
-ledger row exists per this session's own rules ("Gate E owed, not a finding"); a later
-receipt session records the row after the launcher's Gate E run, which resolves it.
-`tests/test_rd_knot_pos_40.py` alone: 20 passed.
+**1,566 passed, 7 skipped, 0 failed** — re-measured in this receipt session after recording
+the ledger row above; the prior round's single failure
+(`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, "Gate E owed") is
+resolved. `tests/test_rd_knot_pos_40.py` alone: 20 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 — the four features issue-solver's rules name, not this machine's
