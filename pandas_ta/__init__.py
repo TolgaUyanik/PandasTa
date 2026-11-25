@@ -40,7 +40,8 @@ Imports = {
 Category = {
     # Candles
     "candles": [
-        "cdl_doji", "cdl_inside", "cdl_pattern", "cdl_z", "ha", "rd_horseshoe"
+        "cdl_doji", "cdl_inside", "cdl_pattern", "cdl_z", "ha", "rd_horseshoe",
+        "rd_outside_bar", "rd_wick_pressure_10"
     ],
     # Cycles
     "cycles": [
@@ -98,7 +99,7 @@ Category = {
 
     # Volume, "vp" or "Volume Profile" is unique
     "volume": [
-        "a101_026", "a101_035", "a101_058", "ad", "adosc", "amihud", "aobv", "avwap_z", "bw_mfi", "cmf", "demand", "efi", "eom", "fn_baspn_net", "g191_040", "g191_043", "g191_076", "g191_080", "g191_111", "g191_144", "g191_145", "g191_191", "kvo", "maxvol_adv", "mfi", "nvi", "obv", "osap_voltrend_60", "pocket_pivot", "pvcorr", "pvi", "pvol", "pvr", "pvt", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "vol_sign_rev", "volcv", "vpci", "vsumd", "weis_wave",
+        "a101_026", "a101_035", "a101_058", "ad", "adosc", "amihud", "aobv", "avwap_z", "bw_mfi", "cmf", "demand", "efi", "eom", "fn_baspn_net", "g191_040", "g191_043", "g191_076", "g191_080", "g191_111", "g191_144", "g191_145", "g191_191", "kvo", "maxvol_adv", "mfi", "nvi", "obv", "osap_voltrend_60", "pocket_pivot", "pvcorr", "pvi", "pvol", "pvr", "pvt", "rd_corr_c_obv_20", "tod_profile", "tri_dir_pressure", "vfi", "vol_delta", "vol_sign_rev", "volcv", "vpci", "vsumd", "weis_wave",
         "vzo", 
         # `up_and_down_volume` and `volume_delta` are deliberately NOT here.
         # They REQUIRE a second (lower-timeframe) frame, which `df.ta.strategy()`

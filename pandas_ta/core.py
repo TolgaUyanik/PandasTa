@@ -908,6 +908,20 @@ class AnalysisIndicators(BasePandasObject):
         result = rd_horseshoe(open_=open_, high=high, low=low, close=close, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rd_outside_bar(self, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        result = rd_outside_bar(high=high, low=low, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def rd_wick_pressure_10(self, length=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_wick_pressure_10(open_=open_, high=high, low=low, close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     # Cycles
     def correlation_cycle(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
@@ -3567,6 +3581,12 @@ class AnalysisIndicators(BasePandasObject):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = pvt(close=close, volume=volume, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def rd_corr_c_obv_20(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = rd_corr_c_obv_20(close=close, volume=volume, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def tod_profile(self, length=None, bb_length=None, bb_std=None,
