@@ -123,7 +123,8 @@ def test_matches_the_screen_prototypes_plain_ewm_reading_after_warmup():
     from a different seed (bar 9's SMA seed vs. bar 0's single-bar seed) by
     a transient that decays geometrically at rate `(1 - 2/(n+1))` per bar --
     `docs/measure_rd_vwio_10.py` measures the decay directly. By bar 100
-    (`(9/11)**90` ~ 2.5e-7) the two readings must agree to float tolerance."""
+    (`(9/11)**91` ~ 1.2e-8, seed at bar 9 to bar 100 is 91 steps) the two
+    readings must agree to float tolerance."""
     open_, close, volume = _frame(500)
     n = 10
     buys = volume.where(close > open_, 0.0)

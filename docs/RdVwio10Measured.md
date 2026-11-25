@@ -82,7 +82,8 @@ RD_VWIO_10 = EMA(buys - sells, 10) / EMA(volume, 10)
 - **Screen-prototype equivalence.** The prototype's plain `Series.ewm(adjust=False)`
   reading (no SMA seed) against this module's SMA-seeded reading, on a 500-bar frame,
   compared only on bars ≥ 100 (both readings' transients have decayed by
-  `(9/11)**90 ≈ 2.5e-7` at that point): 400 compared bars, max `|diff|` = **1.144e-09** —
+  `(9/11)**91 ≈ 1.2e-8` at that point, seed at bar 9 to bar 100 is 91 steps): 400 compared
+  bars, max `|diff|` = **1.144e-09** —
   the two readings of "EMA" are the same number once both have settled.
 
 ## Gate B — causality
@@ -100,8 +101,7 @@ RD_VWIO_10 = EMA(buys - sells, 10) / EMA(volume, 10)
 
 ## Gate C — reachability
 
-Synthetic, from this session (no real-data cache in this worktree; the receipt session
-adds the Gate E run's real-data reachability count):
+Synthetic, from this session (no real-data cache in this worktree):
 
 - **1,200-bar frame (seed 11 close / seed 31 open / seed 21 volume), default length 10:**
   1,191 of 1,200 bars non-NaN (9-bar warm-up, `length - 1`); all 1,191 non-zero; **1,191
@@ -112,6 +112,9 @@ adds the Gate E run's real-data reachability count):
   reachability test happens to use.
 - What blanks a bar: the 9-bar warm-up (`length - 1 = 9`); nothing else, since `open`,
   `close` and `volume` are finite by construction on every synthetic frame used.
+- **Real data:** Gate E run `is173-rd_vwio_10-cbadc748`, 398,048 non-NaN / 387,237 non-zero
+  of 398,849 pooled bars across the 89 ALTPORT-1 frames, no `degenerate.csv` row — fires on
+  real data (the 801 blank bars are exactly 89 frames × the 9-bar warm-up).
 
 ## Gate D — scale-free
 
