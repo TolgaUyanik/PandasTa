@@ -7,7 +7,7 @@ docs/RdRange100Pct500Measured.md.
 What these pin, in order of how much it would hurt to lose:
 
 * CORRECTNESS against the issue's own formula: an independent per-window
-  loop (plain Python, `np.argmax`/`np.argmin`/a manual rank count, never
+  loop (plain Python, slice `max()`/`min()`, a manual rank count, never
   calling the module's own rolling helpers) that recomputes `R =
   (HHV(high,100) - LLV(low,100)) / LLV(low,100)` and its 500-bar percentile
   rank from scratch; a hand-derived constant-range frame where every `R`
@@ -112,7 +112,8 @@ def _load_mutant():
     return mod
 
 
-OFFSETS = range(650, 1150, 70)  # past the 100+500-1 = 599-bar warm-up; none
+OFFSETS = range(650, 1150, 70)  # past the 598-bar warm-up (`length - 1 = 99`
+# NaN `R` bars, then 500 valid `R` values ending at index 598); none
 # of these 8 positions sits at the base series' own rank ceiling (1.0) --
 # verified once against this fixed seed, since a rank already pinned at
 # 1.0 cannot visibly rise further under either perturbation below (see

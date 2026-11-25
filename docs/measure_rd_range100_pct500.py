@@ -55,7 +55,7 @@ def gate_a():
 
 
 def reachability():
-    print("== Gate C: reachability on a 1,200-bar synthetic frame (seed 11/21) ==")
+    print("== Gate C: reachability on a 1,200-bar synthetic frame (seed 11) ==")
     high, low = T._walk(1200)
     out = rd_range100_pct500(high, low)
     fired = out.dropna()
