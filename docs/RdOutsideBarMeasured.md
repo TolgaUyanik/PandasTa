@@ -17,8 +17,8 @@ number to cite; Gate A below reads the formula directly from the issue's own sta
 from the screen prototype (`docs/issues/screen/ind_screen_r6.py`'s `rd_outside_bar`,
 which is mathematically the same reading but is not what Gate A cites).
 
-**Status:** shipped through Gates A–D plus wiring and tests. Gate E: pending, run by
-issue-solver after this session.
+**Status:** shipped through Gates A–F plus wiring and tests. Gate E measured
+2026-11-25, run `is167-rd_outside_bar-3a7baac5`, SHIP.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -120,7 +120,17 @@ adds the Gate E run's real-data reachability count):
 
 ## Gate E — attribution
 
-Pending, run by issue-solver after this session.
+Measured by the launcher 2026-11-25, run `is167-rd_outside_bar-3a7baac5`
+(`gate_e_overlap.py run --module pandas_ta.candles.rd_outside_bar`), 89 ALTPORT-1 BIST
+frames, 398,849 pooled bars, 329 + 358 = 687 comparators, canary bit-equal on AKBNK.IS,
+BIENY.IS, AGHOL.IS, SASA.IS.
+
+| column | max \|ρ\| | against | n | per-frame max median | verdict |
+|---|---|---|---|---|---|
+| `RD_OUTSIDE_BAR` | 0.3389 | `LOWER_LOW` | 398,760 | 0.3384 | **SHIP** |
+
+0.3389 is well under the DISCLOSE line (0.76), so `RD_OUTSIDE_BAR` ships as-is — no
+column removed.
 
 ## Gate F — suites
 
