@@ -2890,6 +2890,11 @@ class AnalysisIndicators(BasePandasObject):
         result = vortex(high=high, low=low, close=close, drift=drift, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def stiffness(self, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = stiffness(close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def swing_equilibrium(self, left=None, right=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))

@@ -83,7 +83,7 @@ Category = {
         "head_shoulders",
         "liquidity_sweep", "long_run",
         "nwog", "ob", "pmax", "priorday_fib", "priormonth_range", "psar", "qstick", "rejection_blocks", "renko_trend",
-        "ribbon_concordance", "sd_zone_pro", "short_run", "smc_sweep", "sphinx_unicorn", "sr_corridor", "sr_decay", "sr_force", "swing_equilibrium", "tdi", "tsignals",
+        "ribbon_concordance", "sd_zone_pro", "short_run", "smc_sweep", "sphinx_unicorn", "sr_corridor", "sr_decay", "sr_force", "stiffness", "swing_equilibrium", "tdi", "tsignals",
         "rounding_cup",
         "triangle_wedge", "triple_top_bottom",
         "ttm_trend", "tvstop",
