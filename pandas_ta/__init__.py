@@ -54,7 +54,7 @@ Category = {
         "coppock", "crsi", "cti", "dm", "er", "eri", "ewmac", "fisher", "g191_002", "g191_003", "g191_022", "g191_093", "g191_110", "g191_129", "g191_146", "g191_152", "g191_167", "g191_169", "g191_187", "gapm", "imi", "inertia", "j_acosc", "j_gator", "j_wae", "kalman_rsi", "kdj", "kst", "lean_momersion_20", "lrsi", "macd", "macd_area_divergence",
         "mom", "osap_intmom", "osap_lrrev", "osap_mrrev", "ovn_split", "pfe", "pgo", "po", "ppo", "pressure_pulse", "psl", "pvo", "qqe", "roc", "rsi", "rsi_divergence", "rsx", "rvgi", "sk_fcb_pos", "sk_rocwb_ratio",
         "slope", "smi", "squeeze", "squeeze_pro", "stc", "stoch", "stochrsi", "tao", "td_seq", "trix",
-        "trixh", "tsi", "uo", "vwmacd", "wavetrend", "willr",
+        "trixh", "tsi", "uo", "vwd", "vwmacd", "wavetrend", "willr",
         "pzo", "szo", "wpo", "stc_tv"
     ],
     # Overlap
