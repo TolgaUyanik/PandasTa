@@ -2143,6 +2143,11 @@ class AnalysisIndicators(BasePandasObject):
         result = level_shift_idx(close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def level_shift_size(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = level_shift_size(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def lot_zeroret_60(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = lot_zeroret_60(close=close, length=length, offset=offset, **kwargs)
