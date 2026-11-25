@@ -11,8 +11,9 @@ What these pin, in order of how much it would hurt to lose:
   paper before the module ran, plus a cross-check against an independent
   per-bar Python loop (true range + Wilder recursion, built straight from
   the formula) on a synthetic frame.
-* A zero-ATR run (every bar in the smoothing window a flat doji at an
-  unchanged close) reads NaN (0/0), not 0 or inf.
+* A flat run (every bar a doji, `open == high == low == close`) reads 0.0,
+  not NaN or inf: `true_range`'s own `non_zero_range` floors an exact
+  `high == low` tie at machine epsilon, so the ratio is `0 / epsilon`.
 * CAUSALITY by future-splice: bars before a perturbation point J stay
   bit-identical, and a mutant (the final ratio with `.shift(-1)` appended,
   reading one bar ahead) is proved live and caught.
