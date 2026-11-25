@@ -56,6 +56,11 @@ run from the repo root. Environment: Python 3.11.2, pandas 2.3.3, numpy 1.26.4. 
 6. **Column is `RD_HORSESHOE`, no parameters** — the formation is fixed at 4 bars by the
    poster's own definition, so there is nothing to name a default against (unlike
    `CDL_DOJI_10_0.1`'s `length`/`factor`).
+7. **A NaN anywhere in the 4-bar window reads 0, not NaN** — only the 3-bar warm-up is
+   masked (`.where(bar1_open.notna())`); a NaN in `high`/`low`/`close` inside the window
+   makes every comparison `False`, so the bar reports "formation absent" rather than
+   "unknown". Unreached on the Gate E data: the non-NaN deficit is 267 = 3 × 89 frames,
+   warm-up only. Would understate NaN on a gappy frame.
 
 ## Gate A — correctness
 
@@ -148,7 +153,7 @@ AGHOL.IS, SASA.IS. Recorded in `docs/gate_e_ledger.csv` (measured 2026-11-25).
 | `RD_HORSESHOE` | 0.2168 | `VOL_DELTA_APPROX` (compute_all) | 397,171 | 0.2248 | SHIP |
 
 0.2168 < 0.76 (SHIP band, `r3-perframe-0.90`): not struck, not disclosed, ships as-is.
-Next comparators: `bop_Pctl` (manifest) 0.2099, n 393,598. 0 degenerate comparators;
+Next comparators: `bop` (compute_all) 0.2151, `bop_Pctl` (manifest) 0.2099, n 393,598. 0 degenerate comparators;
 398,582 non-NaN of the pooled cells, 13,290 non-zero.
 
 ## Gate F — suites

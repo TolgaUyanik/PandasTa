@@ -88,9 +88,19 @@ def causality_sweep():
           f"mutant leaked at {mutant_leaks}")
 
 
+def module_sha1():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("gate_e_ledger", "docs/gate_e_ledger.py")
+    gl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gl)
+    path = gl.module_path("pandas_ta.candles.rd_horseshoe")
+    print(f"== module_sha1 (LF-normalised, for docs/gate_e_ledger.csv) == {gl.lf_sha1(path)}")
+
+
 if __name__ == "__main__":
     gate_a()
     reachability()
     scale_tolerance()
     causality_sweep()
+    module_sha1()
     print("python", sys.version.split()[0], "pandas", pd.__version__, "numpy", np.__version__)

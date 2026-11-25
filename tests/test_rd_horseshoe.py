@@ -14,7 +14,8 @@ What these pin, in order of how much it would hurt to lose:
 * CAUSALITY: bars before a perturbation point J are bit-identical whether
   or not the frame's tail is replaced by an unrelated one, at several J,
   and a mutant (the final write shifted one bar into the future via
-  `.shift(-1)`) proved live and caught at every J.
+  `.shift(-1)`) proved live and caught at 24 of the 293 swept J (not at
+  every J -- a {-1,0,1} output fires on ~8% of bars).
 * SCALE-FREE: bit-identical under a price rescale (x8/x64, and x10/x3.7 --
   a discrete {-1, 0, 1} output has no rounding to tolerate, so these are
   also exact).

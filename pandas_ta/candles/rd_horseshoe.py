@@ -36,8 +36,10 @@ CAUSALITY. Bar T's output reads only open/high/low/close at T-3..T:
 shifted toward the future. `tests/test_rd_horseshoe.py` proves this with a
 future-perturbation probe (frames identical up to J; bars before J stay
 bit-identical) and a mutant that appends a one-bar look-ahead (`.shift(-1)`)
-to the final write: the real module leaks 0 bars before J at every tested
-J, the mutant leaks at bar J-1 at every one.
+to the final write: the real module leaks 0 bars before J at all 293 swept
+J values; the mutant leaks at bar J-1 at 24 of them -- a binary output
+cannot be expected to leak at every J (see docs/RdHorseshoeMeasured.md Gate
+B).
 
 SCALE-FREE. Every comparison (`<`, `>`, `<=`, `>=`) and every `np.maximum` /
 `np.minimum` call reads only like-for-like price terms on the same bars
