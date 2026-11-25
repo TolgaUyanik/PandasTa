@@ -20,8 +20,7 @@ is mathematically the same reading but is not what Gate A cites). The 60-bar win
 in the poster's words — the issue discloses it as the prototype's own choice, kept here as
 the `length` default, not hard-coded.
 
-**Status:** Gates A–D measured below, port wired. **Gate E: pending, run by issue-solver
-after this session.**
+**Status:** Gates A–E measured, **SHIP**. Port wired, ledger row recorded.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -149,12 +148,18 @@ first written):
 
 ## Gate E — attribution
 
-**Pending, run by issue-solver after this session.** This worktree has no access to the
-private Backtesting engine or the BIST frame cache; the launcher runs
-`gate_e_overlap.py run --module pandas_ta.statistics.rd_gap_fill_rate_60` and records the
-row in `docs/gate_e_ledger.csv` per CLAUDE.md's "Gate E harness". Until then,
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails locally
-(no `GATE_E_PENDING_OK` set) — expected, not a defect in this port.
+Run by issue-solver (launcher), `screen_r6`-style harness, 89 ALTPORT-1 BIST frames,
+398,849 pooled bars, 687 comparators (329 `compute_all` + 358 `ml_features` manifest),
+canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS. Recorded in
+`docs/gate_e_ledger.csv` (`python docs/gate_e_ledger.py record ... --measured 2026-11-25`).
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | per-frame max median against | verdict |
+|---|---|---|---|---|---|---|
+| `RD_GAP_FILL_RATE_60_0.3` | 0.2644 | `ZIGZAG` | 33,262 | 0.3471 | `CHANNEL_WIDTH` | **SHIP** |
+
+Below both bands (`r3-perframe-0.90`): pooled 0.2644 and per-frame max median 0.3471 are far
+under the 0.76 ship line, let alone the 0.90 struck line. Nothing struck; the column ships
+as-is.
 
 ## Gate F — suites
 
