@@ -2198,6 +2198,15 @@ class AnalysisIndicators(BasePandasObject):
         result = rank(close=close, lengths=lengths, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rd_gap_fill_rate_60(self, length=None, min_gap=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_gap_fill_rate_60(open_=open_, high=high, low=low, close=close,
+                                     length=length, min_gap=min_gap, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def skew(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = skew(close=close, length=length, offset=offset, **kwargs)
