@@ -3,7 +3,7 @@
 the lowest-MSE one-knot continuous spline break over a trailing 40-bar
 window of log close (issue #166, RD-KNOT-POS-40; Reddit, tier 4, untested
 by any poster). Measurements are in docs/RdKnotPos40Measured.md. Gate E is
-pending, run by issue-solver after this session.
+SHIP (0.2849 vs `CHOP`), recorded in docs/gate_e_ledger.csv.
 
 What these pin, in order of how much it would hurt to lose:
 

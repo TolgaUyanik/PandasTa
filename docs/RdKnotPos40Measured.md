@@ -21,7 +21,7 @@ prototype's own choice, kept here as the `length`/`knot_margin` defaults, not ha
 
 | module | category | column | range |
 |---|---|---|---|
-| `pandas_ta/statistics/rd_knot_pos_40.py` | statistics | `RD_KNOT_POS_40_5` | `[0.0, 1.0]` or NaN, 30 discrete levels at defaults |
+| `pandas_ta/statistics/rd_knot_pos_40.py` | statistics | `RD_KNOT_POS_40_5` | `[0.1282, 0.8718]` = [5/39, 34/39] at defaults (never 0 or 1), or NaN; 30 discrete levels |
 
 Tests: `tests/test_rd_knot_pos_40.py` (20 tests). Numbers: `python
 docs/measure_rd_knot_pos_40.py`, run from the repo root. Environment: Python 3.11.2,
@@ -101,8 +101,13 @@ log-price random walk (length=40, knot_margin=5, 261 defined bars): NaN masks id
 
 ## Gate C — reachability
 
-Synthetic, from this session (real-data reachability on BIST frames is Gate E's job, run by
-issue-solver after this session):
+Real data (run `is166-rd_knot_pos_40-c0ab11bd`, 89 ALTPORT-1 BIST frames, 398,849 pooled
+bars): `RD_KNOT_POS_40_5` is non-NaN on 395,378 of the 398,849 pooled cells, and every one of
+those is non-zero (0 is unreachable by construction — `knot_margin` floors the age at 5/39).
+The single `degenerate.csv` row in that run is comparator-side (`squeeze_SQZ_NO`, constant),
+not this column.
+
+Synthetic, from the port session:
 
 - **1,600-bar frame (seed 4):** 1,561 of 1,600 bars fire (39-bar warm-up); values range
   0.1282–0.8718 across **30 distinct values** — the full discrete grid at defaults

@@ -2210,7 +2210,7 @@ class AnalysisIndicators(BasePandasObject):
     def rd_knot_pos_40(self, length=None, knot_margin=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = rd_knot_pos_40(close=close, length=length, knot_margin=knot_margin,
-                                 offset=offset, **kwargs)
+                                offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def skew(self, length=None, offset=None, **kwargs):
