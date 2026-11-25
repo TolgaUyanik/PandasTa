@@ -21,7 +21,7 @@ adjust=False)`) is the only concrete answer on the record, carried through here 
 fork's own shipped Wilder smoothing (`atr(mamode="wrma")`) rather than re-implemented
 inline.
 
-**Status:** shipped through Gates A–D plus wiring and tests. Gate E owed.
+**Status:** shipped through Gates A–F.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -120,8 +120,8 @@ Synthetic, from this session (no real-data cache in this worktree):
   warm-up** (`length=3`; `test_flat_run_reads_zero_not_nan`, Decision 4 above) — the
   epsilon-floored ATR forecloses the in-principle zero-ATR NaN case on this fork's own
   `true_range`.
-- **Real data:** owed, run by issue-solver after this session (no BIST cache in this
-  worktree).
+- **Real data:** Gate E's run, 398,404 non-NaN / 332,166 non-zero of 398,849 pooled bars
+  across the 89 ALTPORT-1 frames, 0 degenerate frames — fires on real data.
 
 ## Gate D — scale-free
 
@@ -148,7 +148,17 @@ Synthetic, from this session (no real-data cache in this worktree):
 
 ## Gate E — attribution
 
-Pending, run by issue-solver after this session.
+Run by issue-solver (`gate_e_overlap.py run --module pandas_ta.candles.rd_uwick_atr`), 89
+ALTPORT-1 frames, 398,849 pooled bars, 687 comparators (329 `compute_all` + 358 manifest),
+canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS. Recorded in `docs/gate_e_ledger.csv`
+(2026-11-25).
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `RD_UWICK_ATR` | 0.5249 | `BODY_PCT` | 397,009 | 0.5304 | SHIP |
+
+Pooled max |ρ| 0.5249 and per-frame max median 0.5304 both land below the 0.76 SHIP line
+(`r3-perframe-0.90` bands) — ships as-is, no column removed.
 
 ## Gate F — suites
 
@@ -161,10 +171,8 @@ python -m pytest -q tests/test_rd_uwick_atr.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,589 passed, 7 skipped, 1 failed.** The one failure is
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` — expected per
-the issue-solver rules (no ledger row until the launcher's Gate E run and the receipt
-session record it), not a port defect. `tests/test_rd_uwick_atr.py` alone: 19 passed.
+Re-measured in the receipt session after the ledger row was recorded:
+**1,597 passed, 7 skipped, 0 failed.** `tests/test_rd_uwick_atr.py` alone: 19 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 — the four features issue-solver's rules name, not this machine's
@@ -194,8 +202,6 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
 ## Open
 
-Gate E owed — run by issue-solver after this session, then recorded by the receipt
-session in `docs/gate_e_ledger.csv`. If the run comes back STRUCK (pooled |ρ| ≥ 0.90 or a
-top-5 comparator's per-frame median ≥ 0.90), the receipt session reverts this port per the
-issue's own rule ("a measured revert closes this exactly as well as a ship") rather than
-shipping an over-correlated column.
+None. Gate E SHIP, ledger row recorded. Real-data reachability (Gate C's "owed" line) is
+covered by the same Gate E run: 398,404 non-NaN / 332,166 non-zero of 398,849 pooled bars,
+0 degenerate.
