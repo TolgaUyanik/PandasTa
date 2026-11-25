@@ -117,7 +117,7 @@ within `rtol=1e-12` (`test_matches_an_independent_loop`,
 
 ## Gate C — reachability
 
-**Real data** (run `is165-rd_gap_fill_rate_60-0bbf164d`, 89 ALTPORT-1 BIST frames, 398,849
+**Real data** (run `is165-rd_gap_fill_rate_60-740957cc`, 89 ALTPORT-1 BIST frames, 398,849
 pooled bars): `RD_GAP_FILL_RATE_60_0.3` is non-NaN on 393,598 of the 398,849 pooled cells, and
 every one of those 393,598 is non-zero — bounded away from both 0 and `n` on real prices. The
 single `degenerate.csv` row in that run is comparator-side (`squeeze_SQZ_NO`, constant), not
@@ -157,7 +157,7 @@ Synthetic, from this session:
 
 ## Gate E — attribution
 
-Run `is165-rd_gap_fill_rate_60-0bbf164d` by issue-solver (launcher), `screen_r6`-style
+Run `is165-rd_gap_fill_rate_60-740957cc` by issue-solver (launcher), `screen_r6`-style
 harness, 89 ALTPORT-1 BIST frames, 398,849 pooled bars, 687 comparators (329 `compute_all` +
 358 `ml_features` manifest), canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS. Recorded in
 `docs/gate_e_ledger.csv` (`python docs/gate_e_ledger.py record ... --measured 2026-11-25`).
@@ -181,9 +181,10 @@ python -m pytest -q tests/test_rd_gap_fill_rate_60.py tests/test_readme_counts.p
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,549 passed, 7 skipped, 1 failed** — the one failure was
-`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, expected before the
-ledger row existed and resolved by the row recorded above (see Gate E above).
+**1,557 passed, 7 skipped, 0 failed** (receipt session, after the ledger row above was recorded).
+A prior round's run of this same command read **1,549 passed, 7 skipped, 1 failed**, the one
+failure being `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, expected
+before the row existed; the row recorded above resolves it.
 `tests/test_rd_gap_fill_rate_60.py` alone: 19 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
