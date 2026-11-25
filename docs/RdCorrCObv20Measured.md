@@ -17,8 +17,8 @@ prototype"), not from the screen prototype (`docs/issues/screen/ind_screen_r6.py
 `rd_corr_c_obv_20`, which is mathematically the same reading but is not what Gate A
 cites).
 
-**Status:** shipped through Gates A–D plus wiring and tests. Gate E: pending, run by
-issue-solver after this session.
+**Status:** shipped through Gates A–F. Gate E measured 2026-11-25 (SHIP), ledger row
+recorded.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -126,13 +126,22 @@ either of its inputs — see the module docstring for the full argument.
 
 ## Gate E — attribution
 
-Pending, run by issue-solver after this session.
+Run by issue-solver, `is168-rd_corr_c_obv_20-8d3eb2c8`, 89 ALTPORT-1 frames, 398,849
+pooled bars, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS), 329 + 358 = 687
+comparators, 0 degenerate columns.
 
-Quoted from the issue (NOT re-measured in this session — the prototype's own screen run,
-cited for context only): Gate E max |ρ| 0.4032 vs `Dist_to_BB_Lower_pct` (manifest,
-n = 385,814), top-5 per-frame max median 0.4107 → SHIP in that run. Next comparators:
-`Dist_to_BB_Lower_pct_Pctl` 0.3998, `LINREG_SLOPE` 0.3804. Fork overlap (stage 2, not
-Gate E): max |ρ| 0.5388 vs `qqe:QQEl_14_5_4.236`.
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `RD_CORR_C_OBV_20` | 0.4010 | `Dist_to_BB_Lower_pct` (manifest) | 384,750 | 0.4094 | **SHIP** |
+
+Non-NaN 384,750 / non-zero 384,361 of the pooled 398,849 bars. Pooled max |ρ| 0.3797 vs
+`LINREG_SLOPE` against the `compute_all` set alone (329 comparators); the manifest set
+(358 comparators) carries the overall max against `Dist_to_BB_Lower_pct`. Both well under
+the `r3-perframe-0.90` SHIP line (< 0.76): pooled 0.40 and per-frame max median 0.41, not
+0.90. Column ships as measured.
+
+Prior-session context (prototype screen run, not Gate E itself): issue text quoted max |ρ|
+0.4032 vs `Dist_to_BB_Lower_pct`, consistent with this module's own 0.4010.
 
 ## Gate F — suites
 
@@ -145,10 +154,9 @@ python -m pytest -q tests/test_rd_corr_c_obv_20.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,573 passed, 7 skipped, 1 failed** (`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-— expected per the issue-solver rules: this port has no ledger row until the launcher's
-Gate E run and the receipt session record it). `tests/test_rd_corr_c_obv_20.py` alone: 19
-passed.
+**1,581 passed, 7 skipped** (receipt session, after the ledger row was recorded —
+`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` now passes).
+`tests/test_rd_corr_c_obv_20.py` alone: 19 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 — the four features issue-solver's rules name, not this machine's
@@ -178,6 +186,4 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
 ## Open
 
-Gate E owed (this session cannot run it; see the rules at the top of this repo's
-issue-solver prompt). The receipt session records the ledger row and the real Gate E
-numbers, then closes #168 either as a ship or as a measured revert.
+None. Gates A–F measured, ledger row recorded, column ships. Closes #168.
