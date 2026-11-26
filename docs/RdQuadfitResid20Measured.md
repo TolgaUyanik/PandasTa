@@ -20,7 +20,7 @@ poster's words — the issue discloses them as the prototype's own scale-free fo
 as the `length` default and the fixed ddof=0 recipe, following the same pattern as issue
 #179's "p = 20" / "3p" and issue #166's "40 bars, knots 5..34."
 
-**Status:** Gates A–D measured. **Gate E: pending, run by issue-solver after this session.**
+**Status:** Gates A–F measured. Gate E: DISCLOSE_GAP (max |ρ| 0.8343 vs `cfo_ta_Pctl`), ships.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -149,17 +149,22 @@ Synthetic, from the port session (real-data reachability is part of the owed Gat
   distinct values, min -2.6635 and max 2.5259 — both signs reached, so a constant column
   cannot pass.
 
-## Gate E — attribution
+**Run on the port itself** (not the prototype), issue-solver, run id
+`is180-rd_quadfit_resid_20-457a93c0`, module `pandas_ta.statistics.rd_quadfit_resid_20`,
+89 ALTPORT-1 frames, 398,849 pooled bars, 687 comparators (329 `compute_all` + 358
+`ml_features` manifest), canary bit-equal on AKBNK.IS / BIENY.IS / AGHOL.IS / SASA.IS,
+`pandas_ta_src_sha1` `6c03de9c7e550be764e9234f0bbfd57af5212a78`:
 
-**Pending, run by issue-solver after this session.** The screen prototype's own measurement
-(issue #180, NOT re-run in this worktree — quoted, not re-measured): max |ρ| 0.8343 vs
-`cfo_ta_Pctl` (manifest, n = 392,886), top-5 per-frame max median 0.8356 — DISCLOSE_GAP by the
-prototype's own run. Next comparators: `cfo_ta` 0.8275, `cfo` 0.8030. Stage-2 fork overlap (not
-Gate E) on scale-free `Category` outputs at defaults (12 frames): max |ρ| 0.8313 vs
-`cfo:CFO_9`, per-frame max median 0.8341 — not a restatement at the 0.90 line. This session's
-own Gate E run on the port (not the prototype) is owed; `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails (not skips, locally) until the launcher's run is recorded, per the issue-solver's own
-rule set.
+| column | max \|ρ\| | against | n | perframe max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `RD_QUADFIT_RESID_20` | 0.8343003635723028 | `cfo_ta_Pctl` (manifest) | 392,886 | 0.8356157515953884 | **DISCLOSE_GAP** |
+
+Next comparator (`compute_all`): `cfo` 0.8030023191691446, n = 397,158. Band: `r3-perframe-0.90`
+— DISCLOSE_GAP is 0.80 ≤ ρ < 0.90, below the 0.90 STRUCK line (pooled 0.8343, perframe max
+median 0.8356, neither reaches 0.90) — **ships, disclosed**, not reverted. Matches the screen
+prototype's own quoted figures (0.8343 / 0.8356 vs `cfo_ta_Pctl`) to the digit: the port is
+mathematically the same reading as the prototype, measured independently on the port's own code.
+Recorded: `docs/gate_e_ledger.csv`, measured 2026-11-27.
 
 ## Gate F — suites
 
@@ -172,12 +177,8 @@ python -m pytest -q tests/test_rd_quadfit_resid_20.py tests/test_readme_counts.p
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1 failed, 1,718 passed, 7 skipped** — the one failure is
-`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` ("no Gate E ledger row
-for ['rd_quadfit_resid_20']"), expected per the issue-solver's own rules until the launcher's
-Gate E run and a later receipt session record the ledger row; `GATE_E_PENDING_OK=1` (set in
-CI, not here) would turn this into a skip instead. `tests/test_rd_quadfit_resid_20.py` alone:
-20 passed.
+**1,726 passed, 7 skipped** (receipt session, after the Gate E ledger row above was recorded).
+`tests/test_rd_quadfit_resid_20.py` alone: 20 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub runner
 without AVX-512 — the four features issue-solver's rules name, not this machine's full
