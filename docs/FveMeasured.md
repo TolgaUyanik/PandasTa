@@ -1,7 +1,7 @@
 # fve — measured (issue #260)
 
-> **Status: Gates A–D cleared, wired, tests green. Gate E pending, run by issue-solver after
-> this session** (owed on the way to `dev`; no ledger row yet). Gate F: the targeted guard run
+> **Status: Gates A–D cleared, wired, tests green. Gate E DISCLOSE_GAP, 0.8331 vs
+> `OBV_Slope_norm`** (§Gate E below, recorded in `docs/gate_e_ledger.csv` on 2026-11-26). Gate F: the targeted guard run
 > below is green; the full suite and the parent repo are the launcher's run, not this session's.
 
 Finite Volume Elements: Markos Katsanos, *Technical Analysis of Stocks & Commodities*, April
@@ -91,3 +91,16 @@ tests/test_gate_e_ledger.py tests/test_indicator_list_tables.py tests/test_readm
 tests/test_ml_companions.py tests/test_wiring_accessors.py`: **1405 passed, 8 skipped**
 (26.92 s, after review round 1). One skip is `test_gate_e_ledger.py`'s "Gate E owed ... no Gate E ledger row for
 ['fve']", which is expected until Gate E is recorded. The full suite was not run in this session.
+
+## Gate E — real data (2026-11-26, added at merge time)
+
+`gate_e_overlap.py run --module pandas_ta.volume.fve --name pr379-fve`, 89 BIST frames, 687
+comparators, recorded in `docs/gate_e_ledger.csv`. Not printed by `docs/measure_fve.py`.
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---:|---|---:|---:|---|
+| `FVE_22` | 0.8331 | `OBV_Slope_norm` (manifest) | 396,881 | 0.8428 (`OBV_Slope_norm`) | DISCLOSE_GAP |
+
+Next comparators: `Ret_21d_vol_adj` 0.7519, `PVT_Slope_norm` 0.7482 (both manifest); highest in
+`compute_all`: `WAVETREND` 0.7173. Real-data reach: 396,883 non-NaN, 396,881 non-zero bars pooled.
+DISCLOSE_GAP is not STRUCK, so no waiver is needed; the overlap with `OBV_Slope_norm` is disclosed here.
