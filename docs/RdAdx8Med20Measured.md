@@ -6,10 +6,8 @@ PandasTa issue #178. Source: Reddit, tier 4 (ResearchIntel kb/reddit.db): r/quan
 respectively." Claimed use (tier 4, untested by the poster): extra ML features, poster claims a big
 gain.
 
-**Status: Gates A–D cleared this session. Gate E: pending, run by issue-solver after this
-session.** `rd_adx8_med20` is wired into `Category["trend"]`; `tests/test_gate_e_ledger.py
-::test_every_indicator_that_needs_a_row_has_one` fails until the ledger row is recorded — expected,
-not a defect (see CLAUDE.md "Owed, not failed, on the way to `dev`").
+**Status: Gates A–E measured, ships as-is.** `rd_adx8_med20` is wired into `Category["trend"]` and
+the Gate E ledger row is recorded (`docs/gate_e_ledger.csv`).
 
 Shipped: `pandas_ta/trend/rd_adx8_med20.py`, one column `RD_ADX8_MED20_{adx_length}_{length}`
 (default `RD_ADX8_MED20_8_20`). Tests: `tests/test_rd_adx8_med20.py` (14). Numbers:
@@ -59,7 +57,7 @@ to `pandas_ta.statistics.median`'s own `close.rolling(length).median()`, and to 
 | B Causality | pass | 9-offset future-perturbation sweep (whole tail from bar j onward scaled x1000): real module leaks at 0 of 9. A mutant (`importlib`-read source, the median's input shifted toward the future with `.shift(-1)` before the rolling call, `exec`'d in memory) is live (differs from the real module) and leaks at 5 of 9 — a MAJORITY, not all: a rolling median is robust to a single extreme input, so at a minority of offsets the perturbed value lands on the same side of the window's existing median and does not move it (same measured ratio as issue #171's `rd_adx3_med10`, see `tests/test_rd_adx8_med20.py::test_mutant_is_caught`'s own docstring). |
 | C Reachability | pass | Synthetic: 900-bar OHLC walk (seed 11, σ=0.02): 866 of 900 finite (34-bar warm-up: ADX(8)'s own warm-up feeding straight into the 20-bar median window, since `min_periods` defaults to `length`), 481 distinct values, range [13.679662, 50.250773]. Ten independent 900-bar seeds: 866 non-NaN of 900 on every seed, 471–524 distinct values. Real-data reachability: owed with Gate E. |
 | D Scale-free | pass | x8/x64 bit-identical on all 866 fired bars with matching NaN masks for both `ADX_8` and `RD_ADX8_MED20` (ADX's own formula divides directional movement by ATR, both linear in a joint positive price rescale, and a power-of-two `k` keeps that cancellation exact in IEEE float; a rolling MEDIAN of an unchanged series is itself unchanged, so no further error enters at the median step). x10/x3.7: `ADX_8` within 1.99e-13 / 1.28e-13, `RD_ADX8_MED20` within 1.14e-13 / 1.21e-13 (both well under the 1e-9 test tolerance, matching house convention — `tests/test_rd_adx3_med10.py`'s own x10/x3.7 check), identical NaN masks. `0 < 866 < 900` fires, 481 distinct values (non-constant). Re-run clean with `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_rd_adx8_med20_cpu.py`): same 14/14 tests pass — no exact bit-count or digit beyond a stated tolerance is pinned, so the CPU-variant kernels on a GitHub runner cannot break this suite. |
-| E Attribution | **pending** | Gate E: pending, run by issue-solver after this session. |
+| E Attribution | **DISCLOSE_GAP** | `RD_ADX8_MED20_8_20`: max \|ρ\| 0.8089 vs `ADX` (`compute_all`, n = 395,823), per-frame max median \|ρ\| 0.8072 (89 frames, 0% ≥ 0.90) — DISCLOSE_GAP band (0.80 ≤ ρ < 0.90), below the 0.90 STRUCK line. Matches the issue's own prototype measurement (0.8090 vs `ADX`) to the fourth decimal. Run `is178-rd_adx8_med20-58537d99`, 687 comparators (329 `compute_all` + 358 `ml_features` manifest), 89 ALTPORT-1 frames, 398,849 pooled bars, canary (`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS`) bit-equal. Ledger row recorded `docs/gate_e_ledger.csv`. |
 | F Suites | this repo only (per the porting rules, the launcher runs both whole suites) | `python -m pytest -q tests/test_rd_adx8_med20.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`: see "Final suite run" below. Whole suites: run by issue-solver in clean worktrees (see the PR body). |
 
 ## Wiring counts, read back
@@ -86,7 +84,4 @@ PR body).
 
 ## Next step
 
-Gate E run owed: `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module
-pandas_ta.trend.rd_adx8_med20 --name rd_adx8_med20`, then
-`python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`. A later receipt session
-records the ledger row and the measured Gate E numbers in this file.
+None — Gates A–F measured, below the 0.90 STRUCK line, ships as-is.
