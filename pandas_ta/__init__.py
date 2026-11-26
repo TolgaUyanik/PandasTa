@@ -40,8 +40,8 @@ Imports = {
 Category = {
     # Candles
     "candles": [
-        "cdl_doji", "cdl_inside", "cdl_pattern", "cdl_z", "ha", "rd_horseshoe",
-        "rd_outside_bar", "rd_uwick_atr", "rd_wick_pressure_10"
+        "cdl_doji", "cdl_inside", "cdl_pattern", "cdl_z", "ha", "rd_gap_fill",
+        "rd_horseshoe", "rd_outside_bar", "rd_uwick_atr", "rd_wick_pressure_10"
     ],
     # Cycles
     "cycles": [
