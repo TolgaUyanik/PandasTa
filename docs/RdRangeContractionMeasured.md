@@ -17,8 +17,8 @@ reading but is not what Gate A cites). `n=5` (the spread window) and `short=10`/
 MA windows) are not in the poster's words — the issue discloses all three as the prototype's own
 choice ("n = 5, MAs 10 and 50, as a ratio"), kept here as parameters, not hard-coded.
 
-**Status:** Gates A-D measured below. Gate E and the whole-suite run are owed, per the
-issue-solver's own rules (it must not run `../Backtesting` or the whole suite).
+**Status:** Gates A-E measured below (Gate E: DISCLOSE, ship). Whole-suite run is owed to the
+launcher, per the issue-solver's own rules (it must not run the whole suite).
 
 | module | category | column | range |
 |---|---|---|---|
@@ -152,21 +152,20 @@ Synthetic, from the port session:
 
 ## Gate E — attribution
 
-**Gate E: pending, run by issue-solver after this session.** This session cannot run `../Backtesting` or
-the whole-suite harness (rule explicit in the issue-solver system prompt). The prototype's own
-pre-flight measurement (`docs/issues/screen/ind_screen_r6.py`'s `rd_range_contraction`, same
-formula, not re-derived here) is quoted verbatim in the issue: max |ρ| **0.7763** vs `massi`
-(compute_all, n = 394,132), top-5 per-frame max median 0.7817 → **DISCLOSE** band. That number is
-the PROTOTYPE's, run `screen_r6_20261025`; it is not a substitute for the port's own Gate E run,
-which issue-solver's rules require but cannot execute in this session. To run it, from
-`../Backtesting/Backtesting`:
-`python scripts/analysis/gate_e_overlap.py run --module pandas_ta.volatility.rd_range_contraction --name rd_range_contraction`.
-Module sha1 (LF-normalised, for `docs/gate_e_ledger.csv record`):
-`6be70ac4c95f6f88a090ed5ec5dbcfed8d9f3978` (`python docs/measure_rd_range_contraction.py`).
+**Measured** (launcher's run, `is176-rd_range_contraction-95c9282e`, 2026-11-26; recorded in
+`docs/gate_e_ledger.csv`): 89 ALTPORT-1 frames, 398,849 pooled bars, 687 comparators (329
+`compute_all` + 358 manifest), canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS.
 
-If the re-run strikes the column (pooled |ρ| ≥ 0.90, or a top-5 comparator's per-frame median ≥
-0.90), this is a **measured revert**: remove the module, its wiring and its tests, and keep this
-file as the receipt — equally DONE as a ship, per the issue-solver's own rules.
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `RD_RANGE_CONTRACTION_5_10_50` | 0.7763332091759848 | `massi` | 394,132 | 0.7817310743205337 | DISCLOSE |
+
+`0.7763332091759848` (pooled) and `0.7817310743205337` (per-frame max median) both sit in
+`0.76 ≤ ρ < 0.80` → **DISCLOSE**, below the `0.90` STRUCK line (CLAUDE.md Gate E row,
+`r3-perframe-0.90`): ship, disclosed. Matches the prototype's own pre-flight number
+(`0.7763` vs `massi`, quoted in the issue) almost exactly — the port did not change the
+correlation profile. Module sha1 `6be70ac4c95f6f88a090ed5ec5dbcfed8d9f3978`, pandas_ta tree sha1
+`19925a4af2014483cf04628ed6daff280009d1eb`.
 
 ## Gate F — suites
 
