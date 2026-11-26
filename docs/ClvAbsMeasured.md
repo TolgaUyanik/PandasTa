@@ -16,9 +16,9 @@ the issue's own statement (its own instruction: "Gate A starts from the source f
 not the prototype"), not from the screen prototype
 (`docs/issues/screen/ind_screen_r9.py`'s `b3_clv_abs_14`).
 
-**Status:** Gates A–D measured, wiring and tests in place. **Gate E owed** (no ledger
-row; `tests/test_gate_e_ledger.py` reports it as a "Gate E owed" skip on the way to
-`dev`). Review round 1 (`docs/reviews/2026-11-25-clv-abs-review.md`) changed the
+**Status:** Gates A–D measured, wiring and tests in place. **Gate E SHIP**, 0.1778 vs
+`ROLLING_LOW_250` (owner's run `pr401-clv_abs` at merge time, 2026-11-26, recorded in
+`docs/gate_e_ledger.csv`). Review round 1 (`docs/reviews/2026-11-25-clv-abs-review.md`) changed the
 zero-range rule (Decision 2). Every number below is from the re-run after that change.
 
 | module | category | column | range |
@@ -131,12 +131,17 @@ non-zero settled bars of 2,000, not constant (`test_scale_fires_and_is_not_const
 
 ## Gate E — attribution
 
-**Owed.** It cannot run in this worktree (private engine, BIST cache). Run it with
-`gate_e_overlap.py run --module pandas_ta.candles.clv_abs --name clv_abs`, then
-`python docs/gate_e_ledger.py record`. Module sha1 at this measurement (LF-normalised):
-`4664bc09e258d0623bc27bbd55427975e76c4903`.
+**SHIP.** Run `pr401-clv_abs` (2026-11-26, at merge time; not printed by
+`docs/measure_clv_abs.py`), 89 BIST frames, 687 comparators, recorded in `docs/gate_e_ledger.csv`.
 
-For orientation only, not this port's Gate E:
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---:|---|---:|---:|---|
+| `CLVABS_14` | 0.1778 | `ROLLING_LOW_250` (compute_all) | 376,599 | 0.2173 (`ZIGZAG`) | SHIP |
+
+Next comparators: `ZIGZAG` 0.1772 (n = 33,636), `ROLLING_HIGH_250` 0.1758. Real-data reach:
+397,621 non-NaN bars pooled, all non-zero.
+
+For orientation, the earlier numbers that were not this port's Gate E:
 
 - The issue's prototype run (`screen_r9_20261029`) measured max |ρ| 0.1851 vs `ZIGZAG`
   (n = 32,580), with a top-5 per-frame max median of 0.2087. The prototype's na rule is
