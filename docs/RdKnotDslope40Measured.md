@@ -21,8 +21,7 @@ range are not in the poster's words — the issue discloses both as the prototyp
 choice, kept here as the `length`/`knot_margin` defaults, not hard-coded, matching
 `rd_knot_pos_40`'s own convention.
 
-**Status:** Gates A–D measured in this session. **Gate E: pending, run by issue-solver
-after this session.**
+**Status:** Gates A–E measured, SHIP.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -157,11 +156,16 @@ measured here):
 
 ## Gate E — attribution
 
-**Pending, run by issue-solver after this session.** Will be run as `gate_e_overlap.py run
---module pandas_ta.statistics.rd_knot_dslope_40`, 89 ALTPORT-1 BIST frames, 329 + 358 = 687
-comparators, per the issue's own gate table. Recorded in `docs/gate_e_ledger.csv` once run;
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails until
-then — expected, not a finding.
+Run by issue-solver (`is175-rd_knot_dslope_40-eef638c4`), `gate_e_overlap.py run --module
+pandas_ta.statistics.rd_knot_dslope_40`, 89 ALTPORT-1 BIST frames, 398,849 pooled bars, 329 +
+358 = 687 comparators, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS).
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `RD_KNOT_DSLOPE_40_5` | 0.7012077500109714 | `MACD_Hist_ATR` (manifest) | 395,378 | 0.7235662692561251 (against `MACDAS_Signal`) | SHIP |
+
+0.7012 < 0.76 (SHIP line) — ships. Recorded in `docs/gate_e_ledger.csv`
+(`rd_knot_dslope_40:RD_KNOT_DSLOPE_40_5 SHIP 0.7012 vs MACD_Hist_ATR`).
 
 ## Gate F — suites
 
@@ -174,10 +178,9 @@ python -m pytest -q tests/test_rd_knot_dslope_40.py tests/test_readme_counts.py 
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,614 passed, 7 skipped, 1 failed** — the single failure is
-`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` ("Gate E owed"),
-expected per the issue-solver's rules until the launcher's Gate E run and a later receipt
-session record the ledger row. `tests/test_rd_knot_dslope_40.py` alone: 20 passed.
+**1,622 passed, 7 skipped, 0 failed** — receipt-session re-run, after the launcher's Gate E
+run and the ledger row recorded above; `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+now passes. `tests/test_rd_knot_dslope_40.py` alone: 20 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 — the four features issue-solver's rules name, not this machine's
