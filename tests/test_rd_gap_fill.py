@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """Tests for `pandas_ta.candles.rd_gap_fill` -- the same-day gap fill,
 signed, from issue #174 (RD-GAP-FILL; Reddit, tier 4, untested by any
-poster). Measurements are in docs/RdGapFillMeasured.md. Gate E is pending,
-run by issue-solver after this session.
+poster). Measurements are in docs/RdGapFillMeasured.md.
 
 What these pin, in order of how much it would hurt to lose:
 
@@ -287,7 +286,7 @@ def test_fires_both_signs_and_is_not_constant():
     df = _frame(seed=4)
     out = rd_gap_fill(df.open, df.high, df.low, df.close)
     fired = out.dropna()
-    assert 0 < len(fired) < len(out) + 1  # settled on every bar but bar 0
+    assert len(fired) == len(out) - 1  # settled on every bar but bar 0
     assert (fired != 0.0).sum() > 0
     assert (fired != 0.0).sum() < len(fired)
     assert 1.0 in fired.values

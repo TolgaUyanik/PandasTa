@@ -21,7 +21,7 @@ Gate A cites). This exact gap/fill definition is shared with the twin indicator
 `rd_gap_fill_rate_60` (issue #165, already shipped, `pandas_ta/statistics/rd_gap_fill_rate_60.py`);
 this port is the un-rolled, per-bar signed flag issue #174 asks for, not a 60-bar share.
 
-**Status:** Gates A–D measured. **Gate E: pending, run by issue-solver after this session.**
+**Status:** Gates A–F measured. Gate E SHIP (0.6597 vs `GAP_PCT`). Shipped.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -123,7 +123,7 @@ actually gates the comparisons, not merely the column name — the same 0.5%-gap
 
 ## Gate C — reachability
 
-Synthetic, from this session (real-data reachability awaits the launcher's Gate E run):
+Synthetic, from this session:
 
 - **1,600-bar frame (seed 4):** 1,599 of 1,600 bars settle (1-bar warm-up); 648 of those
   are non-zero (318 up-fills, 330 down-fills) — both signs reachable, and the column is not
@@ -134,6 +134,8 @@ Synthetic, from this session (real-data reachability awaits the launcher's Gate 
   is not an artifact of one seed.
 - `0 < fires < n`: 648 of 1,599 settled bars are non-zero on the 1,600-bar frame, strictly
   between 0 and the settled count, so a constant column cannot pass.
+- **Real data:** Gate E run `is174-rd_gap_fill-8b5cdc38`: 398,760 non-NaN / 166,142
+  non-zero of 398,849 pooled bars across 89 ALTPORT-1 frames, no `degenerate.csv` row.
 
 ## Gate D — scale-free
 
@@ -180,11 +182,8 @@ python -m pytest -q tests/test_rd_gap_fill.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,606 passed, 7 skipped, 1 failed.** The one failure is
-`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` — expected, not a
-finding, until the launcher's Gate E run and a later receipt session record this port's
-ledger row (per the issue-solver's own rules for this session).
-`tests/test_rd_gap_fill.py` alone: 20 passed.
+**1,614 passed, 7 skipped, 0 failed** — this receipt session, after recording the Gate E
+ledger row above. `tests/test_rd_gap_fill.py` alone: 20 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 — the four features issue-solver's rules name, not this machine's
