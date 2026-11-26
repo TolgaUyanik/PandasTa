@@ -59,19 +59,28 @@ the window by a constant moves ONLY the intercept `a_k` -- `b_k` and `c_k`
 are all exactly unchanged IN EXACT ARITHMETIC. A positive price rescale by
 a constant `m` adds the constant `LN(m)` to every `y = LN(close)` in the
 window, so `RD_KNOT_DSLOPE_40` is scale-invariant algebraically.
-⚠ Unlike a port whose arithmetic is a single ratio (e.g. `rd_gap_fill`'s
-`open/close[1]`, exactly reproducible bit-for-bit under a power-of-two
-rescale), `LN` is evaluated by libm's own transcendental routine: computing
+⚠ `LN` is evaluated by libm's own transcendental routine: computing
 `LN(close*k)` is NOT the same floating-point operation as computing
-`LN(close) + LN(k)`, even when `k` is an exact power of two, so this port is
-NOT claimed bit-identical under ANY rescale, including x8/x64 -- that would
-overstate what floating-point `LN` guarantees. Measured in
-`tests/test_rd_knot_dslope_40.py` and `docs/measure_rd_knot_dslope_40.py`
-on a 1,600-bar synthetic frame (1,561 co-finite cells): max absolute
-difference ~1.8e-15 and max relative difference ~8e-13 under x8/x64, x10
-and x3.7 alike -- all four land at the same noise floor, consistent with
-the algebraic invariance argument above holding up to `LN`'s own rounding,
-not with a weaker, scale-dependent error.
+`LN(close) + LN(k)`, even when `k` is an exact power of two -- so feeding
+the fit `LN(close)` directly (an earlier version of this module did) could
+only be measured to a tiny tolerance (~1.8e-15 absolute), not claimed
+bit-identical, under any rescale. This module instead feeds the fit
+`y = LN(window / window's own first close)` -- the ratio-to-first-bar
+device `level_shift_size` (`pandas_ta/statistics/level_shift_size.py`) uses
+for the same reason (a continuous VALUE output, not an index): under an
+exactly-representable rescale by `k`, both the numerator and the
+denominator of the ratio are multiplied by the same exact factor (a
+power-of-two multiply is exact, only the exponent shifts), so IEEE-754
+division returns bit-identical results, and `LN` of a bit-identical input
+returns a bit-identical output. Since OLS is invariant to the per-window
+additive shift this ratio introduces (see above), `c_best` itself is
+bit-identical under x8/x64 -- measured, not merely argued: max absolute
+difference 0.0 on 1,561 co-finite cells
+(`tests/test_rd_knot_dslope_40.py::test_price_scale_is_bit_identical`,
+`docs/measure_rd_knot_dslope_40.py`). Under a non-power-of-two rescale
+(x10, x3.7) the division itself is no longer exact, so those stay a
+tiny-tolerance claim (~1e-15 absolute, ~1e-12 relative), measured in
+`test_scale_stays_within_a_tiny_tolerance`.
 """
 import numpy as np
 import pandas as pd
@@ -134,13 +143,19 @@ def rd_knot_dslope_40(close, length=None, knot_margin=None, offset=None, **kwarg
     if close is None: return
 
     # Calculate Result
-    log_close = np.log(close.to_numpy(dtype=float))
-    n = len(log_close)
+    close_values = close.to_numpy(dtype=float)
+    n = len(close_values)
     out = np.full(n, np.nan)
 
     if n >= length:
         knots, basis, coef_row = _hinge_basis(length, knot_margin)
-        windows = sliding_window_view(log_close, length)  # (n-length+1, length), causal, oldest-first
+        raw_windows = sliding_window_view(close_values, length)  # (n-length+1, length) raw close, causal, oldest-first
+        # log(close / the window's own first close), not log(close) directly --
+        # the ratio-to-first-bar device `level_shift_size` uses: under a
+        # power-of-two price rescale both operands scale by the same exactly-
+        # representable factor, so the ratio (and hence every y) is bit-identical.
+        with np.errstate(invalid="ignore", divide="ignore"):
+            windows = np.log(raw_windows / raw_windows[:, :1])
         out[length - 1:] = _knot_dslope(windows, knots, basis, coef_row)
 
     result = pd.Series(out, index=close.index)

@@ -20,10 +20,13 @@ What these pin, in order of how much it would hurt to lose:
 * SCALE-FREE: the fitted hinge model has an intercept, so in exact
   arithmetic any additive shift of `log(close)` -- i.e. any positive price
   rescale -- leaves every knot's SSE, the argmin knot, AND the reported
-  hinge coefficient itself unchanged. `LN` is a transcendental function, so
-  this is NOT claimed bit-identical even under a power-of-two rescale
-  (unlike a pure-ratio port); measured within a tiny tolerance (~1e-15
-  absolute, ~1e-12 relative) under x8/x64 AND x10/x3.7 alike.
+  hinge coefficient itself unchanged. The module feeds the fit
+  `log(window / window's own first close)` (the `level_shift_size` ratio
+  device), so under an exactly-representable rescale (x8/x64) the division
+  itself is bit-identical, hence so is `c_best` -- measured max abs diff
+  0.0. Under a non-power-of-two rescale (x10/x3.7) the division is no
+  longer exact, so that stays a tiny-tolerance claim (~1e-15 absolute,
+  ~1e-12 relative).
 * Reachability (a non-constant output on a random synthetic frame) and the
   wiring (`Category`, the accessor, warm-up, column name).
 """
@@ -196,20 +199,37 @@ def test_lookahead_mutant_is_caught():
 # ---------------------------------------------------------------------
 # Gate D -- scale-free
 # ---------------------------------------------------------------------
-@pytest.mark.parametrize("k", [8.0, 64.0, 10.0, 3.7])
+@pytest.mark.parametrize("k", [8.0, 64.0])
+def test_price_scale_is_bit_identical(k):
+    """The module fits on `log(window / window's own first close)`, not
+    `log(close)` directly (the `level_shift_size` ratio device): under an
+    exactly-representable rescale, multiplying by `k` is an exact exponent
+    shift (no rounding), so the numerator and denominator of the ratio are
+    each multiplied by the same exact factor and IEEE-754 division returns
+    bit-identical results -- hence so does `log` of it, and the OLS hinge
+    coefficient computed from it. Measured on this frame
+    (docs/measure_rd_knot_dslope_40.py): max absolute difference 0.0 on
+    1,561 co-finite cells, for both x8 and x64."""
+    close = _walk(seed=4)
+    base = rd_knot_dslope_40(close)
+    scaled = rd_knot_dslope_40(close * k)
+    assert (base.isna() == scaled.isna()).all()
+    m = base.notna()
+    assert (base[m].to_numpy() == scaled[m].to_numpy()).all()
+
+
+@pytest.mark.parametrize("k", [10.0, 3.7])
 def test_scale_stays_within_a_tiny_tolerance(k):
-    """The fitted model has an intercept, so in exact arithmetic the hinge
-    coefficient of every knot is invariant to any additive shift of
-    log(close) -- i.e. any positive price rescale, power-of-two or not.
-    `LN` is a transcendental function, so `LN(close*k)` is not the same
-    floating-point computation as `LN(close) + LN(k)` even at an exact
-    power of two -- this is NOT claimed bit-identical for any `k` (see
-    module docstring). Measured on this frame
-    (docs/measure_rd_knot_dslope_40.py): max absolute difference ~1.8e-15,
-    max relative difference ~8e-13 for every one of x8/x64/x10/x3.7 --
-    bounded here at a generous tolerance rather than pinned to that exact
-    figure, since the CPU's dispatched float kernels, not this module's
-    logic, decide the last bit (the issue-solver's own CPU-variant rule)."""
+    """At a non-power-of-two rescale, the ratio division is no longer exact,
+    so the bit-identical argument above does not apply; the fitted model's
+    intercept still makes the hinge coefficient invariant to any additive
+    shift of `log(close)` in REAL arithmetic, so this stays a tiny-tolerance
+    claim. Measured on this frame (docs/measure_rd_knot_dslope_40.py): max
+    absolute difference ~1e-15, max relative difference ~1e-12 for both
+    x10 and x3.7 -- bounded here at a generous tolerance rather than pinned
+    to that exact figure, since the CPU's dispatched float kernels, not
+    this module's logic, decide the last bit (the issue-solver's own
+    CPU-variant rule)."""
     close = _walk(seed=4)
     base = rd_knot_dslope_40(close)
     scaled = rd_knot_dslope_40(close * k)

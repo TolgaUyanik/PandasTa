@@ -21,11 +21,14 @@ range are not in the poster's words — the issue discloses both as the prototyp
 choice, kept here as the `length`/`knot_margin` defaults, not hard-coded, matching
 `rd_knot_pos_40`'s own convention.
 
-**Status:** Gates A–E measured, SHIP.
+**Status:** Gates A, B, C, D, F measured, SHIP; Gate E owed again (round-2 review, 2026-11-26 —
+see Decision 6: the module's arithmetic changed to get a real Gate D bit-identical claim, which
+moves the module's sha1, so the Gate E run already on record no longer describes this tree and must
+be re-run by issue-solver).
 
 | module | category | column | range |
 |---|---|---|---|
-| `pandas_ta/statistics/rd_knot_dslope_40.py` | statistics | `RD_KNOT_DSLOPE_40_5` | continuous, both signs reachable (measured -0.0186..0.0192 across 11 synthetic frames below); NaN during warm-up |
+| `pandas_ta/statistics/rd_knot_dslope_40.py` | statistics | `RD_KNOT_DSLOPE_40_5` | continuous, both signs reachable (measured -0.0186..0.0198 across 11 synthetic frames below); NaN during warm-up |
 
 Tests: `tests/test_rd_knot_dslope_40.py` (20 tests). Numbers: `python
 docs/measure_rd_knot_dslope_40.py`, run from the repo root. Environment: Python 3.11.2,
@@ -53,13 +56,24 @@ pandas 2.3.3, numpy 1.26.4. Measured 2026-11-26.
    (`tests/test_rd_knot_dslope_40.py::test_nonfinite_window_reads_nan`).
 5. **Column name carries both parameters**, `RD_KNOT_DSLOPE_{length}_{knot_margin}` — e.g.
    `RD_KNOT_DSLOPE_40_5` at defaults, `RD_KNOT_DSLOPE_20_3` at `length=20, knot_margin=3`.
-6. **Not claimed bit-identical under a power-of-two price rescale**, unlike several other
-   `SF`-tagged ports in this fork. `rd_knot_pos_40` gets away with a bit-identical claim
-   because it only needs the ARGMIN (an integer index) to be stable under a tiny float
-   perturbation — a much coarser invariant than this port needs, since this port reports the
-   coefficient's actual VALUE. `LN` is a transcendental function: `LN(close*k)` is not the
-   same floating-point computation as `LN(close) + LN(k)` even when `k` is an exact power of
-   two, so no price rescale here is claimed bit-exact — see Gate D.
+6. **Bit-identical under a power-of-two price rescale, by fitting on a ratio, not raw `log`.**
+   Round-1 review (this port's own `docs/reviews/auto-2026-11-26-rd-knot-dslope-40/`) shipped a
+   version that fed the fit `log(close)` directly and could only measure a tiny tolerance
+   (~1.8e-15) under x8/x64, on the argument that `LN` is transcendental so `LN(close*k) !=
+   LN(close) + LN(k)` even at an exact power of two. That argument is true of *that
+   implementation*, not of the column: the fork already has the fix, in `level_shift_size`
+   (`pandas_ta/statistics/level_shift_size.py:51`, Decision 3 of
+   `docs/LevelShiftSizeMeasured.md`) — a continuous-VALUE output (unlike `rd_knot_pos_40`'s
+   discrete index, which only needs the ARGMIN stable) can still get bit-identical by fitting
+   on `log(window / window's own first close)` instead of `log(window)`: under an
+   exactly-representable rescale by `k`, multiplying by `k` is an exact exponent shift (no
+   mantissa rounding), so both the numerator and denominator of the ratio are multiplied by
+   the same exact factor and IEEE-754 division returns bit-identical results — and `LN` of a
+   bit-identical input returns a bit-identical output. Round 2 (this review) adopts that device
+   (`rd_knot_dslope_40.py:152,158`): OLS is invariant to the per-window additive shift the ratio
+   introduces (same argument as before), so `c_best` itself is now measured bit-identical under
+   x8/x64 (max abs diff 0.0, see Gate D) — not merely argued. A non-power-of-two rescale (x10,
+   x3.7) still only gets the tiny-tolerance claim, since that division is not exact.
 
 ## Gate A — correctness
 
@@ -87,8 +101,10 @@ residual, far below any other candidate's.
 Cross-checked against an independent per-window Python loop built straight from the formula
 above (`np.linalg.lstsq` per candidate knot, keeping the winning knot's own hinge
 coefficient, not read from the module) on a 300-bar synthetic log-price random walk
-(length=40, knot_margin=5, 261 defined bars): NaN masks identical, **max |diff| 3.662e-15**
-(`test_matches_an_independent_loop`, `python docs/measure_rd_knot_dslope_40.py`).
+(length=40, knot_margin=5, 261 defined bars): NaN masks identical, **max |diff| 2.661e-15**
+(`test_matches_an_independent_loop`, `python docs/measure_rd_knot_dslope_40.py`; the oracle
+fits on `log(close)` directly rather than the module's ratio-to-first-bar form, so the two are
+not expected to match to the bit, only to OLS's own invariance up to float noise).
 
 ## Gate B — causality
 
@@ -106,8 +122,7 @@ coefficient, not read from the module) on a 300-bar synthetic log-price random w
 
 ## Gate C — reachability
 
-Synthetic, from the port session (real-data reachability is left to the Gate E run, not
-measured here):
+Synthetic, from the port session:
 
 - **1,600-bar frame (seed 4):** 1,561 of 1,600 bars fire (39-bar warm-up); values range
   **-0.016534 to 0.016918** across **1,561 distinct values** — a continuous coefficient, not
@@ -120,52 +135,71 @@ measured here):
 - **A window with a non-finite `log(close)` reads NaN** by construction
   (`test_nonfinite_window_reads_nan`); not observed on the random synthetic frames above (no
   injected non-finite values there), which is expected, not a defect.
+- **Real-data reachability** (non-NaN / non-zero counts on the 89-frame BIST pool) is left to
+  the next Gate E run, not measured here: the 2026-11-26 run recorded below (`non_nan`
+  395,378, `non_zero` 395,378 of 398,849, no `degenerate.csv` row) measured the PRE-Decision-6
+  module (sha1 `de923cbcbbd6e0a32213680d8adde855750765dd`), not the ratio-fitted module this
+  file now describes (sha1 below, Gate D); those counts are expected to carry over unchanged
+  (NaN pattern and `0 < fires < n` are structural, not value-dependent) but are not re-claimed
+  here until the re-run confirms it.
 
 ## Gate D — scale-free
 
-- **Algebraically exact, not bit-identical, under ANY price rescale.** The fitted hinge model
-  carries an intercept `a_k` with `t` and `MAX(t-k,0)` as the other two design columns; for a
-  design matrix `X` whose first column is exactly `1`, `pinv(X) @ 1 = e_1` exactly (because
-  `1` is literally `X`'s own first column and `pinv(X) @ X = I`), so adding a constant to `y`
-  moves ONLY the intercept coefficient — `b_k` and `c_k` (hence every knot's SSE, the argmin
-  knot, AND the reported `c_best`) are exactly unchanged in REAL-NUMBER arithmetic. A price
-  rescale by `m` adds the constant `LN(m)` to every `y = LN(close)` in the window. Because
-  `LN` is a transcendental function evaluated by libm's own routine, `LN(close*k)` is NOT the
-  same floating-point computation as `LN(close) + LN(k)` even at an exact power of two — so,
-  unlike several of this fork's pure-ratio `SF` ports, this port is NOT claimed bit-identical
-  under any rescale, including x8/x64.
+- **Bit-identical under a power-of-two price rescale (x8/x64), tolerance under any other
+  (x10/x3.7).** The fitted hinge model carries an intercept `a_k` with `t` and `MAX(t-k,0)` as
+  the other two design columns; for a design matrix `X` whose first column is exactly `1`,
+  `pinv(X) @ 1 = e_1` exactly (because `1` is literally `X`'s own first column and
+  `pinv(X) @ X = I`), so adding a constant to `y` moves ONLY the intercept coefficient — `b_k`
+  and `c_k` (hence every knot's SSE, the argmin knot, AND the reported `c_best`) are exactly
+  unchanged in REAL-NUMBER arithmetic under any additive shift of `y`. The module fits on
+  `y = log(window / window's own first close)` rather than `log(window)` directly (Decision 6,
+  the `level_shift_size` device): a price rescale by an exactly-representable `k` multiplies
+  both the ratio's numerator and denominator by the same exact factor (a power-of-two multiply
+  only shifts the exponent, no mantissa rounding), so IEEE-754 division of the two returns
+  bit-identical results, and `log` of a bit-identical input is bit-identical — so `c_best` is
+  measured bit-identical, not merely tolerance-close, under x8/x64. A non-power-of-two rescale
+  (x10, x3.7) is not exact at the division step, so that stays a tiny-tolerance claim.
 - **Measured on the 1,600-bar seed-4 frame, 1,561 co-finite cells**
   (`python docs/measure_rd_knot_dslope_40.py`):
 
   | k | max abs diff | max rel diff |
   |---|---|---|
-  | 8.0 | 1.166e-15 | 5.808e-13 |
-  | 64.0 | 1.832e-15 | 8.046e-13 |
-  | 10.0 | 1.305e-15 | 5.717e-13 |
-  | 3.7 | 1.277e-15 | 4.762e-13 |
+  | 8.0 | 0.0 | 0.0 |
+  | 64.0 | 0.0 | 0.0 |
+  | 10.0 | 6.072e-17 | 1.674e-14 |
+  | 3.7 | 3.860e-17 | 1.975e-14 |
 
-  All four land at the same noise floor regardless of whether `k` is a power of two —
-  consistent with the algebraic invariance argument above holding up to `LN`'s own rounding,
-  not with a scale-dependent error that a power-of-two rescale would avoid.
-  `tests/test_rd_knot_dslope_40.py::test_scale_stays_within_a_tiny_tolerance` bounds this at
-  `rtol=1e-9, atol=1e-12` — a generous margin above the measured figures, not the measured
-  figures themselves, per the issue-solver's own CPU-variant rule (the exact last bit is the
-  CPU's dispatched kernels' call, not this module's logic).
+  x8/x64 are exact zero (`test_price_scale_is_bit_identical`, `==` comparison, not a
+  tolerance). x10/x3.7 land near the float noise floor, tighter than the pre-Decision-6
+  version's ~1.3e-15 (that version computed `log(close)` directly for every k, carrying more
+  rounding even at the non-exact rescales).
+  `tests/test_rd_knot_dslope_40.py::test_scale_stays_within_a_tiny_tolerance` bounds the x10/x3.7
+  case at `rtol=1e-9, atol=1e-12` — a generous margin above the measured figures, not the
+  measured figures themselves, per the issue-solver's own CPU-variant rule (the exact last bit
+  is the CPU's dispatched kernels' call, not this module's logic).
 - `0 < fires < n`, not constant: 1,561 of 1,600 bars fire on the 1,600-bar frame above, 1,561
   distinct values, min -0.016534 and max 0.016918 (both signs reachable).
 
 ## Gate E — attribution
 
-Run by issue-solver (`is175-rd_knot_dslope_40-eef638c4`), `gate_e_overlap.py run --module
-pandas_ta.statistics.rd_knot_dslope_40`, 89 ALTPORT-1 BIST frames, 398,849 pooled bars, 329 +
-358 = 687 comparators, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS).
-
-| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
-|---|---|---|---|---|---|
-| `RD_KNOT_DSLOPE_40_5` | 0.7012077500109714 | `MACD_Hist_ATR` (manifest) | 395,378 | 0.7235662692561251 (against `MACDAS_Signal`) | SHIP |
-
-0.7012 < 0.76 (SHIP line) — ships. Recorded in `docs/gate_e_ledger.csv`
-(`rd_knot_dslope_40:RD_KNOT_DSLOPE_40_5 SHIP 0.7012 vs MACD_Hist_ATR`).
+**Pending, run by issue-solver after this session.** A run already happened once
+(`is175-rd_knot_dslope_40-eef638c4`, 2026-11-26) and was recorded in `docs/gate_e_ledger.csv`:
+89 ALTPORT-1 BIST frames, 398,849 pooled bars, 329 + 358 = 687 comparators, canary bit-equal
+(AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS), `RD_KNOT_DSLOPE_40_5` max |ρ| 0.7012077500109714 vs
+`MACD_Hist_ATR` (per-frame max median 0.7235662692561251 vs `MACDAS_Signal`), n 395,378,
+verdict SHIP. That run measured the module at sha1
+`de923cbcbbd6e0a32213680d8adde855750765dd` — the version that fed the fit `log(close)`
+directly (pre-Decision-6). This review round changed the module's arithmetic to get a real
+Gate D bit-identical claim (Decision 6), which moved the module to sha1
+`f48afaf88e993671fa92390428b7bee35b8b6406` and so moved the output fingerprint too
+(`log(window/window[0])` computes different float bits than `log(window)`, even though both
+are the same `c_best` up to float noise, per Gate A/D above). The ledger row described the OLD module and has been
+removed from `docs/gate_e_ledger.csv` rather than left stale (CLAUDE.md: "a deleted row counts
+as owed too") — `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+is expected to fail/skip again until issue-solver re-runs Gate E on this tree and a receipt
+session re-records it. Given the arithmetic change is bit-noise-level (not a formula change),
+the SHIP verdict and the ~0.70 ρ are expected to reproduce closely, but that is not claimed
+here until measured.
 
 ## Gate F — suites
 
@@ -178,9 +212,12 @@ python -m pytest -q tests/test_rd_knot_dslope_40.py tests/test_readme_counts.py 
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,622 passed, 7 skipped, 0 failed** — receipt-session re-run, after the launcher's Gate E
-run and the ledger row recorded above; `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-now passes. `tests/test_rd_knot_dslope_40.py` alone: 20 passed.
+**1,614 passed, 7 skipped, 1 failed** — round-2 review re-run, after Decision 6's arithmetic
+change moved the module's sha1 and the stale ledger row was deleted (Gate E above);
+`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails here (no
+`GATE_E_PENDING_OK` locally) — expected, per the issue-solver's own rule ("Gate E owed, not
+failed"; the launcher's CI sets that flag and turns the same failure into a skip).
+`tests/test_rd_knot_dslope_40.py` alone: 20 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
 runner without AVX-512 — the four features issue-solver's rules name, not this machine's
@@ -198,11 +235,11 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
 - `docs/MLCompanionContract.md`: 746 → 747 tagged and 375 → 376 `SF` (newest first in the
   chain). `RD_KNOT_DSLOPE_40_5` tags `SF` because the fitted hinge model's intercept makes
   the reported coefficient invariant to any additive shift of `log(close)` in exact
-  arithmetic — measured within a tiny tolerance (not bit-identical, since `LN` is
-  transcendental) under x8/x64 and x10/x3.7 alike.
-- `docs/IndicatorDictionary.md`, regenerated with this environment's package. Its diff is
-  the `rd_knot_dslope_40` row (`RD_KNOT_DSLOPE_40_5` SF, 39-bar warm-up), the three header
-  counts, the statistics section count, the no-transform-needed shortlist, and nothing else
-  (checked: `git diff docs/IndicatorDictionary.md`).
+  arithmetic — fed `log(window / window's own first close)` (Decision 6), so measured
+  bit-identical under x8/x64 and within a tiny tolerance under x10/x3.7.
+- `docs/IndicatorDictionary.md`, regenerated with this environment's package after Decision
+  6's arithmetic change: `git diff docs/IndicatorDictionary.md` is empty (the column's tag,
+  warm-up and range-shape classification are unaffected by a same-value-up-to-float-noise
+  change in how it is computed).
 - `Category`: `rd_knot_dslope_40` is placed alphabetically between `rd_gap_fill_rate_60` and
   `rd_knot_pos_40` in `statistics`.

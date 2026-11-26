@@ -58,7 +58,7 @@ def reachability():
 
 
 def scale_tolerance():
-    print("== Gate D: price-scale invariance (x8/x64/x10/x3.7) ==")
+    print("== Gate D: price-scale invariance (x8/x64 bit-identical, x10/x3.7 tolerance) ==")
     close = T._walk(seed=4)
     base = rd_knot_dslope_40(close)
     for k in (8.0, 64.0, 10.0, 3.7):
