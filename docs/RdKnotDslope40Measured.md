@@ -21,10 +21,8 @@ range are not in the poster's words — the issue discloses both as the prototyp
 choice, kept here as the `length`/`knot_margin` defaults, not hard-coded, matching
 `rd_knot_pos_40`'s own convention.
 
-**Status:** Gates A, B, C, D, F measured, SHIP; Gate E owed again (round-2 review, 2026-11-26 —
-see Decision 6: the module's arithmetic changed to get a real Gate D bit-identical claim, which
-moves the module's sha1, so the Gate E run already on record no longer describes this tree and must
-be re-run by issue-solver).
+**Status:** Gates A-F measured, SHIP (max |ρ| 0.7012 vs `MACD_Hist_ATR`, re-run 2026-11-26 on
+the Decision-6 tree). Ledger row recorded.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -135,13 +133,10 @@ Synthetic, from the port session:
 - **A window with a non-finite `log(close)` reads NaN** by construction
   (`test_nonfinite_window_reads_nan`); not observed on the random synthetic frames above (no
   injected non-finite values there), which is expected, not a defect.
-- **Real-data reachability** (non-NaN / non-zero counts on the 89-frame BIST pool) is left to
-  the next Gate E run, not measured here: the 2026-11-26 run recorded below (`non_nan`
-  395,378, `non_zero` 395,378 of 398,849, no `degenerate.csv` row) measured the PRE-Decision-6
-  module (sha1 `de923cbcbbd6e0a32213680d8adde855750765dd`), not the ratio-fitted module this
-  file now describes (sha1 below, Gate D); those counts are expected to carry over unchanged
-  (NaN pattern and `0 < fires < n` are structural, not value-dependent) but are not re-claimed
-  here until the re-run confirms it.
+- **Real-data reachability**, measured on the Decision-6 module itself (Gate E run
+  `is175-rd_knot_dslope_40-e8b2536b`, 2026-11-26): `non_nan` 395,378, `non_zero` 395,378 of
+  398,849 pooled bars (the 3,471-bar gap is the per-frame 40-bar warm-up pattern) — fires on
+  real BIST data, not just the synthetic frames above.
 
 ## Gate D — scale-free
 
@@ -182,24 +177,22 @@ Synthetic, from the port session:
 
 ## Gate E — attribution
 
-**Pending, run by issue-solver after this session.** A run already happened once
-(`is175-rd_knot_dslope_40-eef638c4`, 2026-11-26) and was recorded in `docs/gate_e_ledger.csv`:
-89 ALTPORT-1 BIST frames, 398,849 pooled bars, 329 + 358 = 687 comparators, canary bit-equal
-(AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS), `RD_KNOT_DSLOPE_40_5` max |ρ| 0.7012077500109714 vs
-`MACD_Hist_ATR` (per-frame max median 0.7235662692561251 vs `MACDAS_Signal`), n 395,378,
-verdict SHIP. That run measured the module at sha1
-`de923cbcbbd6e0a32213680d8adde855750765dd` — the version that fed the fit `log(close)`
-directly (pre-Decision-6). This review round changed the module's arithmetic to get a real
-Gate D bit-identical claim (Decision 6), which moved the module to sha1
-`f48afaf88e993671fa92390428b7bee35b8b6406` and so moved the output fingerprint too
-(`log(window/window[0])` computes different float bits than `log(window)`, even though both
-are the same `c_best` up to float noise, per Gate A/D above). The ledger row described the OLD module and has been
-removed from `docs/gate_e_ledger.csv` rather than left stale (CLAUDE.md: "a deleted row counts
-as owed too") — `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-is expected to fail/skip again until issue-solver re-runs Gate E on this tree and a receipt
-session re-records it. Given the arithmetic change is bit-noise-level (not a formula change),
-the SHIP verdict and the ~0.70 ρ are expected to reproduce closely, but that is not claimed
-here until measured.
+**Re-run complete, 2026-11-26** (`is175-rd_knot_dslope_40-e8b2536b`), recorded in
+`docs/gate_e_ledger.csv`: 89 ALTPORT-1 BIST frames, 398,849 pooled bars, 329 + 358 = 687
+comparators, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). This run measured the
+Decision-6 module itself — `pandas_ta_src_sha1` `bfce3332ede29de6cb7f69223fad5c9f0644e634`,
+`candidate_source_sha1` `f48afaf88e993671fa92390428b7bee35b8b6406`, matching the tree this
+file now describes (the ratio-fitted `log(window/window[0])` form).
+
+| column | max \|ρ\| | against | n | per-frame max median | verdict |
+|---|---|---|---|---|---|
+| `RD_KNOT_DSLOPE_40_5` | 0.7012077500109714 | `MACD_Hist_ATR` | 395,378 | 0.7235662692561251 (`MACDAS_Signal`) | **SHIP** |
+
+0.7012 < 0.76 (SHIP line, CLAUDE.md Gate E bands); per-frame max median 0.7236 is also below
+0.90 (STRUCK line). Confirms the pre-Decision-6 run's number (0.7012077500109714 against the
+same comparator) to the 13th significant digit — the arithmetic change (Decision 6) moved the
+module's sha1 but not its correlation profile, as expected for a same-value-up-to-float-noise
+change. Column ships.
 
 ## Gate F — suites
 
@@ -212,11 +205,9 @@ python -m pytest -q tests/test_rd_knot_dslope_40.py tests/test_readme_counts.py 
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,614 passed, 7 skipped, 1 failed** — round-2 review re-run, after Decision 6's arithmetic
-change moved the module's sha1 and the stale ledger row was deleted (Gate E above);
-`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails here (no
-`GATE_E_PENDING_OK` locally) — expected, per the issue-solver's own rule ("Gate E owed, not
-failed"; the launcher's CI sets that flag and turns the same failure into a skip).
+**1,622 passed, 7 skipped, 0 failed** — receipt-session re-run, after the Gate E re-run above
+and the ledger row re-recorded (`docs/gate_e_ledger.csv`):
+`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` passes again.
 `tests/test_rd_knot_dslope_40.py` alone: 20 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub
