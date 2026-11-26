@@ -14,6 +14,7 @@ from .decay import decay
 from .decreasing import decreasing
 from .dpo import dpo
 from .dtdb import dtdb
+from .expand3_3pct import expand3_3pct
 from .dx import dx
 from .equal_highs_lows import equal_highs_lows
 from .flag_breakout import flag_breakout
@@ -50,6 +51,7 @@ from .sphinx_unicorn import sphinx_unicorn
 from .sr_corridor import sr_corridor
 from .sr_decay import sr_decay
 from .sr_force import sr_force
+from .stiffness import stiffness
 from .swing_equilibrium import swing_equilibrium
 from .tdi import tdi
 from .tsignals import tsignals

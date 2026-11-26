@@ -16,9 +16,9 @@ script, so there is no source line number to cite; Gate A reads the formula from
 issue's own statement, not from the screen prototype
 (`docs/issues/screen/ind_screen_r9.py`'s `b3_outside_pivot3`).
 
-**Status:** Gates A–D measured, wiring and tests in place. **Gate E owed** (no ledger
-row; `tests/test_gate_e_ledger.py` reports it as a "Gate E owed" skip on the way to
-`dev`).
+**Status:** Gates A–D measured, wiring and tests in place. **Gate E SHIP**, 0.1318 vs
+`HIGHER_HIGH` (owner's run `pr402-b3_outside_pivot3` at merge time, 2026-11-26, recorded in
+`docs/gate_e_ledger.csv`).
 
 | module | category | column | range |
 |---|---|---|---|
@@ -107,11 +107,17 @@ Gate E run):
 
 ## Gate E — attribution
 
-**Owed.** Not run in this session (private engine and cache). The prototype's screen
-number from the issue (`screen_r9_20261029`, max |ρ| 0.1318 vs `HIGHER_HIGH`,
-n = 398,671) is a prototype measurement, not this module's, and is not recorded in the
-ledger. Module sha1 (LF-normalised) at the time of this receipt:
-`5a14f7e6194fff4b8f6fe3028b6d4180fbb18359`.
+**SHIP.** Run `pr402-b3_outside_pivot3` (2026-11-26, at merge time), 89 BIST frames, 687
+comparators, recorded in `docs/gate_e_ledger.csv`; module sha1 (LF-normalised)
+`5a14f7e6194fff4b8f6fe3028b6d4180fbb18359`, the same as when this receipt was written.
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---:|---|---:|---:|---|
+| `B3_OUTSIDE_PIVOT3` | 0.1318 | `HIGHER_HIGH` (compute_all) | 398,671 | 0.1349 | SHIP |
+
+Next comparators: `Pivot_Range_pct_Pctl` (manifest) 0.1284, `LOWER_LOW` 0.1243. It reproduces
+the issue's prototype figure (0.1318, n = 398,671). Real-data reach: 398,671 non-NaN and 7,516
+non-zero bars, pooled.
 
 ## Gate F — suites
 
