@@ -44,6 +44,7 @@ from .rank import rank
 from .rd_gap_fill_rate_60 import rd_gap_fill_rate_60
 from .rd_knot_dslope_40 import rd_knot_dslope_40
 from .rd_knot_pos_40 import rd_knot_pos_40
+from .rd_quadfit_resid_20 import rd_quadfit_resid_20
 from .skew import skew
 from .stability import stability
 from .stdev import stdev
