@@ -20,7 +20,10 @@ poster's words — the issue discloses them as the prototype's own scale-free fo
 as the `length` default and the fixed ddof=0 recipe, following the same pattern as issue
 #179's "p = 20" / "3p" and issue #166's "40 bars, knots 5..34."
 
-**Status:** Gates A–F measured. Gate E: DISCLOSE_GAP (max |ρ| 0.8343 vs `cfo_ta_Pctl`), ships.
+**Status:** Gates A-D, F measured. Gate E: pending, run by issue-solver after this session --
+round 1 review forced a Gate D fix (Decision 3) that changed the module's code (and so its
+sha1), which stales the Gate E run this tree previously carried; that row is removed from
+`docs/gate_e_ledger.csv` until the re-run.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -28,7 +31,7 @@ as the `length` default and the fixed ddof=0 recipe, following the same pattern 
 
 Tests: `tests/test_rd_quadfit_resid_20.py` (20 tests). Numbers: `python
 docs/measure_rd_quadfit_resid_20.py`, run from the repo root. Environment: Python 3.11.2,
-pandas 2.3.3, numpy 1.26.4. Measured 2026-11-27.
+pandas 2.3.3, numpy 1.26.4. Measured 2026-11-27 (round 2, after Decision 3's Gate D fix).
 
 ## Decisions
 
@@ -45,21 +48,28 @@ pandas 2.3.3, numpy 1.26.4. Measured 2026-11-27.
    screen prototype's own `_quad_resid` helper, `R.std(1)` — numpy's `.std()` default,
    ddof=0 — so this port reads that off the prototype the same way issue #179's `std` /
    `mean` were read off its own helpers.
-3. **Gate D is NOT bit-identical under a power-of-two price rescale — measured, and this is
-   the headline finding of this port's gates.** The fitted quadratic has an intercept, so in
-   EXACT (real-number) arithmetic any additive shift of `log(close)` leaves every residual
-   unchanged, and a power-of-two rescale of `close` adds an exact constant to `log(close)`.
-   But unlike `stdev` (a sum-of-squared-deviations reduction on the RAW, un-logged price,
-   where an exact power-of-two multiply is bit-preserving all the way through — see
-   `rd_std_ratio_20_60`) or `rd_knot_pos_40` (an ARGMIN over a fixed integer grid, insensitive
-   to a last-bit nudge unless it flips an already-tied argmin), this port's output is a
-   CONTINUOUS ratio built from `np.log` of the rescaled price itself. `log(8*x)` is not
-   bit-identical to `log(x) + log(8)` in IEEE-754 doubles even for an exact power-of-two `8`
-   — `log` is transcendental, not scale-preserving the way an exact multiply or a
-   correctly-rounded `sqrt` of an exact square is. Measured: 0 of 1,581 co-finite cells
-   bit-identical under x8/x64, max relative difference ~5e-9 — the SAME order of magnitude as
-   a non-power-of-two rescale (x10/x3.7, also ~2-3e-9), not meaningfully smaller. Both stay
-   well inside the test's generous `rtol=1e-6` bound.
+3. **Gate D round 1 fed the fit `log(close)` directly and measured NOT bit-identical under a
+   power-of-two price rescale** (0 of 1,581 co-finite cells bit-identical, max relative
+   difference ~5e-9), defended on the argument that `log(8*x)` is not bit-identical to
+   `log(x) + log(8)` in IEEE-754 doubles even for an exact power-of-two `8` — `log` is
+   transcendental, not scale-preserving the way an exact multiply or a correctly-rounded
+   `sqrt` of an exact square is. Round 1 review rejected that defence: this fork already has
+   the fix, `rd_knot_dslope_40` (`pandas_ta/statistics/rd_knot_dslope_40.py`), a continuous
+   value from an intercept-carrying OLS fit on log close just like this column, which was
+   forced through the identical argument and now measures bit-identical by fitting on
+   `log(window / window's own first close)` — the `level_shift_size` ratio-to-first-bar device
+   — instead of `log(window)` directly. **Round 2 adopts that device here.** The fitted
+   quadratic has an intercept, so in EXACT (real-number) arithmetic any additive shift of
+   `log(close)` leaves every residual unchanged (the argument that was already true, just
+   applied to the wrong implementation); under an exactly-representable rescale by `k`, both
+   the numerator and denominator of the ratio are multiplied by the same exact factor (a
+   power-of-two multiply only shifts the exponent), so IEEE-754 division returns bit-identical
+   results, and `log` of a bit-identical input returns a bit-identical output. **Measured: 0 of
+   1,581 co-finite cells MISMATCH under x8/x64 — bit-identical**, not merely within tolerance.
+   A non-power-of-two rescale (x10/x3.7) is not exact at the division step, so that stays a
+   tiny-tolerance claim, and it is now three orders of magnitude tighter than round 1's: max
+   relative difference 2.756e-12 (x10) / 3.135e-12 (x3.7), well inside the test's `rtol=1e-6`
+   bound.
 4. **A window with any non-finite `log(close)` reads NaN**, not an arbitrary fitted value —
    masked explicitly (`tests/test_rd_quadfit_resid_20.py::test_nonfinite_window_reads_nan`).
 5. **Column name carries the one parameter**, `RD_QUADFIT_RESID_{length}` — e.g.
@@ -92,7 +102,10 @@ then `log`, not the module's own arithmetic, which is why it is not exactly `0.0
 Cross-checked against an independent per-window Python loop built straight from the formula
 above (`np.linalg.lstsq` per window, not read from the module) on a 300-bar synthetic
 log-price random walk (length=40, 261 defined bars): NaN masks identical, **max |diff|
-1.807e-12** (`test_matches_an_independent_loop`, `python docs/measure_rd_quadfit_resid_20.py`).
+9.442e-13** (`test_matches_an_independent_loop`, `python docs/measure_rd_quadfit_resid_20.py`;
+the oracle fits on `log(close)` directly rather than the module's ratio-to-first-bar form, so
+the two are not expected to match to the bit, only to OLS's own invariance up to float noise —
+same caveat as `rd_knot_dslope_40`'s own cross-check).
 
 ## Gate B — causality
 
@@ -112,7 +125,7 @@ log-price random walk (length=40, 261 defined bars): NaN masks identical, **max 
 
 ## Gate C — reachability
 
-Synthetic, from the port session (real-data reachability is part of the owed Gate E run):
+Synthetic, from the port session:
 
 - **1,600-bar frame (seed 4):** 1,581 of 1,600 bars fire (19-bar warm-up); values range
   -2.6635 to 2.5259 across **1,581 distinct values** (a continuous ratio, not a discrete
@@ -124,47 +137,69 @@ Synthetic, from the port session (real-data reachability is part of the owed Gat
 - **A window with a non-finite `log(close)` reads NaN** by construction
   (`test_nonfinite_window_reads_nan`); not observed on the random synthetic frames above (no
   injected non-finite values there), which is expected, not a defect.
+- **Real-data reachability** was measured once, on the round-1 module (before Decision 3's
+  Gate D fix): run `is180-rd_quadfit_resid_20-457a93c0` (2026-11-27) recorded `non_nan`
+  397,158, `non_zero` 397,158 of 398,849 pooled bars across the 89 ALTPORT-1 frames
+  (`overlap_max.csv`). That run's `pandas_ta_src_sha1` no longer matches the fixed module
+  (Decision 3 changed the module's own sha1), so it is not re-stated as this tree's own
+  measurement; the ledger row is removed and this count is owed again on the next Gate E run.
+  `rd_knot_dslope_40`'s own round-2 Gate E re-run after an identical fix reconfirmed its ρ to
+  the 13th significant digit (`docs/RdKnotDslope40Measured.md`), so this count is expected,
+  not merely hoped, to reproduce — but it is not asserted here until re-measured.
 
 ## Gate D — scale-free
 
-- **Power-of-two (x8, x64): measured NOT bit-identical** — 0 of 1,581 co-finite cells
-  bit-identical, max absolute difference 8.3e-12 (x8) / 1.7e-11 (x64), max RELATIVE difference
-  2.6e-9 (x8) / 5.1e-9 (x64) (`python docs/measure_rd_quadfit_resid_20.py`). See Decision 3
-  above for why: the fitted quadratic's intercept makes the residual invariant to an additive
-  shift of `log(close)` only in exact real-number arithmetic, and `np.log` of a
-  power-of-two-rescaled `close` is not itself bit-preserving the way an exact multiply or a
-  correctly-rounded `sqrt` of an exact square is. `tests/test_rd_quadfit_resid_20.py::test_power_of_two_scale_stays_within_a_tiny_tolerance`
-  bounds this at a generous `rtol=1e-6` (the measured noise floor is ~5e-9, two orders of
-  magnitude below the bound) rather than asserting bit-identity, per the issue-solver's own
-  CPU-variant rule (a bit-level claim here would not survive a different CPU's dispatched
-  `log` kernel).
-- **Non-power-of-two (x10, x3.7): measured within the SAME order of magnitude** — max
-  absolute difference 9.5e-12 (x10) / 5.3e-12 (x3.7), max relative difference 2.8e-9 (x10) /
-  1.6e-9 (x3.7) on the same 1,581 co-finite cells. Not meaningfully larger than the
-  power-of-two case — both are dominated by `log`'s own rounding, not by the extra last-bit
-  rounding a non-power-of-two multiply adds on top.
-  `tests/test_rd_quadfit_resid_20.py::test_other_scales_stay_within_a_tiny_tolerance` uses the
-  same `rtol=1e-6` bound.
+- **Power-of-two (x8, x64): measured BIT-IDENTICAL** — 0 of 1,581 co-finite cells mismatch,
+  max absolute difference 0.0, max relative difference 0.0
+  (`python docs/measure_rd_quadfit_resid_20.py`). See Decision 3 above: the module fits on
+  `log(window / window's own first close)` rather than `log(window)` directly, so a
+  power-of-two rescale multiplies both the ratio's numerator and denominator by the same exact
+  factor (only the exponent shifts), IEEE-754 division returns bit-identical results, and
+  `log` of a bit-identical input is bit-identical — and the fitted quadratic's intercept makes
+  OLS invariant to the per-window additive shift that ratio introduces, in exact arithmetic.
+  `tests/test_rd_quadfit_resid_20.py::test_power_of_two_scale_is_bit_identical` asserts this
+  with `np.testing.assert_array_equal`, not a tolerance.
+- **Non-power-of-two (x10, x3.7): tolerance, not bit-identity** — that rescale is not exact at
+  the division step, so the ratio itself picks up a last-bit difference before `log` is even
+  called. Measured max absolute difference 4.452e-14 (x10) / 3.408e-14 (x3.7), max relative
+  difference 2.756e-12 (x10) / 3.135e-12 (x3.7) on the same 1,581 co-finite cells — three
+  orders of magnitude tighter than round 1's pre-fix `log(close)` form (~2.8e-9 / ~1.6e-9),
+  since the ratio-to-first-bar device also shrinks the non-exact case's rounding, not only the
+  exact one's. `tests/test_rd_quadfit_resid_20.py::test_other_scales_stay_within_a_tiny_tolerance`
+  bounds this at a generous `rtol=1e-6`, per the issue-solver's own CPU-variant rule (the exact
+  last bit is the CPU's dispatched kernels' call, not this module's logic).
 - `0 < fires < n`, not constant: 1,581 of 1,600 bars fire on the 1,600-bar frame above, 1,581
   distinct values, min -2.6635 and max 2.5259 — both signs reached, so a constant column
   cannot pass.
 
-**Run on the port itself** (not the prototype), issue-solver, run id
-`is180-rd_quadfit_resid_20-457a93c0`, module `pandas_ta.statistics.rd_quadfit_resid_20`,
-89 ALTPORT-1 frames, 398,849 pooled bars, 687 comparators (329 `compute_all` + 358
-`ml_features` manifest), canary bit-equal on AKBNK.IS / BIENY.IS / AGHOL.IS / SASA.IS,
-`pandas_ta_src_sha1` `6c03de9c7e550be764e9234f0bbfd57af5212a78`:
+## Gate E — attribution
+
+**Pending, run by issue-solver after this session.** Round 1 was measured once, on the
+pre-Decision-3 module: run `is180-rd_quadfit_resid_20-457a93c0` (2026-11-27), module
+`pandas_ta.statistics.rd_quadfit_resid_20`, 89 ALTPORT-1 frames, 398,849 pooled bars, 687
+comparators (329 `compute_all` + 358 `ml_features` manifest), canary bit-equal on AKBNK.IS /
+BIENY.IS / AGHOL.IS / SASA.IS, `pandas_ta_src_sha1` `6c03de9c7e550be764e9234f0bbfd57af5212a78`:
 
 | column | max \|ρ\| | against | n | perframe max median \|ρ\| | verdict |
 |---|---|---|---|---|---|
-| `RD_QUADFIT_RESID_20` | 0.8343003635723028 | `cfo_ta_Pctl` (manifest) | 392,886 | 0.8356157515953884 | **DISCLOSE_GAP** |
+| `RD_QUADFIT_RESID_20` | 0.8343003635723028 | `cfo_ta_Pctl` (manifest) | 392,886 | 0.8356157515953884 | DISCLOSE_GAP |
 
-Next comparator (`compute_all`): `cfo` 0.8030023191691446, n = 397,158. Band: `r3-perframe-0.90`
-— DISCLOSE_GAP is 0.80 ≤ ρ < 0.90, below the 0.90 STRUCK line (pooled 0.8343, perframe max
-median 0.8356, neither reaches 0.90) — **ships, disclosed**, not reverted. Matches the screen
-prototype's own quoted figures (0.8343 / 0.8356 vs `cfo_ta_Pctl`) to the digit: the port is
-mathematically the same reading as the prototype, measured independently on the port's own code.
-Recorded: `docs/gate_e_ledger.csv`, measured 2026-11-27.
+Next comparator (`compute_all`): `cfo` 0.8030023191691446, n = 397,158. Matches the screen
+prototype's own quoted figures (0.8343 / 0.8356 vs `cfo_ta_Pctl`) to the digit.
+
+That run's `pandas_ta_src_sha1` no longer matches this tree: Decision 3's Gate D fix (fitting
+on `log(window / window's own first close)` instead of `log(window)`) changed the module's own
+sha1 from `6c03de9c7e...` to `657050f8a6be60e6ec724e6e5b516ef1c15e7e20` (measured,
+`python docs/measure_rd_quadfit_resid_20.py`). Per the issue-solver's override rules, Gate E is
+not re-run in this session; the round-1 row is removed from `docs/gate_e_ledger.csv` so the
+ledger does not assert a measurement against code that no longer exists, and
+`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails locally as a
+result — expected, not a finding, per the issue-solver's own rules. The Gate D fix changes
+each residual by at most ~3e-12 relative (see Gate D above), and the sibling port
+`rd_knot_dslope_40`'s own round-2 Gate E re-run after an identical fix reconfirmed its ρ to the
+13th significant digit against the same comparator (`docs/RdKnotDslope40Measured.md`), so the
+figures above are expected, not merely hoped, to reproduce on re-run — but they are not
+re-asserted as this tree's own measurement until that run happens.
 
 ## Gate F — suites
 
@@ -177,7 +212,9 @@ python -m pytest -q tests/test_rd_quadfit_resid_20.py tests/test_readme_counts.p
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,726 passed, 7 skipped** (receipt session, after the Gate E ledger row above was recorded).
+**1,718 passed, 7 skipped, 1 failed** -- round 2, after Decision 3's Gate D fix removed the
+stale round-1 ledger row: `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+fails because Gate E is owed again (expected, per the issue-solver's own rules, not a finding).
 `tests/test_rd_quadfit_resid_20.py` alone: 20 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub runner
@@ -196,15 +233,16 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
 - `docs/MLCompanionContract.md`: 759 → 760 tagged and 385 → 386 `SF` (newest first in the
   chain). `RD_QUADFIT_RESID_20` tags `SF` because the fitted quadratic's intercept makes the
   output invariant to any additive shift of `log(close)` in exact real-number arithmetic —
-  measured NOT bit-identical at the IEEE-754 level (see Decision 3), but within the same
-  tight tolerance for both a power-of-two and a non-power-of-two rescale, confirmed by the
-  dictionary generator's own probe frame (`docs/IndicatorDictionary.md`'s
-  `rd_quadfit_resid_20` row), not merely asserted here.
+  measured BIT-IDENTICAL at the IEEE-754 level under a power-of-two rescale (Decision 3),
+  within a tight tolerance under a non-power-of-two one, confirmed by the dictionary
+  generator's own probe frame (`docs/IndicatorDictionary.md`'s `rd_quadfit_resid_20` row), not
+  merely asserted here.
 - `docs/IndicatorDictionary.md`, regenerated with this environment's package. Its diff is the
   `rd_quadfit_resid_20` row (`RD_QUADFIT_RESID_20` SF, 19-bar warm-up), the three header
   counts, the statistics section count, the no-transform-needed shortlist, and nothing else
   (checked: `git diff docs/IndicatorDictionary.md`).
 - `Category`: `rd_quadfit_resid_20` is placed alphabetically between `rd_knot_pos_40` and
   `skew` in `statistics`.
-- Module sha1 (LF-normalised, for the later `docs/gate_e_ledger.csv` row):
-  `c64bc78ae2f721e66ede3208242cd38635fb4d01`.
+- Module sha1 (LF-normalised, for the later `docs/gate_e_ledger.csv` row, round 2 after
+  Decision 3's Gate D fix): `657050f8a6be60e6ec724e6e5b516ef1c15e7e20` (measured,
+  `python docs/measure_rd_quadfit_resid_20.py`).

@@ -56,7 +56,7 @@ def reachability():
 
 
 def scale_tolerance():
-    print("== Gate D: price-scale invariance (x8/x64/x10/x3.7) ==")
+    print("== Gate D: price-scale invariance (x8/x64 bit-identical, x10/x3.7 tolerance) ==")
     close = T._walk(seed=4)
     base = rd_quadfit_resid_20(close)
     for k in (8.0, 64.0, 10.0, 3.7):
@@ -64,9 +64,9 @@ def scale_tolerance():
         m = base.notna()
         same = (base.isna() == scaled.isna()).all()
         diffs = np.abs(base[m].to_numpy() - scaled[m].to_numpy())
-        exact = int((diffs == 0).sum())
+        exact_mismatches = int((diffs != 0).sum())
         print(f"  x{k}: NaN masks equal {same}; co-finite cells {int(m.sum())}; "
-              f"bit-identical on {exact}; max |diff| {diffs.max():.3e}; "
+              f"exact mismatches {exact_mismatches}; max |diff| {diffs.max():.3e}; "
               f"max relative |diff| {np.nanmax(np.where(base[m] != 0, diffs / np.abs(base[m]), 0)):.3e}")
 
 

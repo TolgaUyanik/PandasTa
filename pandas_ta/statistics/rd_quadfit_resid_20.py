@@ -38,13 +38,17 @@ every residual -- and the sd dividing them -- is always exactly zero,
 `0/0 = NaN` on every bar); this port raises rather than silently emitting
 an all-NaN column.
 
-NON-REDUNDANCY. The screen prototype's own measurement (issue #180,
-NOT re-run in this session) puts this column's nearest comparators at
-`cfo_ta_Pctl` (0.8343), `cfo_ta` (0.8275) and `cfo` (0.8030) -- all
-already-shipped momentum-family columns this fork carries
-(`pandas_ta.momentum.cfo`), read here as evidence the new column sits in
-the same neighbourhood as existing ones, not as evidence it restates one
-exactly (DISCLOSE_GAP at the prototype's own measured 0.8343, not STRUCK).
+NON-REDUNDANCY. A Gate E run on this port's prior revision (`is180-rd_quadfit_resid_20-457a93c0`,
+89 ALTPORT-1 frames, 687 comparators -- BEFORE the ratio-to-first-bar Gate D
+fix below changed the module's own sha1, so the row is not current) put this
+column's nearest comparator at `cfo_ta_Pctl` (max |rho| 0.8343003635723028,
+n = 392,886, perframe max median 0.8356157515953884) -- an already-shipped
+momentum-family column this fork carries (`pandas_ta.momentum.cfo`), read
+here as evidence the new column sits in the same neighbourhood as existing
+ones, not as evidence it restates one exactly (DISCLOSE_GAP, below the 0.90
+STRUCK line). This reproduced the screen prototype's own measurement (issue
+#180) to the digit; Gate E is owed again and will be re-run
+(docs/RdQuadfitResid20Measured.md).
 A stage-2 fork-overlap check (not Gate E) on scale-free `Category` outputs
 at defaults put the nearest comparator at `cfo:CFO_9` (0.8313) -- again
 below the 0.90 restatement line.
@@ -73,21 +77,30 @@ scale-invariant mathematically, the same argument `rd_knot_pos_40`
 (`pandas_ta/statistics/rd_knot_pos_40.py`) makes for its own intercept-
 carrying hinge fit.
 
-UNLIKE `rd_knot_pos_40` (whose output is an ARGMIN over a fixed integer
-grid, robust to a last-bit nudge unless it flips an already-tied argmin)
-or `rd_std_ratio_20_60` (whose `stdev` never takes a logarithm, so an exact
-power-of-two rescale of `close` is bit-preserving all the way through a
-sum-of-squared-deviations reduction), this port's output is a CONTINUOUS
-ratio built from `np.log` of the rescaled price itself: `log(8*x)` is NOT
-bit-identical to `log(x) + log(8)` in IEEE-754 doubles even though `8` is
-an exact power of two -- `log` is transcendental, not scale-preserving the
-way an exact multiply or a correctly-rounded `sqrt` of an exact square is
-(the latter is what lets `rd_range_contraction`'s and `rd_std_ratio_20_60`'s
-own ratios cancel exactly). Measured: NOT bit-identical under a
-power-of-two rescale (x8, x64) -- max relative difference ~5e-9 on the
-measured frame, the SAME order of magnitude as a non-power-of-two rescale
-(x10, x3.7), not meaningfully smaller. Both stay within a tight measured
-tolerance; numbers in docs/RdQuadfitResid20Measured.md.
+⚠ `LN` is evaluated by libm's own transcendental routine: computing
+`LN(close*k)` is NOT the same floating-point operation as computing
+`LN(close) + LN(k)`, even when `k` is an exact power of two -- so feeding
+the fit `LN(close)` directly (an earlier version of this module did) could
+only be measured to a tiny tolerance (~5e-9 relative), not claimed
+bit-identical, under any rescale. This module instead feeds the fit
+`y = LN(window / window's own first close)` -- the ratio-to-first-bar
+device `level_shift_size` (`pandas_ta/statistics/level_shift_size.py`)
+uses for the same reason, also adopted by the sibling port
+`rd_knot_dslope_40` (`pandas_ta/statistics/rd_knot_dslope_40.py`) after an
+identical "`log` is transcendental" defence was tried and rejected there
+(`docs/RdKnotDslope40Measured.md`): under an exactly-representable rescale
+by `k`, both the numerator and the denominator of the ratio are multiplied
+by the same exact factor (a power-of-two multiply is exact, only the
+exponent shifts), so IEEE-754 division returns bit-identical results, and
+`LN` of a bit-identical input returns a bit-identical output. Since OLS is
+invariant to the per-window additive shift this ratio introduces (see
+above), the reported residual ratio is bit-identical under x8/x64 --
+measured, not merely argued: max absolute difference 0.0 on every
+co-finite cell
+(`tests/test_rd_quadfit_resid_20.py::test_power_of_two_scale_is_bit_identical`,
+`docs/measure_rd_quadfit_resid_20.py`). Under a non-power-of-two rescale
+(x10, x3.7) the division itself is no longer exact, so those stay a
+tiny-tolerance claim (measured in `test_other_scales_stay_within_a_tiny_tolerance`).
 """
 import numpy as np
 import pandas as pd
@@ -138,13 +151,19 @@ def rd_quadfit_resid_20(close, length=None, offset=None, **kwargs):
     if close is None: return
 
     # Calculate Result
-    log_close = np.log(close.to_numpy(dtype=float))
-    n = len(log_close)
+    close_values = close.to_numpy(dtype=float)
+    n = len(close_values)
     out = np.full(n, np.nan)
 
     if n >= length:
         M = _quad_basis(length)
-        windows = sliding_window_view(log_close, length)  # (n-length+1, length), causal, oldest-first
+        raw_windows = sliding_window_view(close_values, length)  # (n-length+1, length) raw close, causal, oldest-first
+        # log(close / the window's own first close), not log(close) directly --
+        # the ratio-to-first-bar device `level_shift_size` uses: under a
+        # power-of-two price rescale both operands scale by the same exactly-
+        # representable factor, so the ratio (and hence every y) is bit-identical.
+        with np.errstate(invalid="ignore", divide="ignore"):
+            windows = np.log(raw_windows / raw_windows[:, :1])
         out[length - 1:] = _quad_resid(windows, M)
 
     result = pd.Series(out, index=close.index)

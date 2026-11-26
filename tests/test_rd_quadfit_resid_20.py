@@ -3,8 +3,11 @@
 residual of a trailing 20-bar quadratic (2nd-order polynomial) fit on log
 close, over the window's own residual sd (issue #180, RD-QUADFIT-RESID-20;
 Reddit, tier 4, untested by any poster). Measurements are in
-docs/RdQuadfitResid20Measured.md. Gate E is owed (run by issue-solver after
-this session).
+docs/RdQuadfitResid20Measured.md, including a Gate E run on this port's
+PRIOR revision (max |rho| 0.8343003635723028 vs `cfo_ta_Pctl`, perframe max
+median 0.8356157515953884, DISCLOSE_GAP) -- the ratio-to-first-bar Gate D
+fix below changed the module's sha1, so that run is stale and Gate E is
+owed again.
 
 What these pin, in order of how much it would hurt to lose:
 
@@ -22,11 +25,13 @@ What these pin, in order of how much it would hurt to lose:
 * SCALE-FREE: the fitted quadratic has an intercept, so in exact
   (real-number) arithmetic any additive shift of `log(close)` -- i.e. any
   positive price rescale -- leaves every residual, and so the output
-  ratio, unchanged. Measured NOT bit-identical under IEEE-754 float64 --
-  `np.log` of a power-of-two-rescaled price is not itself bit-preserving
-  the way an exact multiply is -- but within the same tiny tolerance
-  (relative ~5e-9) for both a power-of-two rescale (x8, x64) and a
-  non-power-of-two one (x10, x3.7).
+  ratio, unchanged. The module feeds the fit `log(window / window's own
+  first close)` (the `level_shift_size` / `rd_knot_dslope_40` ratio-to-
+  first-bar device), so under a power-of-two rescale (x8, x64) both the
+  numerator and denominator of that ratio scale by the same exact factor
+  and the output is measured BIT-IDENTICAL, not merely within tolerance.
+  A non-power-of-two rescale (x10, x3.7) stays a tiny-tolerance claim
+  (relative ~3e-12), since that division is no longer exact.
 * Reachability (a non-constant output on a random synthetic frame) and the
   wiring (`Category`, the accessor, warm-up, column name).
 """
@@ -197,33 +202,34 @@ def test_lookahead_mutant_is_caught():
 # Gate D -- scale-free
 # ---------------------------------------------------------------------
 @pytest.mark.parametrize("k", [8.0, 64.0])
-def test_power_of_two_scale_stays_within_a_tiny_tolerance(k):
-    """NOT bit-identical, measured (see module docstring): the fitted
-    quadratic has an intercept, so in EXACT arithmetic the residual vector
-    of every window is invariant to any additive shift of `log(close)` --
-    i.e. any positive price rescale. But unlike a sum-of-squared-deviations
-    reduction (`stdev`) or an argmin over a fixed grid (`rd_knot_pos_40`),
-    this port runs `np.log` on the RESCALED price itself: `log(8*x)` is not
-    bit-identical to `log(x) + log(8)` for IEEE-754 doubles even though `8`
-    is an exact power of two (`log` is transcendental, not scale-preserving
-    the way an exact power-of-two multiply or a correctly-rounded `sqrt` of
-    an exact square is). Measured max relative diff ~5e-9 on this frame
-    (docs/measure_rd_quadfit_resid_20.py) -- same order of magnitude as the
-    non-power-of-two case below, not meaningfully smaller."""
+def test_power_of_two_scale_is_bit_identical(k):
+    """BIT-IDENTICAL, measured (see module docstring): the fitted quadratic
+    has an intercept, so in EXACT arithmetic the residual vector of every
+    window is invariant to any additive shift of `log(close)` -- i.e. any
+    positive price rescale. The module feeds the fit
+    `log(window / window's own first close)`, the ratio-to-first-bar device
+    `level_shift_size` and the sibling port `rd_knot_dslope_40` use for the
+    same reason: under a power-of-two rescale both the numerator and
+    denominator of that ratio are multiplied by the same exact factor (only
+    the exponent shifts), so IEEE-754 division -- and the `log` of its
+    bit-identical result -- stays bit-identical all the way through.
+    Measured max absolute diff 0.0 on every co-finite cell on this frame
+    (docs/measure_rd_quadfit_resid_20.py)."""
     close = _walk(seed=4)
     base = rd_quadfit_resid_20(close)
     scaled = rd_quadfit_resid_20(close * k)
     assert (base.isna() == scaled.isna()).all()
     m = base.notna()
-    np.testing.assert_allclose(
-        base[m].to_numpy(), scaled[m].to_numpy(), rtol=1e-6, atol=1e-9)
+    np.testing.assert_array_equal(base[m].to_numpy(), scaled[m].to_numpy())
 
 
 @pytest.mark.parametrize("k", [10.0, 3.7])
 def test_other_scales_stay_within_a_tiny_tolerance(k):
-    """A non-power-of-two rescale ALSO moves the last bit of `close` before
-    `LN` is even called, on top of the same `log`-is-not-scale-preserving
-    effect as the power-of-two case above. Measured on this frame in
+    """UNLIKE the power-of-two case above, a non-power-of-two rescale is
+    not exactly representable, so `raw_windows / raw_windows[:, :1]` -- the
+    ratio-to-first-bar device the fit runs on -- no longer divides to a
+    bit-identical result, and `log` of that result stays only a
+    tiny-tolerance claim. Measured on this frame in
     docs/measure_rd_quadfit_resid_20.py; bounded here at a generous
     relative tolerance rather than pinned exactly 0, since the CPU's
     dispatched float kernels, not this module's logic, decide the last bit
