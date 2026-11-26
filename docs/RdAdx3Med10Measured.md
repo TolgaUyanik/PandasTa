@@ -6,10 +6,7 @@ PandasTa issue #171. Source: Reddit, tier 4 (ResearchIntel kb/reddit.db): r/quan
 respectively." Claimed use (tier 4, untested by the poster): extra ML features, poster claims a big
 gain.
 
-**Status: Gates A–D cleared this session. Gate E: pending, run by issue-solver after this
-session.** `rd_adx3_med10` is wired into `Category["trend"]`; `tests/test_gate_e_ledger.py
-::test_every_indicator_that_needs_a_row_has_one` fails until the ledger row is recorded — expected,
-not a defect (see CLAUDE.md "Owed, not failed, on the way to `dev`").
+**Status: Gates A–E cleared. SHIP.** `rd_adx3_med10` is wired into `Category["trend"]` and stays.
 
 Shipped: `pandas_ta/trend/rd_adx3_med10.py`, one column `RD_ADX3_MED10_{adx_length}_{length}`
 (default `RD_ADX3_MED10_3_10`). Tests: `tests/test_rd_adx3_med10.py` (13). Numbers:
@@ -42,7 +39,7 @@ to `pandas_ta.statistics.median`'s own `close.rolling(length).median()`.
 | B Causality | pass | 9-offset future-perturbation sweep (whole tail from bar j onward scaled x1000): real module leaks at 0 of 9. A mutant (`importlib`-read source, the median's input shifted toward the future with `.shift(-1)` before the rolling call, `exec`'d in memory) is live (differs from the real module) and leaks at 5 of 9 — a MAJORITY, not all: a rolling median is robust to a single extreme input, so at a minority of offsets the perturbed value lands on the same side of the window's existing median and does not move it (see `tests/test_rd_adx3_med10.py::test_mutant_is_caught`'s own docstring). |
 | C Reachability | pass | Synthetic: 900-bar OHLC walk (seed 11, σ=0.02): 886 of 900 finite (14-bar warm-up: ADX(3)'s own warm-up feeding straight into the 10-bar median window, since `min_periods` defaults to `length`), 538 distinct values, range [21.419409, 95.602225]. Ten independent 900-bar seeds: 886 non-NaN of 900 on every seed, 515–558 distinct values. Real-data reachability: owed with Gate E. |
 | D Scale-free | pass | x8/x64 bit-identical on all 886 fired bars with matching NaN masks for both `ADX_3` and `RD_ADX3_MED10` (ADX's own formula divides directional movement by ATR, both linear in a joint positive price rescale, and a power-of-two `k` keeps that cancellation exact in IEEE float; a rolling MEDIAN of an unchanged series is itself unchanged, so no further error enters at the median step). x10/x3.7: `ADX_3` within 5.33e-13 / 4.48e-13, `RD_ADX3_MED10` within 3.06e-13 / 3.62e-13 (both well under the 1e-9 test tolerance, matching house convention -- `tests/test_rd_range100_pct500.py`'s own x10/x3.7 check), identical NaN masks. `0 < 886 < 900` fires, 538 distinct values (non-constant). Re-run clean with `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_rd_adx3_med10_cpu.py`): same 13/13 tests pass — no exact bit-count or digit beyond a stated tolerance is pinned, so the CPU-variant kernels on a GitHub runner cannot break this suite. |
-| E Attribution | **pending** | Gate E: pending, run by issue-solver after this session. |
+| E Attribution | pass — SHIP | `RD_ADX3_MED10_3_10` max \|ρ\| **0.4656** vs `CHOP` (compute_all, n = 396,311); next: `0.4405` vs `BB_BWidth_Pctl` (manifest, n = 391,907). Per-frame max median \|ρ\| **0.4791** vs `CHOP`, 0.0% of 89 frames ≥ 0.90. Both well under the 0.76 SHIP line (`r3-perframe-0.90` bands). 89 ALTPORT-1 frames, 398,849 pooled bars, 687 comparators (329 compute_all + 358 manifest), 0 degenerate columns, canary bit-equal (AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS). Run `is171-rd_adx3_med10-9b4dba1e`, recorded in `docs/gate_e_ledger.csv`, measured 2026-11-26. |
 | F Suites | this repo only (per the porting rules, the launcher runs both whole suites) | `python -m pytest -q tests/test_rd_adx3_med10.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`: see "Final suite run" below. Whole suites: run by issue-solver in clean worktrees (see the PR body). |
 
 ## Wiring counts, read back
@@ -58,15 +55,11 @@ running tally updated 756 → 757 tagged columns, 382 → 383 `SF`; `CATEGORY_TO
 `python -m pytest -q tests/test_rd_adx3_med10.py tests/test_readme_counts.py
 tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py
 tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`
-— 1,687 passed, 7 skipped, 1 failed (`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-— expected, Gate E owed), measured 2026-11-26. Re-run under
-`NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_rd_adx3_med10_cpu.py`, this
-module only): 13 passed. Both repos' whole suites: run by issue-solver in clean worktrees (see the
-PR body).
+— 1,695 passed, 7 skipped, 0 failed, measured 2026-11-26 (Gate E ledger row now recorded, so the
+owed-row test passes). Re-run under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`
+(`docs/measure_rd_adx3_med10_cpu.py`, this module only): 13 passed. Both repos' whole suites: run by
+issue-solver in clean worktrees (see the PR body).
 
 ## Next step
 
-Gate E run owed: `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module
-pandas_ta.trend.rd_adx3_med10 --name rd_adx3_med10`, then
-`python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`. A later receipt session
-records the ledger row and the measured Gate E numbers in this file.
+None. Gates A–F cleared; `rd_adx3_med10` ships.
