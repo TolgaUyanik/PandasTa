@@ -3668,6 +3668,12 @@ class AnalysisIndicators(BasePandasObject):
         result = rd_corr_c_obv_20(close=close, volume=volume, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rd_obv_dev5(self, length=None, vol_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = rd_obv_dev5(close=close, volume=volume, length=length, vol_length=vol_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def rd_vwio_10(self, length=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         close = self._get_column(kwargs.pop("close", "close"))
