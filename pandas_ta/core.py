@@ -900,6 +900,14 @@ class AnalysisIndicators(BasePandasObject):
         result = ha(open_=open_, high=high, low=low, close=close, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rd_gap_fill(self, min_gap=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_gap_fill(open_=open_, high=high, low=low, close=close, min_gap=min_gap, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def rd_horseshoe(self, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         high = self._get_column(kwargs.pop("high", "high"))
