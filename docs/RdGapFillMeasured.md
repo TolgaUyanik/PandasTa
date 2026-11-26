@@ -155,12 +155,16 @@ Synthetic, from this session (real-data reachability awaits the launcher's Gate 
 
 ## Gate E — attribution
 
-**Pending, run by issue-solver after this session.** The launcher runs
-`../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module
-pandas_ta.candles.rd_gap_fill --name rd_gap_fill` over the 89 ALTPORT-1 BIST frames against
-the 687-comparator set (329 `compute_all` + 358 `ml_features` manifest); a later receipt
-session records the resulting row in `docs/gate_e_ledger.csv` and fills in the measured
-numbers here.
+Launcher's run (`is174-rd_gap_fill-8b5cdc38`, 89 ALTPORT-1 BIST frames, 398,849 bars,
+687 comparators: 329 `compute_all` + 358 `ml_features` manifest; canary AKBNK.IS, BIENY.IS,
+AGHOL.IS, SASA.IS bit-equal), recorded in `docs/gate_e_ledger.csv`:
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `RD_GAP_FILL_0.3` | 0.6597 | `GAP_PCT` (`compute_all`) | 398,760 | 0.6570 | **SHIP** |
+
+0.6597 is under the 0.76 ship line (`r3-perframe-0.90` bands) both pooled and per-frame
+(0.0% of frames at or above 0.90) — **SHIP**, column kept.
 
 Module sha1 at this commit (LF-normalised, `python docs/measure_rd_gap_fill.py`):
 `d7792481261756b4a1c2d8ca9d890b63b9b859a3`.
