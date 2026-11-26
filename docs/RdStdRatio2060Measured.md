@@ -16,7 +16,7 @@ which is mathematically the same reading but is not what Gate A cites):
 `normalized_vol = std(close, p) / mean(std(close, p), 3p)` with `p = 20`. `3p = 60` is the
 issue's own substitution, not a judgment call — it is this candidate's own name.
 
-**Status:** Gates A-D measured below. Gate E: pending, run by issue-solver after this session.
+**Status:** Gates A-E measured below. Gate E: DISCLOSE_GAP (0.8274 pooled, not STRUCK), ships.
 Whole-suite run is owed to the launcher, per the issue-solver's own rules (it must not run the
 whole suite).
 
@@ -155,15 +155,29 @@ Synthetic, from the port session:
 
 ## Gate E — attribution
 
-**Pending**, run by issue-solver after this session. The issue's own prototype measurement
-(screen `screen_r6_20261025`, `gate_e_overlap.py run --module ind_screen_r6 --fn screen`, 89
-ALTPORT-1 frames, 398,849 bars, 329 + 358 comparators, canary bit-equal — quoted from the issue,
-not re-run in this session): max |ρ| **0.8274** vs `BB_BWidth_Pctl` (manifest, n = 391,907),
-top-5 per-frame max median 0.8332 → **DISCLOSE_GAP**. Next comparators: `CHOP` 0.7091,
-`BB_BWidth` 0.7001. Fork overlap at stage 2 (not Gate E, scale-free `Category` outputs at
-defaults, 12 frames): max |ρ| 0.6675 vs `squeeze_pro:SQZPRO_OFF`, per-frame max median 0.6714 —
-not a restatement at the 0.90 line. This port's own Gate E run and ledger row are owed; the
-launcher runs Gate E and a later receipt session records the measured numbers here.
+**Measured** (launcher's run `is179-rd_std_ratio_20_60-f81ac76a`, `gate_e_overlap.py run
+--module pandas_ta.volatility.rd_std_ratio_20_60`, 89 ALTPORT-1 frames, 398,849 pooled bars, 329
++ 358 = 687 comparators, canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS):
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `RD_STD_RATIO_20_60_20_60` | 0.8273572620415864 | `BB_BWidth_Pctl` (manifest) | 391,907 | 0.8332215151007686 | **DISCLOSE_GAP** |
+
+Next comparators: `CHOP` 0.7091109628127323 (compute_all), `BB_BWidth` 0.7001 (issue's own
+prototype figure, not re-measured against this port directly). Matches the issue's own
+prototype screen measurement (`screen_r6_20261025`) to four decimal places — this port is not a
+new overlap, just the same formula re-measured on the shipped module.
+
+Per `CLAUDE.md`'s Gate E bands (`r3-perframe-0.90`): STRUCK needs pooled \|ρ\| ≥ 0.90 or a
+top-5 comparator's per-frame median ≥ 0.90. Neither holds (0.8274 pooled, 0.8332 per-frame
+median), so this is **DISCLOSE_GAP, not STRUCK** — ships, disclosed, not reverted. Fork overlap
+at stage 2 (not Gate E, scale-free `Category` outputs at defaults, 12 frames, from the port
+session): max |ρ| 0.6675 vs `squeeze_pro:SQZPRO_OFF`, per-frame max median 0.6714 — not a
+restatement at the 0.90 line.
+
+Ledger row recorded: `python docs/gate_e_ledger.py record
+/home/tolga/.issue-solver/runs/20261126-213551-179/gatee/is179-rd_std_ratio_20_60-f81ac76a
+--measured 2026-11-26` → `docs/gate_e_ledger.csv`.
 
 Module sha1 (LF-normalised, measured `python docs/measure_rd_std_ratio_20_60.py`):
 `58a8592edac58ff55328bea56d8db4ef5aa15dd8`.
