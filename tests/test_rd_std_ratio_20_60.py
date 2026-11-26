@@ -120,7 +120,7 @@ def _load_mutant():
     return mod
 
 
-OFFSETS = range(200, 1200, 40)  # all past the 79-bar default warm-up
+OFFSETS = range(200, 1200, 40)  # all past the 78-bar default warm-up (79-bar minimum input)
 
 
 def _leaks(fn, base_c, other_c):

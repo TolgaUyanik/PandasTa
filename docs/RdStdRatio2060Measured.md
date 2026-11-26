@@ -109,8 +109,9 @@ Synthetic, from the port session:
   (`test_zero_average_stdev_reads_nan_not_inf`); not observed on the random synthetic frames
   above (a GBM-style walk's stdev is never exactly constant at 0 for 60 bars), which is
   expected, not a defect.
-- **Real-data reachability**: not measured here — Gate E (which runs on real BIST data) is
-  owed; see below.
+- **Real-data reachability**: `RD_STD_RATIO_20_60_20_60` is non-NaN and non-zero on 391,907 of
+  398,849 pooled bars across all 89 ALTPORT-1 frames — from the launcher's Gate E run
+  `is179-rd_std_ratio_20_60-f81ac76a` (`gatee/is179-.../overlap_max.csv`); see Gate E below.
 
 ## Gate D — scale-free
 
@@ -163,8 +164,9 @@ Synthetic, from the port session:
 |---|---|---|---|---|---|
 | `RD_STD_RATIO_20_60_20_60` | 0.8273572620415864 | `BB_BWidth_Pctl` (manifest) | 391,907 | 0.8332215151007686 | **DISCLOSE_GAP** |
 
-Next comparators: `CHOP` 0.7091109628127323 (compute_all), `BB_BWidth` 0.7001 (issue's own
-prototype figure, not re-measured against this port directly). Matches the issue's own
+Next comparators: `CHOP` 0.7091109628127323 (compute_all), `BB_BWidth` 0.7001083061242045
+(compute_all, n 391,907 — `gatee/is179-.../top25.csv`, measured against this port in the same
+run). Matches the issue's own
 prototype screen measurement (`screen_r6_20261025`) to four decimal places — this port is not a
 new overlap, just the same formula re-measured on the shipped module.
 
@@ -180,7 +182,8 @@ Ledger row recorded: `python docs/gate_e_ledger.py record
 --measured 2026-11-26` → `docs/gate_e_ledger.csv`.
 
 Module sha1 (LF-normalised, measured `python docs/measure_rd_std_ratio_20_60.py`):
-`58a8592edac58ff55328bea56d8db4ef5aa15dd8`.
+`6f8698766888398b99ff1021d251be5f3e16b62d` — matches `docs/gate_e_ledger.csv`'s `module_sha1`
+and the launcher's `gatee/is179-.../meta.json` `candidate_source_sha1`.
 
 ## Gate F — suites
 
@@ -197,6 +200,10 @@ python -m pytest -q tests/test_rd_std_ratio_20_60.py tests/test_readme_counts.py
 `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` — expected, per the
 issue-solver's own rules, until the launcher's Gate E run and a later receipt session record
 this port's ledger row. `tests/test_rd_std_ratio_20_60.py` alone: 20 passed.
+
+The ledger row is now recorded (run `is179-rd_std_ratio_20_60-f81ac76a`, 2026-11-26) and that
+failure is cleared at HEAD. Whole-suite evidence is the launcher's run: 16,926 passed, the
+single failure pre-existing at base `ce5636c9253b`.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub runner
 without AVX-512 — the four features issue-solver's rules name, not this machine's full
