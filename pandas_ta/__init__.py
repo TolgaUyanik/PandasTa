@@ -83,7 +83,7 @@ Category = {
         "dpo", "dx", "equal_highs_lows", "expand3_3pct", "flag_breakout", "fvg", "fvg_sweep_magnet", "g191_069", "g191_098", "halftrend", "increasing", "inverse_fvg", "j_chandelier_dist", "j_kaufmanstop_dist", "j_safezone_dist", "liquidity_compression_box",
         "head_shoulders",
         "liquidity_sweep", "long_run",
-        "nwog", "ob", "pmax", "priorday_fib", "priormonth_range", "psar", "qstick", "rd_adx3_med10", "rejection_blocks", "renko_trend",
+        "nwog", "ob", "pmax", "priorday_fib", "priormonth_range", "psar", "qstick", "rd_adx3_med10", "rd_adx8_med20", "rejection_blocks", "renko_trend",
         "ribbon_concordance", "sd_zone_pro", "short_run", "smc_sweep", "sphinx_unicorn", "sr_corridor", "sr_decay", "sr_force", "stiffness", "swing_equilibrium", "tdi", "tsignals",
         "rounding_cup",
         "triangle_wedge", "triple_top_bottom",
