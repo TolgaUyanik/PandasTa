@@ -145,7 +145,7 @@ def test_mutant_is_caught():
     assert not mod.rd_adx3_med10(high, low, close).equals(
         rd_adx3_med10(high, low, close))  # live
     hits = _leaks(mod.rd_adx3_med10)
-    assert hits >= len(OFFSETS) // 2, f"mutant caught at only {hits} of {len(OFFSETS)} offsets"
+    assert hits > len(OFFSETS) // 2, f"mutant caught at only {hits} of {len(OFFSETS)} offsets"
 
 
 # ------------------------------------------------------------ scale-free
