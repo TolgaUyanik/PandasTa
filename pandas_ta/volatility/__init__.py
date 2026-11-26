@@ -26,6 +26,7 @@ from .pdist import pdist
 from .range_compress_run import range_compress_run
 from .range_profile import range_profile
 from .natr import natr
+from .rd_range_contraction import rd_range_contraction
 from .rogers_satchell import rogers_satchell
 from .roll_spread import roll_spread
 from .rvi import rvi
