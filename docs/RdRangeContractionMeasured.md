@@ -205,5 +205,5 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
 - `docs/IndicatorDictionary.md`, regenerated with this environment's package (`python
   docs/gen_indicator_dictionary.py`): adds `rd_range_contraction` under `## volatility (40)`,
   and the `SF` tag list.
-- `Category`: `rd_range_contraction` is placed alphabetically between `pdist` and
-  `range_compress_run` in `volatility`.
+- `Category`: `rd_range_contraction` is placed alphabetically between `range_profile` and
+  `rogers_satchell` in `volatility`.
