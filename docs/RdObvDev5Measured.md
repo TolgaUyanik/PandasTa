@@ -46,7 +46,7 @@ defaults, not hard constants, per this fork's fixed-suffix-port convention (`osa
 | B Causality | pass | 9-offset future-perturbation sweep (whole tail from bar j onward scaled x1000 on both close and volume): real module leaks at 0 of 9. A mutant (`importlib`-read source, OBV shifted one bar toward the future with `.shift(-1)` before the SMAs, `exec`'d in memory) is live (differs from the real module) and leaks at 9 of 9 — a plain cumulative-sum shift moves every downstream bar, unlike a median's single-outlier robustness, so the mutant is caught at every swept offset. |
 | C Reachability | pass | Synthetic: 900-bar close/volume walk (seed 11, σ=0.02): 881 of 900 finite (19-bar warm-up: `max(length, vol_length) - 1` = 19), 881 distinct values, range [-3.438930, 2.896876]. Ten independent 900-bar seeds: 881 non-NaN of 900 on every seed, 881 distinct values each. Real data (launcher's Gate E run, 89 BIST frames, 398,849 pooled bars): 397,148 non-NaN, 396,356 non-zero, 0 degenerate columns. |
 | D Scale-free | pass | Price-only rescale of `close` (x8/x64/x10/x3.7): bit-identical on all 881 fired bars, matching NaN masks — OBV reads only the SIGN of `close.diff()`, so the numerator is untouched by ANY positive rescale, and the denominator (`SMA(volume, 20)`) does not read `close` at all. Volume-only rescale: bit-identical at x8/x64 (881/881 cells, max\|diff\| 0.0), within 8.216e-15 / 6.606e-15 at x10/x3.7 (well under the 1e-9 test tolerance, matching house convention). `0 < 881 < 900` fires, 881 distinct values (non-constant). Re-run clean with `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_rd_obv_dev5_cpu.py`): same 17/17 tests pass — no exact bit-count or digit beyond a stated tolerance is pinned, so the CPU-variant kernels on a GitHub runner cannot break this suite. |
-| E Attribution | pass (DISCLOSE) | Launcher's Gate E run `is177-rd_obv_dev5-33cccf3e` (2026-11-26), module sha1 `62fa548b6c3016bd7ca6ffed965576e1fa7c79a9`, 89 frames, 398,849 pooled bars, 687 comparators (329 compute_all + 358 manifest), canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS, 0 degenerate columns. `RD_OBV_DEV5_5_20`: max \|ρ\| 0.7877381604286016 vs `Dist_to_FWMA_pct_Pctl` (manifest, n = 392,431); per-frame max median 0.7931577002282519 vs `Dist_to_FWMA_pct`. Verdict `DISCLOSE` (0.76 ≤ 0.7877 < 0.80), 0.0% of 89 frames at per-frame ρ ≥ 0.90. Matches the prototype's own screen measurement (0.7877) bit-for-bit. Ledger row recorded: `docs/gate_e_ledger.csv` (`rd_obv_dev5,RD_OBV_DEV5_5_20,DISCLOSE,...,is177-rd_obv_dev5-33cccf3e,2026-11-26`). |
+| E Attribution | pass (DISCLOSE) | Launcher's Gate E run `is177-rd_obv_dev5-33cccf3e` (2026-11-26), module sha1 `084688f6ee7b85ef8085afa939328246cc48610a`, `pandas_ta_src_sha1` `62fa548b6c3016bd7ca6ffed965576e1fa7c79a9`, 89 frames, 398,849 pooled bars, 687 comparators (329 compute_all + 358 manifest), canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS, 0 degenerate columns. `RD_OBV_DEV5_5_20`: max \|ρ\| 0.7877381604286016 vs `Dist_to_FWMA_pct_Pctl` (manifest, n = 392,431); per-frame max median 0.7931577002282519 vs `Dist_to_FWMA_pct`. Verdict `DISCLOSE` (0.76 ≤ 0.7877 < 0.80), 0.0% of 89 frames at per-frame ρ ≥ 0.90. Agrees with the prototype's own screen measurement to every digit the issue publishes (0.7877, per-frame 0.7932, n = 392,431). Ledger row recorded: `docs/gate_e_ledger.csv` (`rd_obv_dev5,RD_OBV_DEV5_5_20,DISCLOSE,...,is177-rd_obv_dev5-33cccf3e,2026-11-26`). |
 | F Suites | this repo only (per the porting rules, the launcher runs both whole suites) | `python -m pytest -q tests/test_rd_obv_dev5.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`: see "Final suite run" below. Whole suites: run by issue-solver in clean worktrees (see the PR body). |
 
 ## Wiring counts, read back
@@ -72,12 +72,24 @@ below.
 ## Receipt session — Gate E recorded, SHIP
 
 The launcher's Gate E run (`is177-rd_obv_dev5-33cccf3e`, 2026-11-26) landed at `DISCLOSE`
-(0.7877, matching the prototype's own screen measurement bit-for-bit), under the 0.80
-`DISCLOSE_GAP` line and far under the 0.90 `STRUCK` line. Per the issue's Gates owed and this
-fork's Gate E bands, `DISCLOSE` ships as-is — no column removed, no revert. Ledger row recorded in
-`docs/gate_e_ledger.csv` (`python docs/gate_e_ledger.py record
+(0.7877, agreeing with the prototype's own screen measurement to every digit the issue
+publishes), under the 0.80 `DISCLOSE_GAP` line and far under the 0.90 `STRUCK` line. Per the
+issue's Gates owed and this fork's Gate E bands, `DISCLOSE` ships as-is — no column removed, no
+revert. Ledger row recorded in `docs/gate_e_ledger.csv` (`python docs/gate_e_ledger.py record
 /home/tolga/.issue-solver/runs/20261126-180108-177/gatee/is177-rd_obv_dev5-33cccf3e --measured
 2026-11-26`).
+
+`pandas_ta/volume/rd_obv_dev5.py`'s docstring still reads "This session's own Gate E run is
+owed; see docs/RdObvDev5Measured.md" — left as written on purpose: any edit to that file moves
+`module_sha1` off run `is177-rd_obv_dev5-33cccf3e`, so the docstring stays a stale pin and the
+live result is this file, not the module.
+
+Gate D's price-only bit-identity claim ("ANY positive factor") is exact in real arithmetic but
+is a float-level guarantee only for a power-of-two factor; a non-power-of-two factor can round
+two adjacent closes to the same scaled value, flipping a `+1` diff sign to `0` and moving every
+later OBV bar. Measured bit-identical at x8/x64 (power-of-two) and within tolerance at x10/x3.7;
+sub-ulp close ties are the only theoretical exception, and they do not occur on the measured
+frames (real closes are far more than an ulp apart).
 
 ## Receipt session suite run
 
