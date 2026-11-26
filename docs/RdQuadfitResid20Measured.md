@@ -20,10 +20,7 @@ poster's words — the issue discloses them as the prototype's own scale-free fo
 as the `length` default and the fixed ddof=0 recipe, following the same pattern as issue
 #179's "p = 20" / "3p" and issue #166's "40 bars, knots 5..34."
 
-**Status:** Gates A-D, F measured. Gate E: pending, run by issue-solver after this session --
-round 1 review forced a Gate D fix (Decision 3) that changed the module's code (and so its
-sha1), which stales the Gate E run this tree previously carried; that row is removed from
-`docs/gate_e_ledger.csv` until the re-run.
+**Status:** Gates A-F measured. Ships: DISCLOSE_GAP, not STRUCK.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -137,15 +134,11 @@ Synthetic, from the port session:
 - **A window with a non-finite `log(close)` reads NaN** by construction
   (`test_nonfinite_window_reads_nan`); not observed on the random synthetic frames above (no
   injected non-finite values there), which is expected, not a defect.
-- **Real-data reachability** was measured once, on the round-1 module (before Decision 3's
-  Gate D fix): run `is180-rd_quadfit_resid_20-457a93c0` (2026-11-27) recorded `non_nan`
+- **Real-data reachability**, round 2 run on the fixed module (`is180-rd_quadfit_resid_20-2e3d7c9e`,
+  2026-11-27, `pandas_ta_src_sha1` `e65f49cab1a0f9fb36737d6a031529cbc642f35b`): `non_nan`
   397,158, `non_zero` 397,158 of 398,849 pooled bars across the 89 ALTPORT-1 frames
-  (`overlap_max.csv`). That run's `pandas_ta_src_sha1` no longer matches the fixed module
-  (Decision 3 changed the module's own sha1), so it is not re-stated as this tree's own
-  measurement; the ledger row is removed and this count is owed again on the next Gate E run.
-  `rd_knot_dslope_40`'s own round-2 Gate E re-run after an identical fix reconfirmed its ρ to
-  the 13th significant digit (`docs/RdKnotDslope40Measured.md`), so this count is expected,
-  not merely hoped, to reproduce — but it is not asserted here until re-measured.
+  (`overlap_max.csv`) — unchanged from round 1, confirming the Gate D fix did not move
+  reachability.
 
 ## Gate D — scale-free
 
@@ -174,32 +167,21 @@ Synthetic, from the port session:
 
 ## Gate E — attribution
 
-**Pending, run by issue-solver after this session.** Round 1 was measured once, on the
-pre-Decision-3 module: run `is180-rd_quadfit_resid_20-457a93c0` (2026-11-27), module
+Round 2, run by issue-solver on the fixed module (post-Decision-3):
+`is180-rd_quadfit_resid_20-2e3d7c9e` (2026-11-27), module
 `pandas_ta.statistics.rd_quadfit_resid_20`, 89 ALTPORT-1 frames, 398,849 pooled bars, 687
 comparators (329 `compute_all` + 358 `ml_features` manifest), canary bit-equal on AKBNK.IS /
-BIENY.IS / AGHOL.IS / SASA.IS, `pandas_ta_src_sha1` `6c03de9c7e550be764e9234f0bbfd57af5212a78`:
+BIENY.IS / AGHOL.IS / SASA.IS, `pandas_ta_src_sha1` `e65f49cab1a0f9fb36737d6a031529cbc642f35b`:
 
 | column | max \|ρ\| | against | n | perframe max median \|ρ\| | verdict |
 |---|---|---|---|---|---|
-| `RD_QUADFIT_RESID_20` | 0.8343003635723028 | `cfo_ta_Pctl` (manifest) | 392,886 | 0.8356157515953884 | DISCLOSE_GAP |
+| `RD_QUADFIT_RESID_20` | 0.834300363578934 | `cfo_ta_Pctl` (manifest) | 392,886 | 0.8356157515953884 | DISCLOSE_GAP |
 
-Next comparator (`compute_all`): `cfo` 0.8030023191691446, n = 397,158. Matches the screen
-prototype's own quoted figures (0.8343 / 0.8356 vs `cfo_ta_Pctl`) to the digit.
-
-That run's `pandas_ta_src_sha1` no longer matches this tree: Decision 3's Gate D fix (fitting
-on `log(window / window's own first close)` instead of `log(window)`) changed the module's own
-sha1 from `6c03de9c7e...` to `657050f8a6be60e6ec724e6e5b516ef1c15e7e20` (measured,
-`python docs/measure_rd_quadfit_resid_20.py`). Per the issue-solver's override rules, Gate E is
-not re-run in this session; the round-1 row is removed from `docs/gate_e_ledger.csv` so the
-ledger does not assert a measurement against code that no longer exists, and
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` fails locally as a
-result — expected, not a finding, per the issue-solver's own rules. The Gate D fix changes
-each residual by at most ~3e-12 relative (see Gate D above), and the sibling port
-`rd_knot_dslope_40`'s own round-2 Gate E re-run after an identical fix reconfirmed its ρ to the
-13th significant digit against the same comparator (`docs/RdKnotDslope40Measured.md`), so the
-figures above are expected, not merely hoped, to reproduce on re-run — but they are not
-re-asserted as this tree's own measurement until that run happens.
+Next comparator (`compute_all`): `cfo` 0.8030023191927524, n = 397,158. Matches round 1's
+pre-fix figures (0.8343003635723028 / 0.8356157515953884) to 10 significant digits — the Gate D
+fix's ~3e-12 relative change does not move ρ at this precision, confirming the sibling port
+`rd_knot_dslope_40`'s round-2 reconfirmation pattern. **Band: DISCLOSE_GAP (0.80 ≤ ρ < 0.90),
+not STRUCK** — ships per `docs/gate_e_ledger.csv`'s recorded verdict.
 
 ## Gate F — suites
 
@@ -212,10 +194,8 @@ python -m pytest -q tests/test_rd_quadfit_resid_20.py tests/test_readme_counts.p
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,718 passed, 7 skipped, 1 failed** -- round 2, after Decision 3's Gate D fix removed the
-stale round-1 ledger row: `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-fails because Gate E is owed again (expected, per the issue-solver's own rules, not a finding).
-`tests/test_rd_quadfit_resid_20.py` alone: 20 passed.
+**1,726 passed, 7 skipped, 0 failed** -- receipt session, after recording the round-2 Gate E
+ledger row (DISCLOSE_GAP). `tests/test_rd_quadfit_resid_20.py` alone: 20 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub runner
 without AVX-512 — the four features issue-solver's rules name, not this machine's full
