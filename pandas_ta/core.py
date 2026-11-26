@@ -2941,6 +2941,11 @@ class AnalysisIndicators(BasePandasObject):
         result = vortex(high=high, low=low, close=close, drift=drift, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def stiffness(self, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = stiffness(close=close, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def swing_equilibrium(self, left=None, right=None, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
@@ -3474,6 +3479,14 @@ class AnalysisIndicators(BasePandasObject):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = fn_baspn_net(high=high, low=low, close=close, volume=volume, slow=slow, fast=fast, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def fve(self, length=None, cutoff=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = fve(high=high, low=low, close=close, volume=volume, length=length, cutoff=cutoff, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def g191_040(self, length=None, offset=None, **kwargs):
