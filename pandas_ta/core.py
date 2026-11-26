@@ -3319,6 +3319,12 @@ class AnalysisIndicators(BasePandasObject):
         result = range_profile(high=high, low=low, close=close, lookback=lookback, ob_os_level=ob_os_level, bins=bins, min_range_pct=min_range_pct, require_coherent_bars=require_coherent_bars, emit_osc=emit_osc, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rd_range100_pct500(self, length=None, pctlen=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        result = rd_range100_pct500(high=high, low=low, length=length, pctlen=pctlen, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def rogers_satchell(self, length=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         high = self._get_column(kwargs.pop("high", "high"))
