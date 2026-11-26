@@ -26,6 +26,7 @@ from .pdist import pdist
 from .range_compress_run import range_compress_run
 from .range_profile import range_profile
 from .natr import natr
+from .rd_range_contraction import rd_range_contraction
 from .rogers_satchell import rogers_satchell
 from .roll_spread import roll_spread
 from .rvi import rvi
@@ -36,5 +37,6 @@ from .true_range import true_range
 from .ttr_snr_20 import ttr_snr_20
 from .ui import ui
 from .volvol import volvol
+from .wavepm import wavepm
 from .wvma import wvma
 from .yang_zhang import yang_zhang

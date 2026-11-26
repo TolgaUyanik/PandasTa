@@ -61,8 +61,8 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    **210** bars after the warm-up (1,277 of 1,500 fire).
 
 Every number above is printed by `python docs/measure_vwd.py`; the
-asserted bounds (1e-9) are this file's own constants. Gate E is OWED, not
-measured here (`docs/VwdMeasured.md` §E).
+asserted bounds (1e-9) are this file's own constants. Gate E: SHIP, 0.3060
+vs `Dist_to_Nearest_Fib_pct`, the owner's run at merge time (`docs/VwdMeasured.md` §E1).
 
 NOT pinned here: the poster's claim that the column times anything, the
 2-sigma band and the RSI filter (none ships), and real-data reachability,
@@ -575,7 +575,7 @@ def test_the_docstrings_first_paragraph_survives_the_dictionary_cut():
     assert _generator_desc()({"desc": full}) == full
 
 
-def test_the_receipt_says_gate_e_is_owed():
+def test_the_receipt_states_the_gate_e_verdict():
     text = (ROOT / "docs" / "VwdMeasured.md").read_text(encoding="utf-8")
-    assert "Gate E" in text and "OWED" in text
+    assert "## §E Gate E — SHIP" in text
     assert "VWD_7_14" in text

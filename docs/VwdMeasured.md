@@ -36,11 +36,9 @@ constants, not run output.
 ## Verdict
 
 Gates A–D are cleared on synthetic frames, and the column is wired through
-all five touch points. **Gate E is OWED:** it cannot run in this worktree,
-and no row is recorded in `docs/gate_e_ledger.csv`. The launcher runs
-`gate_e_overlap.py run --module pandas_ta.momentum.vwd --name vwd` and
-records the row. Real-data reachability (Gate C's second limb) is reported by
-that run's sample size.
+all five touch points. **Gate E: SHIP**, 0.3060 vs `Dist_to_Nearest_Fib_pct`
+(§E1; owner's run `pr397-vwd` at merge time, 2026-11-26, recorded in
+`docs/gate_e_ledger.csv`). Real-data reachability (Gate C's second limb) is in §C3.
 
 Choices made in the port:
 
@@ -177,9 +175,9 @@ exact mid-range), and 4,837 have |v| <= 1.
   one reads exactly 0.0 (max |v| 0.000e+00) because `madif` is zero. This is
   why "not a constant column" is asserted on the varying frames only.
 
-### C3 real data — OWED to Gate E
+### C3 real data — from the port's Gate E run
 
-Not measured here; the port's Gate E run reports it. §E0's n = 383,681 is
+386,440 non-NaN and 380,081 non-zero bars, pooled over the 89 BIST frames (§E1). §E0's n = 383,681 is
 the PAIRWISE sample against `Dist_to_Nearest_Fib_pct` on the prototype, so
 it cannot be read as this column's fire count.
 
@@ -197,7 +195,7 @@ it cannot be read as this column's fire count.
 * **D4** 1,487 of 1,500 fire on every varying frame, so `0 < fires < n`
   holds.
 
-## §E Gate E — OWED
+## §E Gate E — SHIP
 
 ### §E0 what the screen measured, on the PROTOTYPE (issue #202, quoted)
 
@@ -211,9 +209,14 @@ decides its band.
 
 ### §E1 the port's run
 
-**OWED.** It is not run here and no ledger row is recorded;
-`tests/test_gate_e_ledger.py` reports it as a "Gate E owed" skip under
-`GATE_E_PENDING_OK=1`.
+Run `pr397-vwd` (2026-11-26, at merge time; not printed by `docs/measure_vwd.py`), 89 BIST
+frames, 687 comparators, recorded in `docs/gate_e_ledger.csv`.
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---:|---|---:|---:|---|
+| `VWD_7_14` | 0.3060 | `Dist_to_Nearest_Fib_pct` (manifest) | 383,555 | 0.3131 | SHIP |
+
+Next comparators: `er_Pctl` (manifest) 0.2100, `EFFICIENCY_RATIO` (compute_all) 0.2066.
 
 ## §L in-fork overlap — a DISCLOSURE, not Gate E
 
