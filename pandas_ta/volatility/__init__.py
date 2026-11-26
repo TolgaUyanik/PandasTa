@@ -23,6 +23,7 @@ from .j_damiani import j_damiani
 from .kc import kc
 from .massi import massi
 from .pdist import pdist
+from .rd_range_contraction import rd_range_contraction
 from .range_compress_run import range_compress_run
 from .range_profile import range_profile
 from .natr import natr

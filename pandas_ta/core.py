@@ -3269,6 +3269,12 @@ class AnalysisIndicators(BasePandasObject):
         result = range_compress_run(high=high, low=low, cap=cap, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rd_range_contraction(self, n=None, short=None, long=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        result = rd_range_contraction(high=high, low=low, n=n, short=short, long=long, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def range_profile(self, lookback=None, ob_os_level=None, bins=None, min_range_pct=None, require_coherent_bars=True, emit_osc=False, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
