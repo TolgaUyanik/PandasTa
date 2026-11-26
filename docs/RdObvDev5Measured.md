@@ -6,7 +6,7 @@ PandasTa issue #177. Source: Reddit, tier 4 (ResearchIntel kb/reddit.db): r/algo
 OBV_SMA. OBV SMA is a simple moving average of OBV on a 5 day count." Claimed use: SPY put-selling
 trigger claimed 100% success over 10 years.
 
-**Status: Gates A–D measured. Gate E: pending, run by issue-solver after this session.**
+**Status: Gates A–F measured. SHIP (DISCLOSE band).**
 `rd_obv_dev5` is wired into `Category["volume"]`.
 
 Shipped: `pandas_ta/volume/rd_obv_dev5.py`, one column `RD_OBV_DEV5_{length}_{vol_length}` (default
@@ -44,9 +44,9 @@ defaults, not hard constants, per this fork's fixed-suffix-port convention (`osa
 |---|---|---|
 | A Correctness | pass | An independent recompute (calls this fork's own, already-tested `obv()`, then a plain NumPy loop for both SMAs and the division — never the module's own `sma()` helper) matches the shipped column on 681 of 681 compared bars of a 700-bar synthetic close/volume walk, max\|diff\| 6.162e-15. `length=1` reduces the numerator to identically 0.0 on all 681 fired bars, pinning that a 1-bar SMA of OBV is OBV itself. |
 | B Causality | pass | 9-offset future-perturbation sweep (whole tail from bar j onward scaled x1000 on both close and volume): real module leaks at 0 of 9. A mutant (`importlib`-read source, OBV shifted one bar toward the future with `.shift(-1)` before the SMAs, `exec`'d in memory) is live (differs from the real module) and leaks at 9 of 9 — a plain cumulative-sum shift moves every downstream bar, unlike a median's single-outlier robustness, so the mutant is caught at every swept offset. |
-| C Reachability | pass | Synthetic: 900-bar close/volume walk (seed 11, σ=0.02): 881 of 900 finite (19-bar warm-up: `max(length, vol_length) - 1` = 19), 881 distinct values, range [-3.438930, 2.896876]. Ten independent 900-bar seeds: 881 non-NaN of 900 on every seed, 881 distinct values each. Real-data reachability: owed, from the launcher's Gate E run. |
+| C Reachability | pass | Synthetic: 900-bar close/volume walk (seed 11, σ=0.02): 881 of 900 finite (19-bar warm-up: `max(length, vol_length) - 1` = 19), 881 distinct values, range [-3.438930, 2.896876]. Ten independent 900-bar seeds: 881 non-NaN of 900 on every seed, 881 distinct values each. Real data (launcher's Gate E run, 89 BIST frames, 398,849 pooled bars): 397,148 non-NaN, 396,356 non-zero, 0 degenerate columns. |
 | D Scale-free | pass | Price-only rescale of `close` (x8/x64/x10/x3.7): bit-identical on all 881 fired bars, matching NaN masks — OBV reads only the SIGN of `close.diff()`, so the numerator is untouched by ANY positive rescale, and the denominator (`SMA(volume, 20)`) does not read `close` at all. Volume-only rescale: bit-identical at x8/x64 (881/881 cells, max\|diff\| 0.0), within 8.216e-15 / 6.606e-15 at x10/x3.7 (well under the 1e-9 test tolerance, matching house convention). `0 < 881 < 900` fires, 881 distinct values (non-constant). Re-run clean with `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_rd_obv_dev5_cpu.py`): same 17/17 tests pass — no exact bit-count or digit beyond a stated tolerance is pinned, so the CPU-variant kernels on a GitHub runner cannot break this suite. |
-| E Attribution | pending | Gate E: pending, run by issue-solver after this session. Prototype measured on the screen (2026-10-25, issue #177, NOT re-run in this session — quoted, not re-measured): max \|ρ\| 0.7877 vs `Dist_to_FWMA_pct_Pctl` (manifest, n = 392,431), top-5 per-frame max median 0.7932 — DISCLOSE. Next comparators: `Dist_to_FWMA_pct` 0.7871, `aobv_AOBV_LR_2` 0.7632. Stage-2 fork overlap (not Gate E): max \|ρ\| 0.8724 vs `szo:SZO_14`, per-frame max median 0.8783 — not a restatement at the 0.90 line. |
+| E Attribution | pass (DISCLOSE) | Launcher's Gate E run `is177-rd_obv_dev5-33cccf3e` (2026-11-26), module sha1 `62fa548b6c3016bd7ca6ffed965576e1fa7c79a9`, 89 frames, 398,849 pooled bars, 687 comparators (329 compute_all + 358 manifest), canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS, 0 degenerate columns. `RD_OBV_DEV5_5_20`: max \|ρ\| 0.7877381604286016 vs `Dist_to_FWMA_pct_Pctl` (manifest, n = 392,431); per-frame max median 0.7931577002282519 vs `Dist_to_FWMA_pct`. Verdict `DISCLOSE` (0.76 ≤ 0.7877 < 0.80), 0.0% of 89 frames at per-frame ρ ≥ 0.90. Matches the prototype's own screen measurement (0.7877) bit-for-bit. Ledger row recorded: `docs/gate_e_ledger.csv` (`rd_obv_dev5,RD_OBV_DEV5_5_20,DISCLOSE,...,is177-rd_obv_dev5-33cccf3e,2026-11-26`). |
 | F Suites | this repo only (per the porting rules, the launcher runs both whole suites) | `python -m pytest -q tests/test_rd_obv_dev5.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`: see "Final suite run" below. Whole suites: run by issue-solver in clean worktrees (see the PR body). |
 
 ## Wiring counts, read back
@@ -59,20 +59,30 @@ defaults, not hard constants, per this fork's fixed-suffix-port convention (`osa
 
 ## Final suite run
 
+Round 1 (`docs/RdObvDev5Measured.md` port session), `python -m pytest -q tests/test_rd_obv_dev5.py
+tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py
+tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py
+tests/test_prose_counts_match_the_csvs.py` — 1,699 passed, 7 skipped, 1 failed, measured 2026-11-26.
+The 1 failure was `tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
+expected: `rd_obv_dev5` had no ledger row until the launcher's Gate E run.
+
+Round 2 (this receipt session), after recording the ledger row: see "Receipt session suite run"
+below.
+
+## Receipt session — Gate E recorded, SHIP
+
+The launcher's Gate E run (`is177-rd_obv_dev5-33cccf3e`, 2026-11-26) landed at `DISCLOSE`
+(0.7877, matching the prototype's own screen measurement bit-for-bit), under the 0.80
+`DISCLOSE_GAP` line and far under the 0.90 `STRUCK` line. Per the issue's Gates owed and this
+fork's Gate E bands, `DISCLOSE` ships as-is — no column removed, no revert. Ledger row recorded in
+`docs/gate_e_ledger.csv` (`python docs/gate_e_ledger.py record
+/home/tolga/.issue-solver/runs/20261126-180108-177/gatee/is177-rd_obv_dev5-33cccf3e --measured
+2026-11-26`).
+
+## Receipt session suite run
+
 `python -m pytest -q tests/test_rd_obv_dev5.py tests/test_readme_counts.py
 tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py
 tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py`
-— 1,699 passed, 7 skipped, 1 failed, measured 2026-11-26. The 1 failure is
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, expected per the
-porting rules: `rd_obv_dev5` has no ledger row until the launcher's Gate E run and a later receipt
-session record it. Re-run under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"`
-(`docs/measure_rd_obv_dev5_cpu.py`, this module only): 17 passed. Both repos' whole suites: run by
-issue-solver in clean worktrees (see the PR body).
-
-## Next step
-
-The launcher runs Gate E; a receipt session records the measured number and the ledger row in
-`docs/gate_e_ledger.csv`, replacing this file's "pending" lines. If the launcher's run lands at or
-above the `DISCLOSE_GAP`/`STRUCK` band (the prototype's own screen measurement, 0.7877, sits in
-`DISCLOSE`, close to the 0.80 `DISCLOSE_GAP` line), the receipt session states the band and ships
-disclosed, per the prototype's own reading — no code change is anticipated from that number alone.
+— 1,707 passed, 7 skipped, 0 failed, measured 2026-11-26 (the ledger test now passes: the row is
+recorded). Both repos' whole suites: run by issue-solver in clean worktrees (see the PR body).
