@@ -900,6 +900,14 @@ class AnalysisIndicators(BasePandasObject):
         result = ha(open_=open_, high=high, low=low, close=close, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rd_gap_fill(self, min_gap=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_gap_fill(open_=open_, high=high, low=low, close=close, min_gap=min_gap, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def rd_horseshoe(self, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))
         high = self._get_column(kwargs.pop("high", "high"))
@@ -912,6 +920,14 @@ class AnalysisIndicators(BasePandasObject):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
         result = rd_outside_bar(high=high, low=low, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def rd_uwick_atr(self, length=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_uwick_atr(open_=open_, high=high, low=low, close=close, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def rd_wick_pressure_10(self, length=None, offset=None, **kwargs):
@@ -2219,6 +2235,12 @@ class AnalysisIndicators(BasePandasObject):
         close = self._get_column(kwargs.pop("close", "close"))
         result = rd_gap_fill_rate_60(open_=open_, high=high, low=low, close=close,
                                      length=length, min_gap=min_gap, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def rd_knot_dslope_40(self, length=None, knot_margin=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_knot_dslope_40(close=close, length=length, knot_margin=knot_margin,
+                                   offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def rd_knot_pos_40(self, length=None, knot_margin=None, offset=None, **kwargs):
@@ -3586,6 +3608,13 @@ class AnalysisIndicators(BasePandasObject):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
         result = rd_corr_c_obv_20(close=close, volume=volume, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def rd_vwio_10(self, length=None, offset=None, **kwargs):
+        open_ = self._get_column(kwargs.pop("open", "open"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = rd_vwio_10(open_=open_, close=close, volume=volume, length=length, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def tod_profile(self, length=None, bb_length=None, bb_std=None,

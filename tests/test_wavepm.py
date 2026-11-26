@@ -7,11 +7,12 @@
 
 What this file pins, in order of how much it would hurt to lose:
 
-⚠ **Gate A is OWED (source unread).** finta's `WAVEPM` source was not read
-and none of its lines are cited, so the port is NOT cleared through Gates
-A-F; issue #261 stays open for the attended reader. What follows checks
-the module only against an oracle written from the same issue text.
-
+0. **Gate A against finta's own code.** `_finta_wavepm` transcribes
+   peerchemist/finta@af01fa5 `finta/finta.py` L2279-L2303 (master only; no
+   finta release carries `WAVEPM`), 3.2 constant and hand-written tanh
+   included. Identical NaN masks on all eight frames, max |diff| 3.33e-16
+   on the seven moving frames (2.22e-16 on `coarse`; `flat` fires nowhere
+   in either); the test asserts 1e-12.
 1. **Gate A limb, the issue's finta form by explicit loops.** `_oracle` sums
    every window bar by bar -- no rolling, no code shared with the module --
    and matches it with identical NaN masks on all eight synthetic frames
@@ -19,9 +20,6 @@ the module only against an oracle written from the same issue text.
    (length, lookback) (5, 20), (20, 50), (30, 200) on `walk` and `coarse`,
    max |diff| 3.15e-10. Not bit-equal: pandas' rolling sums are online, the
    oracle's are not. The test asserts 1e-9.
-   ⚠ finta's source itself was not readable in this session (no network),
-   so Gate A is against the issue's transcription of finta, not against
-   finta's line numbers; the issue's definition is the contract here.
 2. **The readings not taken.** ddof = 1 rescales every r by one constant,
    which cancels in r / rms: measured max |diff| 3.3e-16 .. 5.6e-16 between
    the ddof 0 and ddof 1 oracles on the seven moving frames. The
@@ -50,7 +48,8 @@ the module only against an oracle written from the same issue text.
 
 Non-redundancy (synthetic, a disclosure, not Gate E): per-frame median
 |rho| vs `CHOP_14_1_100` 0.7930 on these seven frames, `ER_10` 0.5462, `NATR_14`
-0.3938, `J_DAMIANI_13_40` 0.3773, `BBB_5_2.0` 0.3302. Gate E is owed.
+0.3938, `J_DAMIANI_13_40` 0.3773, `BBB_5_2.0` 0.3302. Gate E on real data:
+DISCLOSE_GAP, see `docs/gate_e_ledger.csv` and docs/WavepmMeasured.md.
 
 Every number above is printed by `python docs/measure_wavepm.py` on this
 tree. Assertions are bounds and structural relations rather than the
@@ -295,6 +294,33 @@ def test_offset_and_fillna_do_what_the_kwargs_say():
 
 
 # ------------------------------------------------------------------ Gate A
+
+
+def _finta_wavepm(close, period=LENGTH, lookback_period=LOOKBACK):
+    """peerchemist/finta@af01fa5 finta/finta.py L2279-L2303, transcribed."""
+    ma = close.rolling(window=period).mean()
+    std = close.rolling(window=period).std(ddof=0)
+
+    def tanh(x):
+        two = np.where(x > 0, -2, 2)
+        ex = np.exp(two * x)
+        return np.where(x > 0, 1 - ex, ex - 1) / (1 + ex)
+
+    dev = 3.2 * std
+    power = np.power(dev / ma, 2)
+    variance = Series(power).rolling(window=lookback_period).sum() / lookback_period
+    with np.errstate(invalid="ignore"):
+        return Series(tanh(dev / (np.sqrt(variance) * ma)), index=close.index)
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_gate_a_matches_finta_wavepm(name):
+    """Identical NaN masks, values within 1e-12 (measured max 3.3e-16)."""
+    c = _c(FRAMES[name]())
+    col, ref = wavepm(c), _finta_wavepm(c)
+    assert bool((col.isna() == ref.isna()).all())
+    if col.notna().any():
+        assert _maxdiff(col, ref) <= 1e-12
 
 
 @pytest.mark.parametrize("name", NAMES)

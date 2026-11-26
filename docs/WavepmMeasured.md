@@ -8,10 +8,10 @@ of the book with a formula was readable (issue #261, 2026-11-08). The definition
 divided by the mean, and finta's constant 3.2, which multiplies both numerator and denominator,
 cancels and is left out. The math is ported, not the code. The ProRealCode port (which does not
 divide by the mean) is the reading not taken (§A4). Nothing here tests predictive value.
-**Status: Gate A OWED (source unread). Gate E owed. Issue #261 stays open for the attended
-reader.** finta's `WAVEPM` source was not read and none of its lines are cited, so this port is
-NOT cleared through Gates A–F. §A1 checks the module only against an oracle written from the
-same issue text. It does not show that either one matches finta.
+**Status (2026-11-26): Gate A cleared against finta's own code (§A0). Gate E DISCLOSE_GAP,
+0.8088 vs `CHOP` (§E).** §A0 and §E were added at merge time and are NOT printed by
+`docs/measure_wavepm.py`: §A0 comes from `tests/test_wavepm.py::test_gate_a_matches_finta_wavepm`,
+§E from the Gate E harness run recorded in `docs/gate_e_ledger.csv`.
 **Measured:** 2026-11-23, on this tree, by `python docs/measure_wavepm.py`
 (pandas 2.3.3, numpy 1.26.4). Every figure below is printed by that script.
 
@@ -22,21 +22,31 @@ same issue text. It does not show that either one matches finta.
 
 ## ⚠ What this port does NOT establish
 
-- **Gate E is owed.** It cannot run here; the owner records the `docs/gate_e_ledger.csv` row.
-  Until then `tests/test_gate_e_ledger.py` reports it as a "Gate E owed" skip on the way to `dev`.
-- **Gate A is OWED: finta's source was not read.** There was no network access, and finta is not
-  installed. The only limb is the issue's transcription of finta, by explicit loops, and it cites
-  no finta line numbers. Still owed against `finta/finta.py`: finta's warm-up (`min_periods`), how
-  it handles a zero rms, whether the 3.2 constant cancels in finta's code and not only in the
-  issue's reading, and its sqrt/variance step. §A4 shows that ddof cannot move the column beyond
-  5.6e-16. To clear the gate: cite the `WAVEPM` lines in the module docstring and in §A1, and add
-  a limb that checks the oracle against finta's own expressions.
-- **Gate C on real data** is not measured here. Every count below is synthetic.
+- **Gate C on real data** is measured only as the Gate E run's counts (§E): 388,881 non-NaN,
+  388,879 non-zero bars pooled over the 89 frames. Every count in §C is synthetic.
 - **Non-redundancy (§F) is synthetic.** It is a disclosure, not Gate E.
 
 ---
 
-## A1 Gate A (OWED, source unread) — the issue's finta form by explicit loops
+## A0 Gate A — finta's own code
+
+finta's `WAVEPM` is on its GitHub master only; no PyPI release carries it (1.3 has none).
+Source: peerchemist/finta@af01fa5 `finta/finta.py` L2262-L2303.
+
+- L2279-L2280: `ma = rolling(period).mean()`, `std = rolling(period).std(ddof=0)` — mu, sigma.
+- L2299-L2300: `dev = 3.2 * std`, `power = (dev / ma) ** 2` — 3.2² · r².
+- L2293-L2295: `variance = rolling(lookback).sum(power) / lookback`, `calc_dev = sqrt(variance) * ma`,
+  `y = dev / calc_dev` — 3.2 · r · mu / (3.2 · rms · mu) = r / rms, so the 3.2 cancels.
+- L2282-L2290: a hand-written tanh, (1 − e^{−2x}) / (1 + e^{−2x}) for x > 0 and its mirror
+  otherwise — tanh(x).
+- Warm-up: finta's rolling windows use the default `min_periods` = window, so it is NaN on the
+  same first length + lookback − 2 bars; a zero rms gives 0/0 = NaN in both.
+
+`tests/test_wavepm.py::_finta_wavepm` transcribes those lines (constant and tanh included).
+Against it the module has identical NaN masks on all eight frames, max |diff| 3.33e-16 on the
+seven moving frames (2.22e-16 on `coarse`).
+
+## A1 Gate A — the issue's finta form by explicit loops
 
 `_oracle` sums every window bar by bar. It uses no rolling window and shares no code with the module.
 
@@ -136,7 +146,7 @@ bit-identical. The values sit within 6.807e-11 / 2.741e-11 / 3.667e-11 of level 
 | `bbands` `BBB_5_2.0` | 0.3302 | 0.3751 |
 
 The medians are per frame over the seven moving frames. `CHOP_14_1_100` sits in the 0.76–0.80
-DISCLOSE band on these synthetic frames. Gate E on real data decides the verdict.
+DISCLOSE band on these synthetic frames. Gate E on real data decides the verdict: DISCLOSE_GAP (§E).
 
 ## G Bad bars
 
@@ -163,3 +173,16 @@ The docstring's first paragraph is 131 characters, and the dictionary's `desc()`
 whole. Cost on this machine: about 10 ms for 100,000 bars and about 35 ms for 400,000 bars, varying
 from run to run (two runs printed 8–10 ms and 33–35 ms). Peak memory was about 6 MB and
 about 23 MB.
+
+## E Gate E — real data (2026-11-26)
+
+`gate_e_overlap.py run --module pandas_ta.volatility.wavepm --name pr378-wavepm`, 89 BIST
+frames, 687 comparators, recorded in `docs/gate_e_ledger.csv`.
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---:|---|---:|---:|---|
+| `WAVEPM_14_100` | 0.8088 | `CHOP` (compute_all) | 388,831 | 0.8200 (`CHOP`) | DISCLOSE_GAP |
+
+Next comparators: `BB_BWidth_Pctl` (manifest) 0.7184, `chop` 0.7004. DISCLOSE_GAP is not STRUCK,
+so no waiver is needed; the overlap with `CHOP` is disclosed here. Share of frames with a
+per-frame |ρ| ≥ 0.90: 0.0.

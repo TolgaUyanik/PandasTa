@@ -51,10 +51,14 @@ Mass). No text of the book with a formula was readable; the definition is
 finta's `WAVEPM` (`finta/finta.py`, LGPL-3.0) as transcribed in PandasTa
 issue #261: the standard deviation is divided by the mean, and finta's
 constant 3.2, which multiplies both numerator and denominator, cancels and
-is left out. The math is ported, not the code. Gate A is OWED: finta's
-source was not read and none of its lines are cited here. The ProRealCode port, which
-does NOT divide by the mean, is the reading not taken
-(`docs/WavepmMeasured.md` §A4).
+is left out. The math is ported, not the code. Gate A: finta's `WAVEPM`
+exists only on its GitHub master, not in a release (1.3 has none):
+peerchemist/finta@af01fa5 `finta/finta.py` L2279-L2303. L2279-L2280 are
+mu and sigma (ddof=0); L2299-L2300 dev = 3.2 * sigma, power = (dev / mu)**2;
+L2293-L2295 rms * mu over a rolling(lookback) sum / lookback, so the 3.2
+cancels in y = r / rms; L2282-L2290 a hand-written tanh, equal to np.tanh.
+The ProRealCode port, which does NOT divide by the mean, is the reading not
+taken (`docs/WavepmMeasured.md` §A4).
 
 ddof does not matter: a different ddof rescales every r by the same constant
 sqrt(n / (n - ddof)), which cancels in r / rms (§A4 measures the residue).
