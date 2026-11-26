@@ -28,6 +28,7 @@ from .range_profile import range_profile
 from .natr import natr
 from .rd_range100_pct500 import rd_range100_pct500
 from .rd_range_contraction import rd_range_contraction
+from .rd_std_ratio_20_60 import rd_std_ratio_20_60
 from .rogers_satchell import rogers_satchell
 from .roll_spread import roll_spread
 from .rvi import rvi

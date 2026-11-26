@@ -3319,6 +3319,11 @@ class AnalysisIndicators(BasePandasObject):
         result = rd_range_contraction(high=high, low=low, n=n, short=short, long=long, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rd_std_ratio_20_60(self, length=None, avg_length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_std_ratio_20_60(close=close, length=length, avg_length=avg_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def range_profile(self, lookback=None, ob_os_level=None, bins=None, min_range_pct=None, require_coherent_bars=True, emit_osc=False, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
