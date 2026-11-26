@@ -70,10 +70,9 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    module's finite guard is a **measured no-op** in all 12: pandas' rolling
    window already reads an infinite observation as NaN.
 
-6. **Gate E is OWED, not measured.** Contributors cannot run it; the row
-   goes into `docs/gate_e_ledger.csv` when the owner runs it.
-   `test_the_receipt_says_gate_e_is_pending` pins that the receipt does not
-   claim a verdict. The in-fork synthetic overlap is a disclosure only: the
+6. **Gate E: DISCLOSE_GAP, 0.8728 vs `SMA_50_200_Spread_pct`** (owner's run
+   at merge time, row in `docs/gate_e_ledger.csv`).
+   `test_the_receipt_states_the_gate_e_verdict` pins that the receipt says so. The in-fork synthetic overlap is a disclosure only: the
    nearest shipped column is `MADISP_200_SMA` at a per-frame median |rho|
    of **0.8099** over the six varying frames.
 
@@ -82,7 +81,7 @@ the exceptions `docs/StiffnessMeasured.md` lists (pytest's counts, the
 repo's wiring counts, and this file's ASSERTED bounds: 1e-9 for the inexact
 rescale, 100/60 for a mutant's catch).
 
-NOT pinned here: Gate E (owed), and anything on real data -- every frame in
+NOT pinned here: the Gate E run itself (the ledger test pins its row), and anything on real data -- every frame in
 this file is synthetic.
 """
 import importlib.util
@@ -633,9 +632,10 @@ def test_the_docstrings_first_paragraph_survives_the_dictionary_cut():
     assert "100-bar SMA" in cut
 
 
-def test_the_receipt_says_gate_e_is_pending():
-    """Gate E is owed: the receipt must say so and must not claim a band."""
+def test_the_receipt_states_the_gate_e_verdict():
+    """The receipt states the recorded Gate E band and its comparator."""
     doc = (ROOT / "docs" / "StiffnessMeasured.md").read_text(encoding="utf-8")
-    assert "Gate E: pending, run by issue-solver after this session" in doc
+    assert "**Gate E: DISCLOSE_GAP**" in doc
+    assert "SMA_50_200_Spread_pct" in doc
     assert "0.8099" in doc            # the synthetic disclosure, §L
     assert "MADISP_200_SMA" in doc

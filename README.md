@@ -4,9 +4,9 @@ Technical analysis indicators as a pandas extension. Fork of
 [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, extended with
 price-action / SMC indicators and oriented toward **machine-learning feature generation**.
 
-**399 indicators** registered in `Category`, across 9 categories — that is the number
+**406 indicators** registered in `Category`, across 9 categories — that is the number
 that matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two other
-counts are true of the same package and are easy to confuse with it: **407** are callable
+counts are true of the same package and are easy to confuse with it: **414** are callable
 as `df.ta.<name>()` (`Category` plus `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`,
 `up_and_down_volume`, `volume_delta` and `vp`), and `drawdown` and `ma` are
 importable as `ta.<name>()` without being either. All of them are in the dictionary; the
@@ -140,8 +140,8 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 
 `help(ta.<name>)` for the same per indicator.
 
-**candles (8)** — `cdl_doji` `cdl_inside` `cdl_pattern` `cdl_z` `ha` `rd_horseshoe`
-`rd_outside_bar` `rd_wick_pressure_10`
+**candles (10)** — `cdl_doji` `cdl_inside` `cdl_pattern` `cdl_z` `ha` `rd_gap_fill`
+`rd_horseshoe` `rd_outside_bar` `rd_uwick_atr` `rd_wick_pressure_10`
 
 **cycles (11)** — `correlation_cycle` `dsp` `ebsw` `ht` `ht_dcperiod` `ht_dcphase` `ht_phasor` `ht_sine` `ht_trendmode` `msw_lead` `msw_sine`
 
@@ -151,13 +151,13 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 
 **performance (8)** — `log_return` `max_return` `mtd_ret` `percent_return` `qtd_ret` `seas` `trend_return` `ytd_ret` (`cumulative=True` for cumulative)
 
-**statistics (82)** — `arch_lm` `c22_acf_first_min` `c22_ami2` `c22_ami_timescale` `c22_dfa` `c22_entropy_pairs` `c22_forecast_error` `c22_high_fluctuation` `c22_low_freq_power` `c22_median_freq` `c22_mode_10` `c22_mode_5` `c22_outlier_timing_neg` `c22_outlier_timing_pos` `c22_periodicity` `c22_stretch_decreasing` `covariance` `cusum` `diff1_pacf5` `diff2_acf1` `entlz` `entropy` `ffd` `firstzero_ac` `flat_spots` `g191_026` `g191_044` `g191_165` `g191_189` `g191_190` `halflife` `ie_asym` `kpss` `kurtosis` `lean_hurst_100` `lean_tdd_20` `level_shift_idx` `level_shift_size` `lot_zeroret_60` `lumpiness` `mad` `median` `median_ad_hl2` `normalize` `osap_retskew_21` `quantile` `rank` `rd_gap_fill_rate_60` `rd_knot_pos_40` `rolling_sum` `skew` `stability` `stdev` `stl_seasonal_strength` `stl_spikiness` `stl_trend_strength` `tf_autocorr_1e_60` `tf_centroid_20` `tf_dfa_100` `tf_higuchi_30` `tf_iqr_ret_60` `tf_spec_entropy_64` `tf_zero_cross_20` `trend_scan` `ts_above_mean_20` `ts_ac1_60` `ts_aggac_60` `ts_binent_20` `ts_c3_20` `ts_cid_ce_20` `ts_cross_mean_20` `ts_energy_last_20` `ts_imq_20` `ts_kurt_60` `ts_medskew_20` `ts_peaks_20` `ts_perment_20` `ts_q05_60` `ts_reoccur_20` `ts_strike_20` `variance` `zscore`
+**statistics (83)** — `arch_lm` `c22_acf_first_min` `c22_ami2` `c22_ami_timescale` `c22_dfa` `c22_entropy_pairs` `c22_forecast_error` `c22_high_fluctuation` `c22_low_freq_power` `c22_median_freq` `c22_mode_10` `c22_mode_5` `c22_outlier_timing_neg` `c22_outlier_timing_pos` `c22_periodicity` `c22_stretch_decreasing` `covariance` `cusum` `diff1_pacf5` `diff2_acf1` `entlz` `entropy` `ffd` `firstzero_ac` `flat_spots` `g191_026` `g191_044` `g191_165` `g191_189` `g191_190` `halflife` `ie_asym` `kpss` `kurtosis` `lean_hurst_100` `lean_tdd_20` `level_shift_idx` `level_shift_size` `lot_zeroret_60` `lumpiness` `mad` `median` `median_ad_hl2` `normalize` `osap_retskew_21` `quantile` `rank` `rd_gap_fill_rate_60` `rd_knot_dslope_40` `rd_knot_pos_40` `rolling_sum` `skew` `stability` `stdev` `stl_seasonal_strength` `stl_spikiness` `stl_trend_strength` `tf_autocorr_1e_60` `tf_centroid_20` `tf_dfa_100` `tf_higuchi_30` `tf_iqr_ret_60` `tf_spec_entropy_64` `tf_zero_cross_20` `trend_scan` `ts_above_mean_20` `ts_ac1_60` `ts_aggac_60` `ts_binent_20` `ts_c3_20` `ts_cid_ce_20` `ts_cross_mean_20` `ts_energy_last_20` `ts_imq_20` `ts_kurt_60` `ts_medskew_20` `ts_peaks_20` `ts_perment_20` `ts_q05_60` `ts_reoccur_20` `ts_strike_20` `variance` `zscore`
 
 **trend (67)** — `adx` `adxr` `amat` `aroon` `atr_push` `band_cross_retest` `bdi4kewl` `bos` `choch` `chop` `cksp` `decay` `decreasing` `dpo` `dtdb` `dx` `equal_highs_lows` `flag_breakout` `fvg` `fvg_sweep_magnet` `g191_069` `g191_098` `halftrend` `head_shoulders` `increasing` `inverse_fvg` `j_chandelier_dist` `j_kaufmanstop_dist` `j_safezone_dist` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `pmax` `priorday_fib` `priormonth_range` `psar` `qstick` `rejection_blocks` `renko_trend` `ribbon_concordance` `rounding_cup` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `stiffness` `swing_equilibrium` `tdi` `triangle_wedge` `triple_top_bottom` `tsignals` `ttm_trend` `tvstop` `vhf` `volume_sr_zones` `vortex` `vstop` `vstop2` `xsignals` `zigzag` `zigzag_fib`
 
-**volatility (39)** — `aberration` `accbands` `atr` `atr2` `atr_ma_multiple` `bbands` `corwin_schultz` `cvi` `donchian` `edge` `g191_023` `g191_109` `g191_158` `g191_160` `g191_174` `g191_188` `garman_klass` `har_park` `hwc` `inrange_count` `j_damiani` `kc` `massi` `natr` `pdist` `range_compress_run` `range_profile` `rogers_satchell` `roll_spread` `rvi` `sk_fcb_width` `tf_median_absdiff_20` `thermo` `true_range` `ttr_snr_20` `ui` `volvol` `wvma` `yang_zhang`
+**volatility (41)** — `aberration` `accbands` `atr` `atr2` `atr_ma_multiple` `bbands` `corwin_schultz` `cvi` `donchian` `edge` `g191_023` `g191_109` `g191_158` `g191_160` `g191_174` `g191_188` `garman_klass` `har_park` `hwc` `inrange_count` `j_damiani` `kc` `massi` `natr` `pdist` `range_compress_run` `range_profile` `rd_range_contraction` `rogers_satchell` `roll_spread` `rvi` `sk_fcb_width` `tf_median_absdiff_20` `thermo` `true_range` `ttr_snr_20` `ui` `volvol` `wavepm` `wvma` `yang_zhang`
 
-**volume (45)** — `a101_026` `a101_035` `a101_058` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `demand` `efi` `eom` `fn_baspn_net` `g191_040` `g191_043` `g191_076` `g191_080` `g191_111` `g191_144` `g191_145` `g191_191` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `osap_voltrend_60` `pocket_pivot` `pvcorr` `pvi` `pvol` `pvr` `pvt` `rd_corr_c_obv_20` `tod_profile` `tri_dir_pressure` `vfi` `vol_delta` `vol_sign_rev` `volcv` `vpci` `vsumd` `vzo` `weis_wave`
+**volume (47)** — `a101_026` `a101_035` `a101_058` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `demand` `efi` `eom` `fn_baspn_net` `fve` `g191_040` `g191_043` `g191_076` `g191_080` `g191_111` `g191_144` `g191_145` `g191_191` `kvo` `maxvol_adv` `mfi` `nvi` `obv` `osap_voltrend_60` `pocket_pivot` `pvcorr` `pvi` `pvol` `pvr` `pvt` `rd_corr_c_obv_20` `rd_vwio_10` `tod_profile` `tri_dir_pressure` `vfi` `vol_delta` `vol_sign_rev` `volcv` `vpci` `vsumd` `vzo` `weis_wave`
 
 Present but outside `Category`, so skipped by `df.ta.strategy()`: `beta`, `drawdown`,
 `hwma`, `vp`, `ma` (moving-average selector — `help(ta.ma)`), and the two lower-timeframe

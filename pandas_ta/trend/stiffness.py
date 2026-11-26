@@ -143,7 +143,8 @@ bar 700 -- and moves no other bar (§G1).
 
 ⚠ In-fork overlap, on synthetic frames and NOT Gate E: the nearest shipped
 column is `ma_disparity`'s `MADISP_200_SMA`, per-frame median |rho| 0.8099
-over the six varying frames (0.3375 .. 0.8447). Gate E is owed (§E).
+over the six varying frames (0.3375 .. 0.8447). Gate E on real data:
+DISCLOSE_GAP, 0.8728 vs `SMA_50_200_Spread_pct` (§E).
 
 Calculation:
     Default Inputs:

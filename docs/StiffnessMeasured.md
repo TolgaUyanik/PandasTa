@@ -123,8 +123,8 @@ Every value on every frame is a multiple of 100/60. Pooled over the six
 varying frames: **8,052** fired bars, **1,244** at 0, **605** at 100,
 **6,203** strictly between.
 
-⚠ **Gate C's real-data limb is OWED** with Gate E: no real frame is
-readable in this worktree.
+Gate C on real data (from the Gate E run, §E): 384,787 non-NaN and 340,451 non-zero bars, pooled
+over the 89 BIST frames.
 
 ## §C2 Gate C — the tie: a close exactly ON its band
 
@@ -196,11 +196,17 @@ direction.
 
 ## §E Gate E
 
-**Gate E: pending, run by issue-solver after this session.** Contributors
-cannot run it (private engine, BIST cache); `docs/gate_e_ledger.csv` has no
-row, which `tests/test_gate_e_ledger.py` reports as "Gate E owed" under
-`GATE_E_PENDING_OK=1`. If the run is STRUCK, the column is reverted or
-waived before the release.
+**Gate E: DISCLOSE_GAP** (measured 2026-11-26 at merge time, run `pr395-stiffness`, recorded in
+`docs/gate_e_ledger.csv`; not printed by `docs/measure_stiffness.py`). 89 BIST frames, 687
+comparators.
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---:|---|---:|---:|---|
+| `STIFF_60` | 0.8728 | `SMA_50_200_Spread_pct` (manifest) | 381,138 | 0.8699 | DISCLOSE_GAP |
+
+Next comparators: `Ret_126d_pct` 0.8192, `Dist_to_SMA_200_pct` 0.8009 (both manifest); highest in
+`compute_all`: `support_touches_60` 0.7467. Not STRUCK, so no waiver is needed; the overlap with
+the long-trend manifest columns is disclosed here.
 
 ## §F Suites
 
