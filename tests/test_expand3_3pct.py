@@ -42,9 +42,9 @@ What this file pins, in order of how much it would hurt to lose:
    moving frame (`trend` 43 +1 / 0 -1, `range-bound` 30 / 20), never on
    `calm` (0.5% bars) or `flat` (§C). Fires are therefore asserted only on
    the frames where they were measured nonzero.
-5. **Gate E is OWED.** Not run on the port; the issue's prototype measured
-   max |rho| 0.2935 vs `Dist_to_FWMA_pct` (n = 397,692) -> SHIP, but a
-   prototype is not a port. No ledger row yet.
+5. **Gate E: SHIP**, run on the port at merge time (`pr399-expand3_3pct`):
+   max |rho| 0.2935 vs `Dist_to_FWMA_pct` (n = 397,692), the prototype's
+   figures reproduced. The row is in `docs/gate_e_ledger.csv`.
 
 ⚠ Counts are NOT pinned to the digits measured: the frames use `np.exp` /
 `np.cumsum`, so a different numpy kernel can move a price across a 3%

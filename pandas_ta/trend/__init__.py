@@ -51,6 +51,7 @@ from .sphinx_unicorn import sphinx_unicorn
 from .sr_corridor import sr_corridor
 from .sr_decay import sr_decay
 from .sr_force import sr_force
+from .stiffness import stiffness
 from .swing_equilibrium import swing_equilibrium
 from .tdi import tdi
 from .tsignals import tsignals

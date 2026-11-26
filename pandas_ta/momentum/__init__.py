@@ -80,6 +80,7 @@ from .trix import trix
 from .trixh import trixh
 from .tsi import tsi
 from .uo import uo
+from .vwd import vwd
 from .vwmacd import vwmacd
 from .wavetrend import wavetrend
 from .willr import willr
