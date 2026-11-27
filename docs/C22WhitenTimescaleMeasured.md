@@ -14,7 +14,7 @@ PandasTa issue **#139** (C22-WHITEN-TIMESCALE), ported 2026-11-27 on branch
 | Gate B | causal; 0 of 43 offsets leak on six frames; four look-ahead mutants (write-back-dated, window-one/ten-ahead, returns-rolled) all live and caught 43/43 of 43 offsets each; the floor-removal mutant is inert on all six synthetic frames (none reaches it) — §B |
 | Gate C | fires on every bar with a full window on all six synthetic frames; up to 1,400 distinct (continuous) values; not constant on five of six (the cosine frame is near-constant by construction); the tick-rounded penny frame (21.68% exactly-zero returns) still fires on every eligible bar — §C |
 | Gate D | ×8/×64/×2⁻⁴⁰/×2⁴⁰ bit-identical (24/24 cells, including on `penny`); worst |diff| 6.2e-13 under ×10/×3.7/×0.1/×1.0000001 inexact return rescale on the `walk` frame; `0 < fires < n`; not constant — §D |
-| Gate E | pending, run by issue-solver after this session |
+| Gate E | max \|ρ\| **0.2521** vs `mad_pct` (manifest, n = 389,949), per-frame max median 0.2504 vs `Swing_Range_pct` → **SHIP** — §E |
 | Gate F | PandasTa green (38 module tests, both dispatches; required subset below); whole suites run by issue-solver in clean worktrees — §F |
 
 Every number below was produced by `python docs/measure_c22_whiten_timescale.py`
@@ -222,10 +222,18 @@ range wider than 0.01; `cosine` is near-constant by construction (§C).
 
 ## E. Gate E — attribution
 
-Gate E: pending, run by issue-solver after this session, per
-`../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py run --module
-pandas_ta.statistics.c22_whiten_timescale --name c22_whiten_timescale`.
-Recorded in `docs/gate_e_ledger.csv` once measured.
+Measured 2026-11-27 by the issue-solver launcher,
+`gate_e_overlap.py run --module pandas_ta.statistics.c22_whiten_timescale`,
+89 ALTPORT-1 frames, 398,849 pooled bars, 329 + 358 = 687 comparators,
+canary bit-equal (`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS`). Output:
+`docs/gate_e_ledger.csv` row `c22_whiten_timescale`.
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | per-frame max median against | verdict |
+|---|---|---|---|---|---|---|
+| `C22WHITENTIMESCALE_100` | 0.2521 | `mad_pct` (manifest) | 389,949 | 0.2504 | `Swing_Range_pct` | **SHIP** |
+
+0.2521 is well under the 0.76 ship line and the per-frame max median is well
+under the 0.90 struck line (`r3-perframe-0.90` bands) — the column ships.
 
 ## F. Gate F — suites
 
@@ -235,7 +243,7 @@ Recorded in `docs/gate_e_ledger.csv` once measured.
 | the same under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_c22_whiten_timescale_cpu.py`) | **38 passed** |
 | `python docs/measure_c22_whiten_timescale_cpu.py A B C D G` — re-measured under the disabled dispatch | every structural figure (fires, distinct-count bounds, mutant catch counts, bit-identical cells) identical to the default-dispatch run; float values agree to float noise, not digit-for-digit; `cosine`'s distinct-value count moved by 1 (160 -> 159), the one figure this fork's rules say not to pin exactly |
 | `python docs/measure_c22_whiten_timescale_cpu.py P` — the GPL-3.0 black box re-measured under the disabled dispatch | identical to the default-dispatch run: 0 of 8,400 disagree beyond 1e-9, worst |diff| 1.6e-12 |
-| `python -m pytest -q tests/test_c22_whiten_timescale.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` | **1,784 passed, 7 skipped, 1 failed** — the 1 failure is `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`, expected until the launcher's Gate E run and the receipt record this port's ledger row (per the issue's own rules) |
+| `python -m pytest -q tests/test_c22_whiten_timescale.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` (receipt session, after the ledger row was recorded) | **1,792 passed, 7 skipped** |
 
 Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
