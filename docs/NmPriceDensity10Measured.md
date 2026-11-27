@@ -8,9 +8,9 @@ ch. 1 "Other Measurements of Noise" (ResearchIntel book chunk), not from
 either Reddit thread — neither states a formula. Existence, not evidence:
 nothing here tests Kaufman's own claim on real data.
 
-**Status:** Gates A-E measured below. Gate E: **SHIP** (max \|ρ\| 0.7289 vs
-`chop`, under the 0.76 ship line). Whole-suite run is owed to the launcher,
-per the issue-solver's own rules (it must not run the whole suite).
+**Status:** Gates A-F measured below. Gate E: **SHIP** (max \|ρ\| 0.7289 vs
+`chop`, under the 0.76 ship line). Whole suites green in the launcher's
+clean worktrees.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -159,10 +159,9 @@ general) on this synthetic frame's own occasional near-gap bars, not a bug.
 
 A window whose high equals its low across every bar (every bar a flat
 doji, constructed by setting `length` consecutive bars' high and low to
-the same constant) blanks exactly the bar whose OWN trailing window is
-entirely flat, and no other: once the window slides forward past the flat
-run it picks up a non-flat bar again and the ratio is defined
-(`test_a_flat_window_blanks_its_own_bar`). A window flat everywhere except
+the same constant) blanks the bar whose OWN trailing window is entirely
+flat, and the next bar is defined again once the window slides past the
+flat run (`test_a_flat_window_blanks_its_own_bar`). A window flat everywhere except
 its own LAST bar is never blanked
 (`test_a_non_flat_window_is_never_blanked`).
 
@@ -266,9 +265,10 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
   shortlist, and nothing else (checked: `git diff docs/IndicatorDictionary.md`).
 - `Category`: `nm_price_density_10` is placed alphabetically between
   `natr` and `pdist` in `volatility`.
-- Module sha1 (LF-normalised, for the later `docs/gate_e_ledger.csv` row):
-  `230938339b973a0afb9b9f58140fc375a7aa2dc2` (measured, `python
-  docs/measure_nm_price_density_10.py`).
+- Module sha1 (LF-normalised, for the `docs/gate_e_ledger.csv` row):
+  `780876290eca809775d3d70b0882f57bbd689576` (re-measured at HEAD, `python
+  docs/measure_nm_price_density_10.py`; matches `docs/gate_e_ledger.csv:113`
+  `module_sha1` and the launcher's `meta.json` `candidate_source_sha1`).
 
 ## Next step
 

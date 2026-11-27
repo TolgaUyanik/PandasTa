@@ -10,7 +10,8 @@ published chapter formula:
     NM_PRICE_DENSITY_10 = SUM(H - L, 10) / (MAX(H, 10) - MIN(L, 10))
 
 Gate A derivation, causality and scale-free arguments are in the module
-docstring. Gate E: pending, run by issue-solver after this session.
+docstring. Gate E: SHIP, max |rho| 0.7289 vs `chop` (run
+`is186-nm_price_density_10-dc9aa7c9`); row in `docs/gate_e_ledger.csv`.
 
 WHAT THIS FILE PINS, in order of how much it would hurt to lose.
 
