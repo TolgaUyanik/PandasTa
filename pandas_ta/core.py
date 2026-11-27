@@ -2276,6 +2276,11 @@ class AnalysisIndicators(BasePandasObject):
                                 offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rd_quadfit_resid_20(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_quadfit_resid_20(close=close, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def skew(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = skew(close=close, length=length, offset=offset, **kwargs)

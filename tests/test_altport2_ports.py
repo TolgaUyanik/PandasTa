@@ -193,7 +193,7 @@ REGISTERED = {
 #: docs/SeasMeasured.md). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
-CATEGORY_TOTAL = 416  # +1 on issue #181's rd_dip_depth_10_25 port (momentum; dip below the
+CATEGORY_TOTAL = 417  # +1 on issue #180's rd_quadfit_resid_20 port (statistics; last-bar residual of a 20-bar quadratic fit on log close, over the window's residual sd; Reddit tier 4, rd:algotrading:vgulql; Gate E DISCLOSE_GAP, 0.8343 vs `cfo_ta_Pctl` (per-frame max median 0.8356), run is180-rd_quadfit_resid_20-2e3d7c9e, measured 2026-11-27; see docs/RdQuadfitResid20Measured.md), +1 on issue #181's rd_dip_depth_10_25 port (momentum; dip below the
 # 10-day high in average-range units (10, 25): (HHV(high, 10) - close) / (SMA(high, 25) -
 # SMA(low, 25)); Reddit tier 4, rd:algotrading:1rjvxjy; Gate E DISCLOSE_GAP, 0.8401 vs
 # `kdj_J_9_3` (per-frame max median 0.8497 vs `Dist_to_Tenkan_pct`), run
