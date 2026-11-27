@@ -4,9 +4,9 @@ Technical analysis indicators as a pandas extension. Fork of
 [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, extended with
 price-action / SMC indicators and oriented toward **machine-learning feature generation**.
 
-**420 indicators** registered in `Category`, across 9 categories — that is the number
+**421 indicators** registered in `Category`, across 9 categories — that is the number
 that matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two other
-counts are true of the same package and are easy to confuse with it: **428** are callable
+counts are true of the same package and are easy to confuse with it: **429** are callable
 as `df.ta.<name>()` (`Category` plus `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`,
 `up_and_down_volume`, `volume_delta` and `vp`), and `drawdown` and `ma` are
 importable as `ta.<name>()` without being either. All of them are in the dictionary; the
@@ -155,7 +155,7 @@ warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDict
 
 **trend (71)** — `adx` `adxr` `amat` `aroon` `atr_push` `band_cross_retest` `bdi4kewl` `bos` `choch` `chop` `cksp` `decay` `decreasing` `dpo` `dtdb` `dx` `equal_highs_lows` `expand3_3pct` `flag_breakout` `fvg` `fvg_sweep_magnet` `g191_069` `g191_098` `halftrend` `head_shoulders` `increasing` `inverse_fvg` `j_chandelier_dist` `j_kaufmanstop_dist` `j_safezone_dist` `liquidity_compression_box` `liquidity_sweep` `long_run` `nwog` `ob` `pivot` `pmax` `priorday_fib` `priormonth_range` `psar` `qstick` `rd_adx3_med10` `rd_adx8_med20` `rd_lh_run` `rejection_blocks` `renko_trend` `ribbon_concordance` `rounding_cup` `sd_zone_pro` `short_run` `smc_sweep` `sphinx_unicorn` `sr_corridor` `sr_decay` `sr_force` `stiffness` `swing_equilibrium` `tdi` `triangle_wedge` `triple_top_bottom` `tsignals` `ttm_trend` `tvstop` `vhf` `volume_sr_zones` `vortex` `vstop` `vstop2` `xsignals` `zigzag` `zigzag_fib`
 
-**volatility (43)** — `aberration` `accbands` `atr` `atr2` `atr_ma_multiple` `bbands` `corwin_schultz` `cvi` `donchian` `edge` `g191_023` `g191_109` `g191_158` `g191_160` `g191_174` `g191_188` `garman_klass` `har_park` `hwc` `inrange_count` `j_damiani` `kc` `massi` `natr` `pdist` `range_compress_run` `range_profile` `rd_range100_pct500` `rd_range_contraction` `rd_std_ratio_20_60` `rogers_satchell` `roll_spread` `rvi` `sk_fcb_width` `tf_median_absdiff_20` `thermo` `true_range` `ttr_snr_20` `ui` `volvol` `wavepm` `wvma` `yang_zhang`
+**volatility (44)** — `aberration` `accbands` `atr` `atr2` `atr_ma_multiple` `bbands` `corwin_schultz` `cvi` `donchian` `edge` `g191_023` `g191_109` `g191_158` `g191_160` `g191_174` `g191_188` `garman_klass` `har_park` `hwc` `inrange_count` `j_damiani` `kc` `massi` `natr` `nm_price_density_10` `pdist` `range_compress_run` `range_profile` `rd_range100_pct500` `rd_range_contraction` `rd_std_ratio_20_60` `rogers_satchell` `roll_spread` `rvi` `sk_fcb_width` `tf_median_absdiff_20` `thermo` `true_range` `ttr_snr_20` `ui` `volvol` `wavepm` `wvma` `yang_zhang`
 
 **volume (49)** — `a101_026` `a101_035` `a101_058` `ad` `adosc` `amihud` `aobv` `avwap_z` `bw_mfi` `cmf` `demand` `efi` `eom` `fn_baspn_net` `fve` `g191_040` `g191_043` `g191_076` `g191_080` `g191_111` `g191_144` `g191_145` `g191_191` `kvo` `maxvol_adv` `mfi` `nm_effort_result_20` `nvi` `obv` `osap_voltrend_60` `pocket_pivot` `pvcorr` `pvi` `pvol` `pvr` `pvt` `rd_corr_c_obv_20` `rd_obv_dev5` `rd_vwio_10` `tod_profile` `tri_dir_pressure` `vfi` `vol_delta` `vol_sign_rev` `volcv` `vpci` `vsumd` `vzo` `weis_wave`
 
