@@ -3512,6 +3512,15 @@ class AnalysisIndicators(BasePandasObject):
                           min_samples=min_samples, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def b2_vol_above_mid_20(self, length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = b2_vol_above_mid_20(high=high, low=low, close=close, volume=volume,
+                                      length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def bw_mfi(self, length=None, raw=False, offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
         low = self._get_column(kwargs.pop("low", "low"))
