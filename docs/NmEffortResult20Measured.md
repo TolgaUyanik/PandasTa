@@ -12,9 +12,9 @@ here is a faithful translation of the issue's own stated expression, not a
 derivation checked against a separate citation. Existence, not evidence:
 nothing here tests Wyckoff's claim on real data.
 
-**Status:** Gates A-D measured below, verdict not yet determined (Gate E
-pending). Whole-suite run is owed to the launcher, per the issue-solver's
-own rules (it must not run the whole suite).
+**Status:** Gates A-E measured, verdict **SHIP**: `NM_EFFORT_RESULT_20` stays.
+Whole-suite run is owed to the launcher, per the issue-solver's own rules
+(it must not run the whole suite).
 
 | module | category | column | range |
 |---|---|---|---|
@@ -185,15 +185,26 @@ onward NaN when `high == low` throughout).
 
 ## Gate E — attribution
 
-Run by the launcher. The screen prototype's own pre-port measurement
-(issue text, `docs/issues/screen/candidates_r7.csv`): max \|ρ\| **0.6713**
-vs `vol_at_low_ratio` (`compute_all`, n = 395,776), top-5 per-frame max
-median **0.6329** → **SHIP** at the prototype stage (`screen_r7_20261025`,
-89 ALTPORT-1 frames, 398,849 bars, 329 + 358 comparators, canary bit-equal).
-Next comparators: `VOL_RATIO` and `Volume_Ratio_20`, also 0.6713. This
-port's own re-run is pending — the issue-solver must not run Gate E itself.
+Run by the launcher on this port's own module (not the prototype),
+`pandas_ta.volume.nm_effort_result_20` (run id
+`is185-nm_effort_result_20-778ca091`, 89 ALTPORT-1 frames, 395,776 pooled
+non-NaN cells, 329 `compute_all` + 358 manifest = 687 comparators, canary
+`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS` bit-equal):
 
-**Gate E: pending, run by issue-solver after this session.**
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `NM_EFFORT_RESULT_20` | 0.6713024265308349 | `vol_at_low_ratio` (`compute_all`) | 395,776 | 0.6329256333921097 | **SHIP** |
+
+Matches the screen prototype's own pre-port measurement (issue text,
+`docs/issues/screen/candidates_r7.csv`): max \|ρ\| 0.6713 vs
+`vol_at_low_ratio`, top-5 per-frame max median 0.6329 → SHIP. Next
+comparators (both also 0.6713): `VOL_RATIO`, `Volume_Ratio_20`. 0.6713 is
+below the DISCLOSE line (0.76) and the per-frame median is below 0.90 on
+every one of the 89 frames (`perframe_pct_frames_ge_090` = 0.0): neither
+the pooled STRUCK (≥ 0.90) nor the per-frame-median STRUCK (≥ 0.90 on a
+top-5 comparator) band applies. **Verdict: SHIP.** Recorded in
+`docs/gate_e_ledger.csv` (`python docs/gate_e_ledger.py record
+<run dir> --measured 2026-11-27`).
 
 ## Gate F — suites
 
@@ -207,11 +218,10 @@ python -m pytest -q tests/test_nm_effort_result_20.py tests/test_readme_counts.p
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,775 passed, 1 failed, 7 skipped.** The 1 failure is
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-owed for `['nm_effort_result_20']` only — expected per the issue-solver's
-own rules (this session must not run Gate E or record the ledger row).
-`tests/test_nm_effort_result_20.py` alone: **37 passed.**
+Receipt session re-run, after recording the Gate E ledger row:
+**1,783 passed, 7 skipped, 0 failed.** The prior owed-row failure
+(`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`)
+is now clear. `tests/test_nm_effort_result_20.py` alone: **37 passed.**
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in
 for a GitHub runner without AVX-512 — the four features issue-solver's
@@ -247,9 +257,6 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
 ## Next step
 
-Gates A-D measured and clean. Gate E owed to the launcher; once run, record
-the ledger row (`python docs/gate_e_ledger.py record <run dir> --measured
-YYYY-MM-DD`) and update this file's Gate E section with the result (SHIP /
-DISCLOSE / DISCLOSE_GAP ships disclosed, STRUCK reverts per the issue's own
-"Done when" clause: a measured revert closes the issue exactly as well as
-a ship).
+None. Gates A-F measured, verdict SHIP, ledger row recorded, this port's
+own test module and the wiring/ledger/readme suites green. Whole-suite
+run is the launcher's.
