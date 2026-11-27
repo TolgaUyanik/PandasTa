@@ -9,9 +9,9 @@ zeroline, find volume for those." Existence, not evidence: nothing here
 tests the poster's claimed use (supply/demand imbalance, support/resistance
 at the resulting split).
 
-**Status:** Gates A-D measured in this session. Gate E: pending, run by
-issue-solver after this session. Whole-suite run is owed to the launcher,
-per the issue-solver's own rules (it must not run the whole suite).
+**Status:** Gates A-E measured, SHIP. Whole-suite run is owed to the
+launcher, per the issue-solver's own rules (it must not run the whole
+suite).
 
 | module | category | column | range |
 |---|---|---|---|
@@ -189,9 +189,17 @@ zero-range-blanks-everything pattern.
 
 ## Gate E — attribution
 
-Pending, run by issue-solver after this session, against
-`pandas_ta.volume.b2_vol_above_mid_20`. Recorded afterward in
-`docs/gate_e_ledger.csv` and transcribed here by the receipt session.
+Run by issue-solver (`gate_e_overlap.py run --module pandas_ta.volume.b2_vol_above_mid_20`),
+89 ALTPORT-1 frames, 398,849 pooled bars, 687 comparators (329 `compute_all`
++ 358 manifest), canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS.
+Recorded in `docs/gate_e_ledger.csv`, measured 2026-11-28.
+
+| column | max \|rho\| | against | n | per-frame max median \|rho\| | verdict |
+|---|---|---|---|---|---|
+| `B2_VOL_ABOVE_MID_20` | 0.3431828168190431 | `skew` | 396,258 | 0.3441936038332621 | SHIP |
+
+0.3432 < 0.76 (SHIP line, `r3-perframe-0.90` band). Not a restatement of any
+existing column. Ships as-is.
 
 ## Gate F — suites
 
@@ -205,11 +213,10 @@ python -m pytest -q tests/test_b2_vol_above_mid_20.py tests/test_readme_counts.p
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,788 passed, 7 skipped, 1 failed.** The one failure is
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
-— expected per the issue-solver's own rules: this port owes a Gate E
-ledger row, recorded by a later receipt session after the launcher's Gate E
-run. `tests/test_b2_vol_above_mid_20.py` alone: **34 passed.**
+**1,796 passed, 7 skipped, 0 failed** (re-run by the receipt session after
+recording the Gate E ledger row: the prior session's single failure,
+`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
+is now closed). `tests/test_b2_vol_above_mid_20.py` alone: **34 passed.**
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in
 for a GitHub runner without AVX-512 — the four features issue-solver's
@@ -246,7 +253,4 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
 ## Next step
 
-Gate E: run by issue-solver after this session, against
-`pandas_ta.volume.b2_vol_above_mid_20`. A receipt session records the Gate E
-ledger row and transcribes the measured numbers here; whole-suite run is the
-launcher's.
+Shipped through Gates A-E; whole-suite run is the launcher's (Gate F).
