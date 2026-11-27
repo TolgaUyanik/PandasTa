@@ -38,6 +38,7 @@ from .lumpiness import lumpiness
 from .mad import mad
 from .median import median
 from .median_ad_hl2 import median_ad_hl2
+from .nm_mmi_250 import nm_mmi_250
 from .osap_retskew_21 import osap_retskew_21
 from .quantile import quantile
 from .rank import rank
