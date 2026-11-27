@@ -2857,6 +2857,13 @@ class AnalysisIndicators(BasePandasObject):
         result = rd_adx3_med10(high=high, low=low, close=close, adx_length=adx_length, length=length, mamode=mamode, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rd_adx8_med20(self, adx_length=None, length=None, mamode=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_adx8_med20(high=high, low=low, close=close, adx_length=adx_length, length=length, mamode=mamode, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def rejection_blocks(self, swing_len=None, min_wick_ratio=None, min_wick_atr=None,
                           atr_len=None, max_zones=None, offset=None, **kwargs):
         open_ = self._get_column(kwargs.pop("open", "open"))

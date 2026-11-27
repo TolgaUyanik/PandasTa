@@ -42,6 +42,7 @@ from .psar import psar
 from .sarext import sarext
 from .qstick import qstick
 from .rd_adx3_med10 import rd_adx3_med10
+from .rd_adx8_med20 import rd_adx8_med20
 from .rejection_blocks import rejection_blocks
 from .renko_trend import renko_trend
 from .ribbon_concordance import ribbon_concordance
