@@ -53,7 +53,7 @@ Category = {
     "momentum": [
         "a101_007", "a101_021", "a101_023", "a101_043", "a101_046", "a101_048", "a101_053", "ao", "apo", "bias", "bop", "brar", "cci", "cdvo", "cfo", "cg", "cmo",
         "coppock", "crsi", "cti", "dm", "er", "eri", "ewmac", "fisher", "g191_002", "g191_003", "g191_022", "g191_093", "g191_110", "g191_129", "g191_146", "g191_152", "g191_167", "g191_169", "g191_187", "gapm", "imi", "inertia", "j_acosc", "j_gator", "j_wae", "kalman_rsi", "kdj", "kst", "lean_momersion_20", "lrsi", "macd", "macd_area_divergence",
-        "mom", "osap_intmom", "osap_lrrev", "osap_mrrev", "ovn_split", "pfe", "pgo", "po", "ppo", "pressure_pulse", "psl", "pvo", "qqe", "roc", "rsi", "rsi_divergence", "rsx", "rvgi", "sk_fcb_pos", "sk_rocwb_ratio",
+        "mom", "osap_intmom", "osap_lrrev", "osap_mrrev", "ovn_split", "pfe", "pgo", "po", "ppo", "pressure_pulse", "psl", "pvo", "qqe", "rd_dip_depth_10_25", "roc", "rsi", "rsi_divergence", "rsx", "rvgi", "sk_fcb_pos", "sk_rocwb_ratio",
         "slope", "smi", "squeeze", "squeeze_pro", "stc", "stoch", "stochrsi", "tao", "td_seq", "trix",
         "trixh", "tsi", "uo", "vwd", "vwmacd", "wavetrend", "willr",
         "pzo", "szo", "wpo", "stc_tv"
@@ -83,7 +83,7 @@ Category = {
         "dpo", "dx", "equal_highs_lows", "expand3_3pct", "flag_breakout", "fvg", "fvg_sweep_magnet", "g191_069", "g191_098", "halftrend", "increasing", "inverse_fvg", "j_chandelier_dist", "j_kaufmanstop_dist", "j_safezone_dist", "liquidity_compression_box",
         "head_shoulders",
         "liquidity_sweep", "long_run",
-        "nwog", "ob", "pmax", "priorday_fib", "priormonth_range", "psar", "qstick", "rd_adx3_med10", "rejection_blocks", "renko_trend",
+        "nwog", "ob", "pmax", "priorday_fib", "priormonth_range", "psar", "qstick", "rd_adx3_med10", "rd_adx8_med20", "rejection_blocks", "renko_trend",
         "ribbon_concordance", "sd_zone_pro", "short_run", "smc_sweep", "sphinx_unicorn", "sr_corridor", "sr_decay", "sr_force", "stiffness", "swing_equilibrium", "tdi", "tsignals",
         "rounding_cup",
         "triangle_wedge", "triple_top_bottom",

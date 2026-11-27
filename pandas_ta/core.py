@@ -1415,6 +1415,13 @@ class AnalysisIndicators(BasePandasObject):
         result = qqe(close=close, length=length, smooth=smooth, factor=factor, mamode=mamode, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def rd_dip_depth_10_25(self, length=None, avg_length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_dip_depth_10_25(high=high, low=low, close=close, length=length, avg_length=avg_length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def roc(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = roc(close=close, length=length, offset=offset, **kwargs)
@@ -2860,6 +2867,13 @@ class AnalysisIndicators(BasePandasObject):
         low = self._get_column(kwargs.pop("low", "low"))
         close = self._get_column(kwargs.pop("close", "close"))
         result = rd_adx3_med10(high=high, low=low, close=close, adx_length=adx_length, length=length, mamode=mamode, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
+    def rd_adx8_med20(self, adx_length=None, length=None, mamode=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = rd_adx8_med20(high=high, low=low, close=close, adx_length=adx_length, length=length, mamode=mamode, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def rejection_blocks(self, swing_len=None, min_wick_ratio=None, min_wick_atr=None,
