@@ -8,9 +8,9 @@ ch. 1 "Other Measurements of Noise" (ResearchIntel book chunk), not from
 either Reddit thread — neither states a formula. Existence, not evidence:
 nothing here tests Kaufman's own claim on real data.
 
-**Status:** Gates A-D measured below, verdict not yet determined (Gate E
-pending). Whole-suite run is owed to the launcher, per the issue-solver's
-own rules (it must not run the whole suite).
+**Status:** Gates A-E measured below. Gate E: **SHIP** (max \|ρ\| 0.7289 vs
+`chop`, under the 0.76 ship line). Whole-suite run is owed to the launcher,
+per the issue-solver's own rules (it must not run the whole suite).
 
 | module | category | column | range |
 |---|---|---|---|
@@ -198,10 +198,25 @@ max \|ρ\| **0.7289** vs `chop` (`compute_all`, n = 397,450), top-5
 per-frame max median **0.7269** → **SHIP** at the prototype stage
 (`screen_r7_20261025`, 89 ALTPORT-1 frames, 398,849 bars, 329 + 358
 comparators, canary bit-equal). Next comparators: `CHOP` 0.6377,
-`EFFICIENCY_RATIO` 0.5283. This port's own re-run is pending — the
-issue-solver must not run Gate E itself.
+`EFFICIENCY_RATIO` 0.5283.
 
-**Gate E: pending, run by issue-solver after this session.**
+**Launcher's own re-run on the port module** (run `is186-nm_price_density_10-dc9aa7c9`,
+`NM_PRICE_DENSITY_10`): max \|ρ\| **0.7288775406417091** vs `chop`
+(`compute_all`, n = 397,450), per-frame max median \|ρ\| **0.7269026478909781**
+(89 frames, 0.0% of frames ≥ 0.90), manifest max \|ρ\| 0.5171 vs `er_Pctl`
+(n = 392,692), 687 comparators, 0 degenerate columns, canary bit-equal
+(`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS`). Matches the prototype's own
+pre-port number almost exactly (0.72888 vs 0.7289). The run's own
+`overlap_max.csv` reports verdict `SHIP`; CLAUDE.md's Gate E bands
+(`r3-perframe-0.90`) put the ship line at `< 0.76`, and this run's own max
+\|ρ\| is 0.7289 — under 0.76 — so the harness's own SHIP label and this
+fork's own band agree: **SHIP**, not DISCLOSE. Pooled 0.7289 < 0.90 and
+per-frame max median 0.7269 < 0.90, so not STRUCK either.
+
+**Gate E verdict: SHIP.** Recorded in `docs/gate_e_ledger.csv`
+(`python docs/gate_e_ledger.py record
+/home/tolga/.issue-solver/runs/20261127-183057-186/gatee/is186-nm_price_density_10-dc9aa7c9
+--measured 2026-11-27`).
 
 ## Gate F — suites
 
@@ -257,7 +272,5 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
 ## Next step
 
-Gate E owed to the launcher; once run, record the ledger row
-(`python docs/gate_e_ledger.py record <run dir> --measured YYYY-MM-DD`) and
-apply CLAUDE.md's thresholds. A STRUCK verdict means remove the module, its
-wiring and its tests, and keep this file as the receipt.
+None. Gate E ran SHIP, ledger row recorded, module stays. Done per the
+issue's own "Done when": shipped through Gates A-F with the numbers here.
