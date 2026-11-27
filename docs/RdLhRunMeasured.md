@@ -17,8 +17,8 @@ probability of a (long) reversal rises with the number of consecutive lower high
 reads the same way as the screen prototype (`docs/issues/screen/ind_screen_r6.py`'s
 `rd_lh_run`, `run_length(h < h.shift(1))`): `n_t = n_{t-1} + 1 if high_t < high_{t-1} else 0`.
 
-**Status:** Gates A-D measured below. Gate E and the whole-suite runs are owed to the
-launcher, per the issue-solver's own rules (it must not run Gate E or the whole suite).
+**Status:** shipped. Gates A-F measured below (Gate E by the launcher, Gate F whole suites by
+the launcher per the issue-solver's own rules).
 
 | module | category | column | range |
 |---|---|---|---|
@@ -147,16 +147,22 @@ Synthetic, from the port session:
 
 ## Gate E — attribution
 
-**Pending, run by issue-solver after this session.**
+Launcher's run on the shipped module, `pandas_ta.trend.rd_lh_run`
+(`is182-rd_lh_run-2043b0b4`, `gate_e_overlap.py run`, 89 ALTPORT-1 frames, pooled n = 398,849,
+687 comparators = 329 `compute_all` + 358 `ml_features` manifest, canary bit-equal on AKBNK.IS,
+BIENY.IS, AGHOL.IS, SASA.IS, measured 2026-11-27):
 
-For reference, the issue's own prototype measurement (NOT a measurement of this shipped
-module, made on a different harness/comparator set before this port existed): max |ρ| 0.8800
-vs `HIGHER_HIGH` (compute_all, n = 398,849), top-5 per-frame max median 0.8972 →
-DISCLOSE_GAP band; next comparators `HA_Body_Ratio` 0.6693, `HA_Body_Ratio_Pctl` 0.6669; a
-stage-2 fork-overlap check (not Gate E) measured max |ρ| 0.6750 vs `priorday_fib:PDFIB_HIGH`.
-These numbers describe the PROTOTYPE, not necessarily the shipped port — the launcher's own
-run on `pandas_ta.trend.rd_lh_run` is the number that counts, per the issue's own Gate E
-instruction ("re-run on the port").
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `RD_LH_RUN_100` | 0.8800 | `HIGHER_HIGH` (compute_all) | 398,849 | 0.8972 | DISCLOSE_GAP |
+
+Both the pooled figure (0.8800) and the top-5 per-frame max median (0.8972) sit in `[0.80,
+0.90)`, the `r3-perframe-0.90` DISCLOSE_GAP band in `CLAUDE.md` — below the 0.90 STRUCK line
+on both tests, so the column ships with this disclosure rather than being reverted. Next
+comparators on the launcher's run: `HA_Body_Ratio` 0.6693, `HA_Body_Ratio_Pctl` 0.6669.
+Matches the prototype's own prior measurement on the same formula (0.8800 / 0.8972 vs the
+same comparator), made on a different harness before this port existed. Ledger row recorded:
+`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-27`.
 
 ## Gate F — suites
 
@@ -169,11 +175,10 @@ python -m pytest -q tests/test_rd_lh_run.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,731 passed, 7 skipped, 1 failed**, measured 2026-11-27 before the ledger row exists. The
-one failure was `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` —
-expected at this point, per the issue-solver's own rules; the receipt session records the
-ledger row once the launcher's Gate E run lands, after which that test no longer fails on
-this port. `tests/test_rd_lh_run.py` alone: 17 passed.
+**1,739 passed, 7 skipped, 0 failed**, measured 2026-11-27, after the receipt session recorded
+the ledger row (`docs/gate_e_ledger.py record is182-rd_lh_run-2043b0b4 --measured 2026-11-27`):
+`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` now passes.
+`tests/test_rd_lh_run.py` alone: 17 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub runner
 without AVX-512 — the four features issue-solver's rules name, not this machine's full
@@ -198,7 +203,5 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
 ## Next step
 
-Launcher's Gate E run on `pandas_ta.trend.rd_lh_run`, then the receipt session records the
-ledger row (`docs/gate_e_ledger.py record ...`) and fills in the Gate E numbers above and the
-whole-suite results. Module sha1 for that record (LF-normalised,
-`python docs/measure_rd_lh_run.py`): `55eea8a029f95b4c4f964503258a6daf42832dc9`.
+None — Gates A-E measured, ledger row recorded, this session's own test subset green. Whole
+suites are the launcher's (see the PR body).
