@@ -229,10 +229,11 @@ python -m pytest -q tests/test_nm_price_density_10.py tests/test_readme_counts.p
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,777 passed, 1 failed, 7 skipped.** The 1 failure is
-`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
-owed for `['nm_price_density_10']` only — expected per the issue-solver's
-own rules (this session must not run Gate E or record the ledger row).
+Re-run at HEAD, after the Gate E ledger row was recorded (commit 79b4698):
+**1,785 passed, 7 skipped, 0 failed.** The prior owed-row failure
+(`tests/test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`,
+owed for `['nm_price_density_10']`) is now clear — `docs/gate_e_ledger.csv:113`
+carries the row.
 `tests/test_nm_price_density_10.py` alone: **31 passed** (30 at port time,
 +1 added during the Fletcher review round for the malformed-input
 regression, see Decisions item 3).

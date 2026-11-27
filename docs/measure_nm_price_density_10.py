@@ -5,8 +5,8 @@
 
 Run from the repo root. Uses tests/test_nm_price_density_10.py's synthetic
 frame and mutants; the real-data reachability count comes from the Gate E
-run recorded in docs/gate_e_ledger.csv (owed at port time), not from this
-script.
+run recorded in docs/gate_e_ledger.csv (run `is186-nm_price_density_10-dc9aa7c9`),
+not from this script.
 """
 import os
 import sys
