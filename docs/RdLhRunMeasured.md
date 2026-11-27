@@ -112,7 +112,9 @@ Synthetic, from the port session:
   above, not an outlier.
 - **`0 < fires < n`, not constant:** every seed above has both zero and nonzero bars and more
   than one distinct value; none is constant.
-- Real-data reachability is the launcher's Gate E run (owed).
+- **Real data (launcher's Gate E run `is182-rd_lh_run-2043b0b4`, 89 ALTPORT-1 frames):**
+  `RD_LH_RUN_100` non-NaN on 398,849 of 398,849 pooled bars, non-zero on 197,066 —
+  `0 < fires < n` on real data, not only synthetic.
 
 ## Gate D — scale-free
 
@@ -203,5 +205,5 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
 ## Next step
 
-None — Gates A-E measured, ledger row recorded, this session's own test subset green. Whole
+None — Gates A-F measured, ledger row recorded, this session's own test subset green. Whole
 suites are the launcher's (see the PR body).

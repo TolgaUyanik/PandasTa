@@ -195,8 +195,9 @@ REGISTERED = {
 #: shipping silently.
 CATEGORY_TOTAL = 417  # +1 on issue #182's rd_lh_run port (trend; run length of consecutive
 # lower highs: n[t] = n[t-1] + 1 if high[t] < high[t-1] else 0, built on ml_bars_since the
-# same way volatility's range_compress_run is; Reddit tier 4, rd:Trading:1gcotir; Gate E:
-# pending, run by issue-solver after this session; see docs/RdLhRunMeasured.md), +1 on
+# same way volatility's range_compress_run is; Reddit tier 4, rd:Trading:1gcotir; Gate E
+# DISCLOSE_GAP, 0.8800 vs `HIGHER_HIGH` (per-frame max median 0.8972 vs the same comparator),
+# run is182-rd_lh_run-2043b0b4; see docs/RdLhRunMeasured.md), +1 on
 # issue #181's rd_dip_depth_10_25 port (momentum; dip below the
 # 10-day high in average-range units (10, 25): (HHV(high, 10) - close) / (SMA(high, 25) -
 # SMA(low, 25)); Reddit tier 4, rd:algotrading:1rjvxjy; Gate E DISCLOSE_GAP, 0.8401 vs

@@ -5,8 +5,8 @@
 
 Run from the repo root. Uses tests/test_rd_lh_run.py's synthetic generator;
 no real-data cache is available in this worktree, so Gate C here is
-synthetic-only -- the receipt session adds the Gate E run's real-data
-reachability count.
+synthetic-only. The real-data reachability count (launcher's Gate E run) is
+in docs/RdLhRunMeasured.md's Gate C section, not reproduced by this script.
 """
 import os
 import sys

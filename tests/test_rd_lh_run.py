@@ -179,7 +179,7 @@ def test_edge_cases():
     high = _walk(n=200, seed=6)
     base = rd_lh_run(high)
     pd.testing.assert_series_equal(rd_lh_run(high, offset=1), base.shift(1))
-    assert rd_lh_run(high, fillna=0).isna().sum() == 0
+    assert rd_lh_run(high, offset=3, fillna=0).isna().sum() == 0
     with pytest.raises(ValueError):
         rd_lh_run(high, fill_method="nope")
 
