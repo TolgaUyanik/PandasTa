@@ -22,9 +22,8 @@ ratio `> 2.5` — the ratio IS the poster's own quantity; the `> 2.5` threshold 
 rule on top of it, not shipped here (the same convention `rd_std_ratio_20_60` and
 `rd_range_contraction` use for their own posters' thresholds).
 
-**Status:** Gates A-D measured below. Gate E: pending, run by issue-solver after this
-session. Whole-suite run is owed to the launcher, per the issue-solver's own rules (it must
-not run the whole suite).
+**Status:** Gates A-E measured below. Whole-suite run is owed to the launcher, per the
+issue-solver's own rules (it must not run the whole suite).
 
 | module | category | column | range |
 |---|---|---|---|
@@ -163,15 +162,22 @@ Synthetic, from the port session:
 
 ## Gate E — attribution
 
-**Pending.** Run by issue-solver (the launcher) after this session, via
-`gate_e_overlap.py run --module pandas_ta.momentum.rd_dip_depth_10_25`. The issue's own
-prototype measurement (`docs/issues/screen/candidates_r6.csv`, run `screen_r6_20261025`, 89
-ALTPORT-1 frames, n = 396,713) put the screened formula at max |ρ| **0.8401** vs `kdj_J_9_3`
-(top-5 per-frame max median 0.8497) — **DISCLOSE_GAP** band, next comparators
-`Dist_to_Tenkan_pct` 0.8343 and `willr` 0.8241; that is the prototype's own number, not this
-port's measurement, and is recorded here only as the issue's own expectation, not as a
-substitute for the launcher's run on the shipped module. A later receipt session records the
-launcher's actual run and the ledger row.
+**Measured on the shipped module**, launcher run `is181-rd_dip_depth_10_25-4dcb8d6b`
+(`gate_e_overlap.py run --module pandas_ta.momentum.rd_dip_depth_10_25`), 89 ALTPORT-1 BIST
+frames, 398,849 pooled bars, 687 comparators (329 `compute_all` + 358 `ml_features` manifest),
+canary bit-equal on AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS:
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `RD_DIP_DEPTH_10_25_10_25` | 0.8401 | `kdj_J_9_3` | 396,713 | 0.8497 (against `Dist_to_Tenkan_pct`) | **DISCLOSE_GAP** |
+
+Pooled max |ρ| 0.8401 and per-frame max median 0.8497 both sit under the 0.90 STRUCK line
+(`r3-perframe-0.90` band), so this is DISCLOSE_GAP, not STRUCK — ships as-is, disclosed. The
+measured number matches the issue's own prototype measurement almost exactly (0.8401 vs
+`kdj_J_9_3`, same comparator, same band), confirming the prototype's number carried through
+the port unchanged. Ledger row recorded: `python docs/gate_e_ledger.py record
+/home/tolga/.issue-solver/runs/20261127-070101-181/gatee/is181-rd_dip_depth_10_25-4dcb8d6b
+--measured 2026-11-27`.
 
 **Non-redundancy against `willr`.** `willr`'s own formula,
 `100*(close-HHV(high,n))/(HHV(high,n)-LLV(low,n))`, shares this port's `HHV(high,n) - close`
@@ -225,5 +231,4 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
 ## Next step
 
-Gate E owed to the launcher; a receipt session records that run's measured number, the ledger
-row, and (if STRUCK) a revert. Gates A-D measured above do not change on that outcome.
+None. Gates A-F measured; DISCLOSE_GAP, ships as-is. Whole-suite runs are the launcher's.
