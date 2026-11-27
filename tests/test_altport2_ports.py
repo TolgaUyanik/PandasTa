@@ -195,8 +195,8 @@ REGISTERED = {
 #: shipping silently.
 CATEGORY_TOTAL = 419  # +1 on issue #184's nm_mmi_250 port (statistics; Market Meanness Index
 # of daily returns (250), Lotter's reversal-share metric: 100*(nl+nh)/(n-1); named in a Reddit
-# thread only, tier 4, rd:algotrading:hr30er; Gate E: pending, run by issue-solver after this
-# session; see docs/NmMmi250Measured.md), +1 on issue #182's rd_lh_run port (trend; run length of consecutive
+# thread only, tier 4, rd:algotrading:hr30er; Gate E SHIP, 0.6284 vs ZIGZAG (per-frame max
+# median 0.6638 vs the same comparator), run is184-nm_mmi_250-02756fbc; see docs/NmMmi250Measured.md), +1 on issue #182's rd_lh_run port (trend; run length of consecutive
 # lower highs: n[t] = n[t-1] + 1 if high[t] < high[t-1] else 0, built on ml_bars_since the
 # same way volatility's range_compress_run is; Reddit tier 4, rd:Trading:1gcotir; Gate E
 # DISCLOSE_GAP, 0.8800 vs `HIGHER_HIGH` (per-frame max median 0.8972 vs the same comparator),

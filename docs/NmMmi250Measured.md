@@ -15,7 +15,7 @@ line discloses the scale-free form explicitly chosen for this fork: "on daily
 returns (the article: about 75 for random changes)"; `250` is the article's
 own test period, kept here as the `length` parameter's default.
 
-**Status:** Gates A-E measured below, verdict SHIP. Whole-suite run is owed
+**Status:** Gates A-F measured below, verdict SHIP. Whole-suite run is owed
 to the launcher, per the issue-solver's own rules (it must not run the whole
 suite).
 
@@ -44,7 +44,15 @@ docs/measure_nm_mmi_250.py`, run from the repo root. Environment: Python
    compared — the issue's own formula names one `median` per window, and the
    screen prototype's `_mmi` helper computes it the same way (`np.median(W, 1,
    keepdims=True)` over the full `length`-return window), not a median of only
-   the first or last `length - 1` returns.
+   the first or last `length - 1` returns. At the default even `length=250`
+   this is `np.median`'s own convention, the mean of the two middle order
+   statistics — not an order-statistic median (what Zorro's own `Median()`
+   returns at an even period), which would instead land exactly on one of the
+   window's own values. The two conventions can disagree on at most one pair
+   per window (the element equal to that order statistic, which `np.median`
+   places strictly above or below it instead of exactly at it): a swing of at
+   most `100 / (length - 1)` on `NM_MMI_250`. The issue's own restatement
+   names only "median" and does not fix this tie rule either way.
 4. **`MIN_LENGTH = 3`, not 2.** A 2-return window's median is the pair's own
    mean, so `older > median` and `older > newer` always agree in sign (and
    likewise for `<`): every non-tied pair is a FORCED 100, an exact tie a
@@ -86,11 +94,13 @@ Cross-checked against an independent per-window Python loop built straight
 from the formula above (plain Python scalars and `sorted()`, no numpy
 windowing, no shared helper with the module except the close series itself) on
 a 400-bar synthetic random walk (`length=50`, 350 defined bars): NaN masks
-identical, **max |diff| 0.0** (`test_matches_an_independent_scalar_loop`,
-`python docs/measure_nm_mmi_250.py`) — exact agreement, not merely close,
-because both implementations compute the same median-and-comparison logic
-with no floating-point reduction-order difference (no sums, no means — only a
-sort and a handful of comparisons).
+identical, **max |diff| 0.0** on this machine (`test_matches_an_independent_scalar_loop`,
+`python docs/measure_nm_mmi_250.py`), within the test's pinned `< 1e-11` band —
+not tightened to exact bit equality per the issue-solver's own CPU-variant
+rule, since the oracle sorts with plain Python while the module uses numpy's
+median, and the two reduction paths could in principle round differently on
+a CPU with different dispatched kernels even though neither sums nor
+averages anything beyond the two middle order statistics.
 
 ## Gate B — causality
 
@@ -160,8 +170,11 @@ reads NaN by construction (`test_a_bad_close_empties_its_own_windows_and_nothing
 measured: exactly the `length + 1` windows containing it, nothing earlier
 moves), and a window holding a close PAIR whose ratio overflows to an
 infinite return reads NaN the same way
-(`test_an_overflowing_return_pair_is_emptied`). Real-data reachability: not
-measured here — Gate E (which runs on real BIST data) is owed; see below.
+(`test_an_overflowing_return_pair_is_emptied`). **Real data (launcher's Gate E
+run `is184-nm_mmi_250-02756fbc`, 89 ALTPORT-1 frames):** `NM_MMI_250`
+non-NaN on 376,599 of 398,849 pooled bars (the missing 22,250 = 89 × the
+250-bar warm-up, nothing else), non-zero on 376,599 — `0 < fires < n` on real
+data, not only synthetic.
 
 ## Gate D — scale-free
 
@@ -226,11 +239,10 @@ python -m pytest -q tests/test_nm_mmi_250.py tests/test_readme_counts.py \
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,783 passed, 7 skipped, 1 failed.** The one failure is
-`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` —
-expected, per the issue-solver's own rules, until the launcher's Gate E run
-and a later receipt session record this port's ledger row.
-`tests/test_nm_mmi_250.py` alone: 53 passed.
+**1,791 passed, 7 skipped, 0 failed.** The ledger row is now recorded
+(`docs/gate_e_ledger.csv`), so `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one`
+— the one failure the earlier run reported while the row was owed — now
+passes. `tests/test_nm_mmi_250.py` alone: 53 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for
 a GitHub runner without AVX-512 — the four features issue-solver's rules
