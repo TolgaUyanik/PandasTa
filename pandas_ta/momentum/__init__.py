@@ -61,6 +61,7 @@ from .pressure_pulse import pressure_pulse
 from .psl import psl
 from .pvo import pvo
 from .qqe import qqe
+from .rd_dip_depth_10_25 import rd_dip_depth_10_25
 from .roc import roc
 from .rsi import rsi
 from .rsi_divergence import rsi_divergence
