@@ -15,9 +15,9 @@ line discloses the scale-free form explicitly chosen for this fork: "on daily
 returns (the article: about 75 for random changes)"; `250` is the article's
 own test period, kept here as the `length` parameter's default.
 
-**Status:** Gates A-D measured below. Gate E: pending, run by issue-solver
-after this session. Whole-suite run is owed to the launcher, per the
-issue-solver's own rules (it must not run the whole suite).
+**Status:** Gates A-E measured below, verdict SHIP. Whole-suite run is owed
+to the launcher, per the issue-solver's own rules (it must not run the whole
+suite).
 
 | module | category | column | range |
 |---|---|---|---|
@@ -197,7 +197,22 @@ measured here — Gate E (which runs on real BIST data) is owed; see below.
 
 ## Gate E — attribution
 
-**Pending, run by issue-solver after this session.**
+Run by the launcher, 89 ALTPORT-1 BIST frames, canary bit-equal
+(`AKBNK.IS, BIENY.IS, AGHOL.IS, SASA.IS`), pooled `n=31,015`, 687 comparators
+(329 `compute_all` + 358 `ml_features` manifest), module sha1
+`1a9bacb22f9070cbdfe5b34c00c93fc84dfffd5c`, output
+`is184-nm_mmi_250-02756fbc`, measured 2026-11-27:
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | per-frame n frames | verdict |
+|---|---|---|---|---|---|---|
+| `NM_MMI_250` | 0.6284 | `ZIGZAG` | 31,015 | 0.6638 | 77 | **SHIP** |
+
+Both the pooled max and the per-frame max median sit well under the 0.90
+STRUCK line (`r3-perframe-0.90`), and under the 0.76 SHIP ceiling too —
+consistent with the prototype's own pre-port measurement (0.6282 vs
+`ZIGZAG`, this port's 0.6284 vs the same comparator). `NM_MMI_250` ships.
+Ledger row recorded in `docs/gate_e_ledger.csv`
+(`python docs/gate_e_ledger.py record <run dir> --measured 2026-11-27`).
 
 ## Gate F — suites
 
@@ -252,8 +267,5 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
 ## Next step
 
-Launcher runs Gate E (`gate_e_overlap.py run --module
-pandas_ta.statistics.nm_mmi_250`). A later receipt session records the
-ledger row in `docs/gate_e_ledger.csv` and fills in this file's Gate E
-section with the measured verdict — SHIP, DISCLOSE/DISCLOSE_GAP, or a
-measured revert if STRUCK.
+Done through Gates A-F (Gate F whole-suite remains the launcher's). SHIP,
+no further action owed on this port.
