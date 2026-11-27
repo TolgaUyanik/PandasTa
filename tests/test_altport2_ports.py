@@ -193,7 +193,14 @@ REGISTERED = {
 #: docs/SeasMeasured.md). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
-CATEGORY_TOTAL = 420  # +1 on issue #185's nm_effort_result_20 port (volume; Wyckoff's
+CATEGORY_TOTAL = 421  # +1 on issue #139's c22_whiten_timescale port (statistics; catch22's
+# FC_LocalSimple_mean1_taurat -- the ratio of two ACF timescales (hctsa's CO_FirstZero,
+# linearly interpolated): the 1-bar-forecast residual's (the plain first difference)
+# over the raw window's, on the last 100 daily returns; port written from the definition,
+# the interpolation step fit against the GPL-3.0 pycatch22 reference as a black box (0 of
+# 8,400 sampled windows disagree beyond 1e-9); Gate E: pending, run by issue-solver after
+# this session; see docs/C22WhitenTimescaleMeasured.md), +1 on issue #185's
+# nm_effort_result_20 port (volume; Wyckoff's
 # effort-vs-result, relative volume over relative range: [V/SMA20(V)] / [(H-L)/SMA20(H-L)];
 # named in two Reddit threads only, tier 4, rd:Daytrading:1k9oyhh and a round-6 "Volume Range
 # Events" thread, neither stating a formula -- the issue's own stated formalisation; Gate E:

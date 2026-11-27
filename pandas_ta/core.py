@@ -2093,6 +2093,12 @@ class AnalysisIndicators(BasePandasObject):
                                         offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def c22_whiten_timescale(self, length=None, offset=None, **kwargs):
+        close = self._get_column(kwargs.pop("close", "close"))
+        result = c22_whiten_timescale(close=close, length=length,
+                                      offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def cusum(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = cusum(close=close, length=length, offset=offset, **kwargs)
