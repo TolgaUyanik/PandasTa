@@ -39,7 +39,10 @@ limited to the named test subset, never the whole suite.
   the module), length-too-small raises, non-finite-window NaN case,
   warm-up, offset/fillna, causality (future-splice sweep + look-ahead
   mutant), scale-free (x8/x64/x10/x3.7), reachability, wiring.
-- **Mid-session finding, not assumed going in:** ran
+- **Mid-session finding, not assumed going in (SUPERSEDED by gate round 1 —
+  the ratio-to-first-bar fix makes x8/x64 bit-identical; see
+  docs/RdQuadfitResid20Measured.md Decision 3. Historical text below, true
+  at the time it was written):** ran
   `docs/measure_rd_quadfit_resid_20.py` and discovered the x8/x64
   power-of-two rescale is NOT bit-identical (0 of 1,581 co-finite cells),
   unlike `rd_knot_pos_40` (argmin, robust to ulp noise) and

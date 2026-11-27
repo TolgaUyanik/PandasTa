@@ -3,11 +3,10 @@
 residual of a trailing 20-bar quadratic (2nd-order polynomial) fit on log
 close, over the window's own residual sd (issue #180, RD-QUADFIT-RESID-20;
 Reddit, tier 4, untested by any poster). Measurements are in
-docs/RdQuadfitResid20Measured.md, including a Gate E run on this port's
-PRIOR revision (max |rho| 0.8343003635723028 vs `cfo_ta_Pctl`, perframe max
-median 0.8356157515953884, DISCLOSE_GAP) -- the ratio-to-first-bar Gate D
-fix below changed the module's sha1, so that run is stale and Gate E is
-owed again.
+docs/RdQuadfitResid20Measured.md, including Gate E run
+`is180-rd_quadfit_resid_20-2e3d7c9e` (2026-11-27, this module's current
+sha1; max |rho| 0.834300363578934 vs `cfo_ta_Pctl`, perframe max median
+0.8356157515953884, DISCLOSE_GAP), recorded in `docs/gate_e_ledger.csv`.
 
 What these pin, in order of how much it would hurt to lose:
 

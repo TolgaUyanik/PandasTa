@@ -38,16 +38,15 @@ every residual -- and the sd dividing them -- is always exactly zero,
 `0/0 = NaN` on every bar); this port raises rather than silently emitting
 an all-NaN column.
 
-NON-REDUNDANCY. A Gate E run on this port's prior revision (`is180-rd_quadfit_resid_20-457a93c0`,
-89 ALTPORT-1 frames, 687 comparators -- BEFORE the ratio-to-first-bar Gate D
-fix below changed the module's own sha1, so the row is not current) put this
-column's nearest comparator at `cfo_ta_Pctl` (max |rho| 0.8343003635723028,
+NON-REDUNDANCY. Gate E run `is180-rd_quadfit_resid_20-2e3d7c9e` (2026-11-27,
+89 ALTPORT-1 frames, 687 comparators, this module's current sha1) put this
+column's nearest comparator at `cfo_ta_Pctl` (max |rho| 0.834300363578934,
 n = 392,886, perframe max median 0.8356157515953884) -- an already-shipped
 momentum-family column this fork carries (`pandas_ta.momentum.cfo`), read
 here as evidence the new column sits in the same neighbourhood as existing
 ones, not as evidence it restates one exactly (DISCLOSE_GAP, below the 0.90
 STRUCK line). This reproduced the screen prototype's own measurement (issue
-#180) to the digit; Gate E is owed again and will be re-run
+#180) to the digit; recorded in `docs/gate_e_ledger.csv`
 (docs/RdQuadfitResid20Measured.md).
 A stage-2 fork-overlap check (not Gate E) on scale-free `Category` outputs
 at defaults put the nearest comparator at `cfo:CFO_9` (0.8313) -- again
@@ -216,6 +215,9 @@ Calculation:
     Default Inputs:
         length=20
     y = LN(close)
+    (implemented as y = LN(close / the window's first close) -- the same
+    fit, since the intercept makes OLS residuals invariant to a per-window
+    additive shift, and it makes a power-of-two rescale bit-identical)
     for each window of `length` bars (t = 0..length-1, t=0 oldest):
         a, b, c = OLS fit of y on [1, t, t**2]
         resid(t) = y(t) - (a + b*t + c*t**2)

@@ -223,6 +223,7 @@ Whole suites: run by issue-solver in clean worktrees (see the PR body).
   (checked: `git diff docs/IndicatorDictionary.md`).
 - `Category`: `rd_quadfit_resid_20` is placed alphabetically between `rd_knot_pos_40` and
   `skew` in `statistics`.
-- Module sha1 (LF-normalised, for the later `docs/gate_e_ledger.csv` row, round 2 after
-  Decision 3's Gate D fix): `657050f8a6be60e6ec724e6e5b516ef1c15e7e20` (measured,
+- Module sha1 (LF-normalised, for the later `docs/gate_e_ledger.csv` row, round 3 after
+  the round-2 pre-push review's docstring-currency fixes -- the Gate E numbers below are
+  unchanged, the module text is not): `724c0d4c13c75836f3bbbccf4e6c3f9ab2b4d973` (measured,
   `python docs/measure_rd_quadfit_resid_20.py`).

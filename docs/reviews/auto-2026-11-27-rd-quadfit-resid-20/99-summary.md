@@ -19,6 +19,9 @@ expected failure (`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_
 owed until the launcher's Gate E run).
 
 Noteworthy finding this run (not assumed going in, discovered mid-session):
+SUPERSEDED by gate round 1 — the ratio-to-first-bar fix makes x8/x64
+bit-identical; see docs/RdQuadfitResid20Measured.md Decision 3. (Historical
+text below, true at the time it was written.)
 the port's scale-free (Gate D) output is NOT bit-identical under a
 power-of-two price rescale (x8/x64), unlike its two nearest structural
 siblings (`rd_knot_pos_40`, `rd_std_ratio_20_60`) — `np.log` of a rescaled
