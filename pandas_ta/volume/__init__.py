@@ -7,6 +7,7 @@ from .adosc import adosc
 from .amihud import amihud
 from .aobv import aobv
 from .avwap_z import avwap_z
+from .b2_vol_above_mid_20 import b2_vol_above_mid_20
 from .bw_mfi import bw_mfi
 from .cmf import cmf
 from .demand import demand
