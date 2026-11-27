@@ -25,6 +25,7 @@ from .g191_191 import g191_191
 from .kvo import kvo
 from .maxvol_adv import maxvol_adv
 from .mfi import mfi
+from .nm_effort_result_20 import nm_effort_result_20
 from .nvi import nvi
 from .obv import obv
 from .osap_voltrend_60 import osap_voltrend_60

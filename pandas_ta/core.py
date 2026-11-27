@@ -3640,6 +3640,13 @@ class AnalysisIndicators(BasePandasObject):
         result = mfi(high=high, low=low, close=close, volume=volume, length=length, drift=drift, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def nm_effort_result_20(self, length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        volume = self._get_column(kwargs.pop("volume", "volume"))
+        result = nm_effort_result_20(high=high, low=low, volume=volume, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def nvi(self, length=None, initial=None, signed=True, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         volume = self._get_column(kwargs.pop("volume", "volume"))
