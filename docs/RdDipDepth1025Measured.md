@@ -91,8 +91,10 @@ above (`numpy.lib.stride_tricks.sliding_window_view` + `np.max`/`.mean()`, not p
 length=10, avg_length=25, 376 defined bars): NaN masks identical, **max |diff| 9.681e-13**
 (`test_matches_an_independent_loop`, `python docs/measure_rd_dip_depth_10_25.py`) — float
 noise from the two different reduction orders (pandas `.rolling().max()`/`.mean()` vs. a
-Python-level max/mean over a numpy slice), not a logic mismatch; well inside the test's own
-`atol=1e-9` bound.
+Python-level max/mean over a numpy slice), not a logic mismatch; the test
+(`tests/test_rd_dip_depth_10_25.py:88`) bounds this comparison at `rtol=1e-12, atol=1e-12`,
+a margin the measured 9.681e-13 sits inside once `rtol*|ref|` (values up to ~27) is counted,
+not the 1e-9 tolerance used for the x10/x3.7 scale test below.
 
 ## Gate B — causality
 
@@ -122,7 +124,11 @@ Synthetic, from the port session:
   (`test_zero_average_range_reads_nan_not_inf`); not observed on the random synthetic frames
   above (a GBM-style walk's high/low range is never exactly constant for 25 bars), which is
   expected, not a defect.
-- **Real-data reachability**: owed to the launcher's Gate E run; see Gate E below.
+- **Real-data reachability**, measured on the launcher's Gate E run
+  (`is181-rd_dip_depth_10_25-4dcb8d6b`): 396,713 non-NaN bars of 398,849 pooled across the 89
+  ALTPORT-1 frames, 389,521 of them non-zero; no `degenerate.csv` row for this column (the
+  run's one `degenerate.csv` row is the comparator `squeeze_SQZ_NO`, constant) -- the same
+  shape `flat_spots`' entry uses in `docs/MLCompanionContract.md`.
 
 ## Gate D — scale-free
 
@@ -200,10 +206,11 @@ python -m pytest -q tests/test_rd_dip_depth_10_25.py tests/test_readme_counts.py
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,726 passed, 7 skipped, 1 failed**, measured 2026-11-27. The one failure is
-`test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` — expected, per the
-issue-solver's own rules, until the launcher's Gate E run and a later receipt session record
-this port's ledger row. `tests/test_rd_dip_depth_10_25.py` alone: 20 passed.
+**1,726 passed, 7 skipped, 1 failed**, measured 2026-11-27 before the ledger row existed. The
+one failure was `test_gate_e_ledger.py::test_every_indicator_that_needs_a_row_has_one` —
+expected at that point, per the issue-solver's own rules. The row now exists in
+`docs/gate_e_ledger.csv` (run `is181-rd_dip_depth_10_25-4dcb8d6b`), so that test no longer
+fails on this port. `tests/test_rd_dip_depth_10_25.py` alone: 20 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub runner
 without AVX-512 — the four features issue-solver's rules name, not this machine's full

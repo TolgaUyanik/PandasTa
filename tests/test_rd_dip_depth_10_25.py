@@ -185,7 +185,7 @@ def test_price_scale_is_bit_identical(k):
     with no rounding for a power-of-two `k`; the two rolling means in the
     denominator scale by that same exact factor, and IEEE-754 division of
     two operands scaled by the same exact `k` returns a bit-identical
-    quotient -- measured (docs/measure_rd_dip_depth_10_25_cpu.py): max
+    quotient -- measured (docs/measure_rd_dip_depth_10_25.py): max
     absolute difference 0.0 on every co-finite cell, for both x8 and x64."""
     h, l, c = _walk(seed=4)
     base = rd_dip_depth_10_25(h, l, c)
@@ -199,7 +199,7 @@ def test_price_scale_is_bit_identical(k):
 def test_scale_stays_within_a_tiny_tolerance(k):
     """At a non-power-of-two rescale the max and the division are no longer
     exact bit-for-bit, so this stays a tiny-tolerance claim rather than
-    bit-identical -- measured (docs/measure_rd_dip_depth_10_25_cpu.py): max
+    bit-identical -- measured (docs/measure_rd_dip_depth_10_25.py): max
     absolute difference far below 1e-9 for both x10 and x3.7, bounded here
     at a generous tolerance since the CPU's dispatched float kernels, not
     this module's logic, decide the last bit."""
