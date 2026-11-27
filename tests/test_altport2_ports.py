@@ -193,12 +193,12 @@ REGISTERED = {
 #: docs/SeasMeasured.md). Pinned, not
 #: computed, precisely so an accidental Category edit fails here instead of
 #: shipping silently.
-CATEGORY_TOTAL = 417  # +1 on issue #182's rd_lh_run port (trend; run length of consecutive
+CATEGORY_TOTAL = 418  # +1 on issue #182's rd_lh_run port (trend; run length of consecutive
 # lower highs: n[t] = n[t-1] + 1 if high[t] < high[t-1] else 0, built on ml_bars_since the
 # same way volatility's range_compress_run is; Reddit tier 4, rd:Trading:1gcotir; Gate E
 # DISCLOSE_GAP, 0.8800 vs `HIGHER_HIGH` (per-frame max median 0.8972 vs the same comparator),
-# run is182-rd_lh_run-2043b0b4; see docs/RdLhRunMeasured.md), +1 on
-# issue #181's rd_dip_depth_10_25 port (momentum; dip below the
+# run is182-rd_lh_run-2043b0b4; see docs/RdLhRunMeasured.md),
+# +1 on issue #180's rd_quadfit_resid_20 port (statistics; last-bar residual of a 20-bar quadratic fit on log close, over the window's residual sd; Reddit tier 4, rd:algotrading:vgulql; Gate E DISCLOSE_GAP, 0.8343 vs `cfo_ta_Pctl` (per-frame max median 0.8356), run is180-rd_quadfit_resid_20-2e3d7c9e, measured 2026-11-27; see docs/RdQuadfitResid20Measured.md), +1 on issue #181's rd_dip_depth_10_25 port (momentum; dip below the
 # 10-day high in average-range units (10, 25): (HHV(high, 10) - close) / (SMA(high, 25) -
 # SMA(low, 25)); Reddit tier 4, rd:algotrading:1rjvxjy; Gate E DISCLOSE_GAP, 0.8401 vs
 # `kdj_J_9_3` (per-frame max median 0.8497 vs `Dist_to_Tenkan_pct`), run
