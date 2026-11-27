@@ -167,21 +167,24 @@ Synthetic, from the port session:
 
 ## Gate E — attribution
 
-Round 2, run by issue-solver on the fixed module (post-Decision-3):
-`is180-rd_quadfit_resid_20-2e3d7c9e` (2026-11-27), module
+Round 3 (receipt session), run by issue-solver on the HEAD commit (module unchanged since
+round 2): `is180-rd_quadfit_resid_20-2dc6c0ac` (2026-11-27), module
 `pandas_ta.statistics.rd_quadfit_resid_20`, 89 ALTPORT-1 frames, 398,849 pooled bars, 687
 comparators (329 `compute_all` + 358 `ml_features` manifest), canary bit-equal on AKBNK.IS /
-BIENY.IS / AGHOL.IS / SASA.IS, `pandas_ta_src_sha1` `e65f49cab1a0f9fb36737d6a031529cbc642f35b`:
+BIENY.IS / AGHOL.IS / SASA.IS, `pandas_ta_src_sha1` `05efa633fae04a9a039a182c6d42ad69d18be5b8`
+(differs from round 2's `e65f49ca...` because unrelated files changed elsewhere in the tree
+between the two runs; `module_sha1` — the only thing this port owns — is unchanged,
+`724c0d4c13c75836f3bbbccf4e6c3f9ab2b4d973`):
 
 | column | max \|ρ\| | against | n | perframe max median \|ρ\| | verdict |
 |---|---|---|---|---|---|
 | `RD_QUADFIT_RESID_20` | 0.834300363578934 | `cfo_ta_Pctl` (manifest) | 392,886 | 0.8356157515953884 | DISCLOSE_GAP |
 
-Next comparator (`compute_all`): `cfo` 0.8030023191927524, n = 397,158. Matches round 1's
-pre-fix figures (0.8343003635723028 / 0.8356157515953884) to 10 significant digits — the Gate D
-fix's ~3e-12 relative change does not move ρ at this precision, confirming the sibling port
-`rd_knot_dslope_40`'s round-2 reconfirmation pattern. **Band: DISCLOSE_GAP (0.80 ≤ ρ < 0.90),
-not STRUCK** — ships per `docs/gate_e_ledger.csv`'s recorded verdict.
+Next comparator (`compute_all`): `cfo` 0.8030023191927524, n = 397,158. Identical to round 2's
+figures (0.834300363578934 / 0.8356157515953884) to every digit shown — this round re-runs the
+unchanged module and confirms the result, it does not remeasure a code change. **Band:
+DISCLOSE_GAP (0.80 ≤ ρ < 0.90), not STRUCK** — ships per `docs/gate_e_ledger.csv`'s recorded
+verdict (ledger run `is180-rd_quadfit_resid_20-2dc6c0ac`).
 
 ## Gate F — suites
 
@@ -194,8 +197,9 @@ python -m pytest -q tests/test_rd_quadfit_resid_20.py tests/test_readme_counts.p
     tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py
 ```
 
-**1,726 passed, 7 skipped, 0 failed** -- receipt session, after recording the round-2 Gate E
-ledger row (DISCLOSE_GAP). `tests/test_rd_quadfit_resid_20.py` alone: 20 passed.
+**1,726 passed, 7 skipped, 0 failed** -- round-3 receipt session, after recording the round-3
+Gate E ledger row (`is180-rd_quadfit_resid_20-2dc6c0ac`, DISCLOSE_GAP, numbers unchanged from
+round 2). `tests/test_rd_quadfit_resid_20.py` alone: 20 passed.
 
 CPU-feature variant (`AVX512F AVX512_SKX AVX2 FMA3` disabled, standing in for a GitHub runner
 without AVX-512 — the four features issue-solver's rules name, not this machine's full
