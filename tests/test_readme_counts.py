@@ -66,8 +66,10 @@ def test_the_readme_retypes_no_indicator_count():
     count or a category row coming back.
     """
     text = _readme()
-    retyped = re.findall(r"\*\*\d+ indicators\*\*|\*\*\d+\*\* are callable"
-                         r"|^\*\*[a-z_]+ \(\d+\)\*\*", text, re.M)
+    # Bold or not; "~130 indicators" (upstream's size, not this package's) is
+    # not a count of this package, hence the "~" exclusion.
+    retyped = re.findall(r"(?<![~\d])\b\d+\*{0,2} indicators\b|\*{0,2}\d+\*{0,2} are callable"
+                         r"|^\*{0,2}[a-z_]+ \(\d+\)", text, re.M)
     assert retyped == [], f"retyped counts in README.md: {retyped}"
 
 
