@@ -176,7 +176,7 @@ def test_the_contract_retypes_no_ml_form_counts():
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     contract = open(os.path.join(here, "docs", "MLCompanionContract.md"),
                     encoding="utf8").read()
-    retyped = re.findall(r"\d+ tagged columns|\*\*\d+ `(?:PX2|PX|SF|BIN|ORD|CONST|\?\?)`\*\*",
+    retyped = re.findall(r"\d+ tagged columns|\d+ `(?:PX2|PX|SF|BIN|ORD|CONST|\?\?)`",
                          contract)
     assert retyped == [], f"retyped ML-form counts in the contract: {retyped}"
 

@@ -109,7 +109,7 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    in the usable window, so the relative-volume denominator never settles. The
    test asserts >= 90, so a real regression cannot hide behind that allowance.
 
-7. **The wiring, all five touch points.** 221 -> **224** in `Category`
+7. **The wiring, all five touch points.** At the time of that port, 221 -> 224 in `Category`
    (trend 55 -> 56, volatility 18 -> 19, volume 21 -> 22), one accessor each,
    and every one callable from a bulk `df.ta.strategy()` sweep -- none of the
    three needs an argument a sweep cannot supply, so none belongs in
@@ -301,8 +301,9 @@ def test_category_lists_are_sorted_unique_and_complete():
       line format the order keeps conflict-light);
     * an accidental deletion: one name per line makes it a visible one-line
       diff, and every indicator in `docs/gate_e_grandfathered.json` or with a
-      Gate E ledger row must still be registered, unless its row is STRUCK
-      (a measured revert keeps its row as the receipt, e.g. `g191_055`).
+      Gate E ledger row must still be registered, unless its row is STRUCK with
+      no waiver (a measured revert keeps its row as the receipt, e.g. `g191_055`;
+      a waived STRUCK row such as `pfe` #23 stays registered and is covered).
     """
     import csv
     import json
@@ -313,7 +314,7 @@ def test_category_lists_are_sorted_unique_and_complete():
         dup = sorted({n for n in names if names.count(n) > 1})
         assert dup == [], f"Category[{cat!r}] has duplicates: {dup}"
         for n in names:
-            assert " " not in n, f"concatenated Category entry: {n!r}"
+            # A concatenation ("ab" "cd" -> "abcd") is not a function: this catches it.
             assert callable(getattr(ta, n, None)), f"Category entry {n!r} is not ta.{n}"
 
     registered = {n for names in ta.Category.values() for n in names}
@@ -321,7 +322,8 @@ def test_category_lists_are_sorted_unique_and_complete():
     with open(os.path.join(docs, "gate_e_grandfathered.json"), encoding="utf8") as fh:
         frozen = set(json.load(fh)["indicators"])
     with open(os.path.join(docs, "gate_e_ledger.csv"), encoding="utf8", newline="") as fh:
-        kept = {r["indicator"] for r in csv.DictReader(fh) if r["verdict"] != "STRUCK"}
+        kept = {r["indicator"] for r in csv.DictReader(fh)
+                if r["verdict"] != "STRUCK" or r["waiver"].strip()}
     missing = sorted((frozen | kept) - registered)
     assert missing == [], f"grandfathered or ledgered but no longer in Category: {missing}"
 

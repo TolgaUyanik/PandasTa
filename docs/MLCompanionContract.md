@@ -144,7 +144,7 @@ a uniform triple is the point of designing on three shapes first.
 - **The rollout order.** MLCOL-1 orders by the dictionary's
   *"Needs a transform before modelling"* table, because those parents are
   unusable today and pay back first.
-- **Whether all 137 `PX` parents deserve a companion.** They do not: many are
+- **Whether every `PX` parent deserves a companion.** They do not: many are
   intermediate lines of a multi-column indicator whose useful form is already
   emitted elsewhere. MLCOL-1 decides per indicator, not per column.
 - **The trailing-window length for STATE quantiles.** 252 is a placeholder,
