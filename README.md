@@ -7,7 +7,7 @@ A pandas extension with **400+ technical-analysis indicators**, built so that ev
 fed to a model: causal (no bar reads the future), scale-free where it matters, and documented
 column by column. A fork of pandas-ta `0.2.67b` (twopirllc), written mostly by AI coding
 agents: a human owner approves the work queue and rules on judgement calls, and changes merge
-on automated tests and an automated reviewer, not on a human code review
+on automated tests (and, for queue work, an automated reviewer), not on a human code review
 ([how](#how-this-repository-is-built)).
 
 > **Not financial advice. No warranty.** This is software for computing indicators, not a
@@ -24,9 +24,9 @@ on automated tests and an automated reviewer, not on a human code review
   ordinal) and warm-up is generated into [`docs/IndicatorDictionary.md`](docs/IndicatorDictionary.md).
   Look-ahead bugs are fixed and pinned by tests (`ssf`, `bos`, `choch`) or made causal by
   default (`dpo`).
-- **Gated, not just added.** Before a PR merges into `dev`, a new indicator passes correctness
-  against its source, a causality *mutant* test, reachability, scale-invariance and the full
-  suite (about 17,000 tests). Its redundancy against a fixed set of several hundred reference
+- **Gated, not just added.** A new indicator ships with correctness evidence against its source,
+  plus causality (*mutant*), reachability and scale-invariance tests that CI runs with the full
+  suite (about 17,000 tests) before the PR merges into `dev`. Its redundancy against a fixed set of several hundred reference
   features (Gate E) is recorded in `docs/gate_e_ledger.csv`; a release to `main` fails until
   every new indicator has its row.
 - **Actively maintained.** 215 pull requests merged since 2026-09-11 (measured 2026-11-28). The
@@ -149,8 +149,7 @@ Column names encode the parameters: `STOCHk_14_3_3`, `BBU_20_2.0`, `MACDh_12_26_
 ### 5. Signals are labels, not features
 
 `tsignals` / `xsignals` turn a trend or a crossover into entry / exit columns (`asbool=True`
-for boolean). Use them to build
-labels; feeding them back as features is how a target leaks in.
+for boolean). Use them to build labels; feeding them back as features is how a target leaks in.
 
 ---
 
