@@ -89,7 +89,7 @@ uptrend line (support) and a downtrend line (resistance).
 HALFTREND_DIR is +1 in uptrend and -1 in downtrend.
 
 Sources:
-    AwakenAnalytics custom indicator (indicator_engine.py)
+    Custom indicator from the owner's private research engine
     Original concept: halftrend by Alex Orekhov (everget) on TradingView
 
 Calculation:

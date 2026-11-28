@@ -92,7 +92,7 @@ fitted value at the last bar together with ±1 and ±2 standard-deviation
 bands.  Also returns the normalised slope (% of close per bar).
 
 Sources:
-    AwakenAnalytics custom indicator (indicator_engine.py)
+    Custom indicator from the owner's private research engine
 
 Calculation:
     Default Inputs:

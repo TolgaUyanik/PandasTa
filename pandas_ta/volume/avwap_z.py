@@ -346,8 +346,8 @@ avwap_z.__doc__ = \
 
 Ports ONLY Module 1 ("MODULO 1: VWAP Anclado (automatico)") of the
 TradingView community indicator "MAEM - Volume Suite" by MAEmisary,
-https://www.tradingview.com/script/wbrAnavm/ (ported into AwakenAnalytics/
-Backtesting TVPTA continuation, 2026-08-11).
+https://www.tradingview.com/script/wbrAnavm/ (ported into the private
+Backtesting repo TVPTA continuation, 2026-08-11).
 
 pandas_ta Category: "volume" (volume-weighted inputs, consistent with
 every sibling in this directory). ML-register family (downstream, in

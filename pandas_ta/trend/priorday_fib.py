@@ -74,7 +74,7 @@ where a session spans many bars).
 Source: TradingView community indicator "Fib Zone Lines" by (orphaned
 metadata -- see `datastore/source/pine_triage.csv`),
 https://www.tradingview.com/script/y2eyl03S-Fib-Zone-Lines/
-(ported into AwakenAnalytics/Backtesting TVPTA-3, 2026-08-04; MPL-2.0 per
+(ported into the private Backtesting repo TVPTA-3, 2026-08-04; MPL-2.0 per
 TradingView's open-source publication convention). Only the daily-bar
 midpoint/high/low reformulation is ported here -- the source script's full
 level set (-1.75 .. 1.75, an 11-level fan) and its intraday

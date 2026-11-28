@@ -42,7 +42,7 @@ Positive values indicate net buying pressure; negative values indicate
 net selling pressure.
 
 Sources:
-    AwakenAnalytics custom indicator (indicator_engine.py)
+    Custom indicator from the owner's private research engine
 
 Calculation:
     VOL_DELTA_APPROX = Volume * (Close - Open) / (High - Low)

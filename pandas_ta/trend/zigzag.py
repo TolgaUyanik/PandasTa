@@ -64,7 +64,7 @@ Marks pivot highs and lows where the price has reversed by at least
 `pct_threshold` from the last pivot.  Non-pivot bars are NaN.
 
 Sources:
-    AwakenAnalytics custom indicator (indicator_engine.py)
+    Custom indicator from the owner's private research engine
 
 Calculation:
     Default Inputs:

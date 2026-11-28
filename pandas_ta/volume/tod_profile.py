@@ -141,7 +141,7 @@ Ports the PROFILE ACCUMULATOR (Pine L101-175) of the TradingView community
 indicator "Volume & Volatility Time-of-Day - Seasonality Forecast"
 (source file: 291 lines, verified by `wc -l`; slug n16YXPSU, vendored at
 Backtesting/docs/TradingView/pine/n16YXPSU-Volume-Volatility-Time-of-Day.pine),
-ported into AwakenAnalytics/Backtesting TVPTA-6 (2026-08-14, candidate 16).
+ported into the private Backtesting repo TVPTA-6 (2026-08-14, candidate 16).
 
 The question it answers is not "buy or sell" but "at what TIME OF DAY does
 this instrument typically wake up". For every minute-of-day slot it keeps a

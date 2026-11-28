@@ -76,7 +76,7 @@ The launcher's Gate E run (`is177-rd_obv_dev5-33cccf3e`, 2026-11-26) landed at `
 publishes), under the 0.80 `DISCLOSE_GAP` line and far under the 0.90 `STRUCK` line. Per the
 issue's Gates owed and this fork's Gate E bands, `DISCLOSE` ships as-is — no column removed, no
 revert. Ledger row recorded in `docs/gate_e_ledger.csv` (`python docs/gate_e_ledger.py record
-/home/tolga/.issue-solver/runs/20261126-180108-177/gatee/is177-rd_obv_dev5-33cccf3e --measured
+{runs}/20261126-180108-177/gatee/is177-rd_obv_dev5-33cccf3e --measured
 2026-11-26`).
 
 `pandas_ta/volume/rd_obv_dev5.py`'s docstring still reads "This session's own Gate E run is

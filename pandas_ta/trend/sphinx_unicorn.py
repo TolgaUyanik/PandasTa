@@ -291,7 +291,7 @@ same-direction gap overlapping the level it reclaims).
 Source: TradingView community indicator "Sphinx Unicorn - FVG Breaker
 Nesting Model" by TheHermeticTrader, https://www.tradingview.com/script/
 IJ4sFGcU-Sphinx-Unicorn-FVG-Breaker-Nesting-Model/ (ported into
-AwakenAnalytics/Backtesting TVPTA-6, 2026-08-10; MPL-2.0 per TradingView's
+the private Backtesting repo TVPTA-6, 2026-08-10; MPL-2.0 per TradingView's
 open-source publication convention).
 
 ⚠ Simplified versus the source, deliberately: the source keeps an 8-slot

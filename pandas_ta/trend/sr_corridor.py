@@ -419,7 +419,7 @@ DEVIATION block in the function body.
 
 Source: TradingView community indicator, Pine v6, published script
 `yQdPgJ6s` ("Crypto Intraday Engine"), 1,489 content lines (ported into
-AwakenAnalytics/Backtesting TVPTA-6, 2026-08-25; MPL-2.0 per
+the private Backtesting repo TVPTA-6, 2026-08-25; MPL-2.0 per
 TradingView's open-source publication convention). ONLY the zone engine
 and compressed-area blocks (source lines 321-594) are ported. The daily
 VWAP and UTC opening range (lines 252-320), the market-context and

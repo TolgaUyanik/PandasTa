@@ -5,8 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 A fork of [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, published as
-`github.com/TolgaUyanik/PandasTa`. Upstream shipped ~130 indicators; this fork registers several
-times that in `Category` — the set that matters, since `Category` is what `df.ta.strategy()`
+`github.com/TolgaUyanik/PandasTa`. Upstream registered 156 in `Category` at the fork point (the root
+commit); this fork registers several times that in `Category` — the set that matters, since `Category` is what `df.ta.strategy()`
 sweeps — with the extras being TradingView/Pine, SMC price-action and library ports.
 
 **No count is retyped in the shared files (#331).** The README, `docs/MLCompanionContract.md`, the generated

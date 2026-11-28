@@ -42,7 +42,7 @@ module docstring so a reader can see exactly how much of §1 is still owed.
 
 ```
 Pressure Pulse (PRESSURE_PULSE)
-Source: TradingView community indicator "MSL Trend Pulse" by MarketStructureLab, https://www.tradingview.com/script/5BLfGp6I-Trend-Pulse/ (ported into AwakenAnalytics/Backtesting TVPTA continuation, TVPTA-6 candidate 11)
+Source: TradingView community indicator "MSL Trend Pulse" by MarketStructureLab, https://www.tradingview.com/script/5BLfGp6I-Trend-Pulse/ (ported into the private Backtesting repo TVPTA continuation, TVPTA-6 candidate 11)
 ```
 
 ## 2. Columns and ML form

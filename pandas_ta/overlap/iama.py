@@ -284,7 +284,7 @@ iama.__doc__ = \
 Source: TradingView community indicator "Institutional Moving Averages" by
 Michael_Fx_Trader,
 https://www.tradingview.com/script/6SVLw0kE-Institutional-Moving-Averages/
-(ported into AwakenAnalytics/Backtesting TVPTA continuation, TVPTA-6
+(ported into the private Backtesting repo TVPTA continuation, TVPTA-6
 candidate 12)
 
 Pine function replaced: `f_ima` only (`docs/TradingView/pine/

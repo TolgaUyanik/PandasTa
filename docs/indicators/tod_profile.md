@@ -42,7 +42,7 @@ module docstring so a reader can see exactly how much of §1 is still owed.
 
 ```
 Time-of-Day Volume/Volatility Seasonality Profile (TOD)
-Ports the PROFILE ACCUMULATOR (Pine L101-175) of the TradingView community indicator "Volume & Volatility Time-of-Day - Seasonality Forecast" (source file: 291 lines, verified by `wc -l`; slug n16YXPSU, vendored at Backtesting/docs/TradingView/pine/n16YXPSU-Volume-Volatility-Time-of-Day.pine), ported into AwakenAnalytics/Backtesting TVPTA-6 (2026-08-14, candidate 16).
+Ports the PROFILE ACCUMULATOR (Pine L101-175) of the TradingView community indicator "Volume & Volatility Time-of-Day - Seasonality Forecast" (source file: 291 lines, verified by `wc -l`; slug n16YXPSU, vendored at Backtesting/docs/TradingView/pine/n16YXPSU-Volume-Volatility-Time-of-Day.pine), ported into the private Backtesting repo TVPTA-6 (2026-08-14, candidate 16).
 ```
 
 ## 2. Columns and ML form

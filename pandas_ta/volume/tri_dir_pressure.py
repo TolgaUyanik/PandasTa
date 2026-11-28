@@ -148,7 +148,7 @@ tri_dir_pressure.__doc__ = \
 Source: TradingView community indicator "Directional Volume Shapes
 (Zeiierman)" by Zeiierman,
 https://www.tradingview.com/script/3XE8qqfr-Directional-Volume-Shapes-Zeiierman/
-(ported into AwakenAnalytics/Backtesting TVPTA continuation, TVPTA-6
+(ported into the private Backtesting repo TVPTA continuation, TVPTA-6
 candidate 10)
 
 Pine functions replaced: `scr(o, h, l, c)` (L51-78) and its two-line
@@ -209,7 +209,7 @@ Calculation:
     models of where price spent its time within the bar. "Not
     equivalent" is a narrow, correct claim, not a claim of
     independence: measured on 57 BIST_100 daily tickers (242,745 bars,
-    AwakenAnalytics/Backtesting's backtest_results/tvpta6/
+    the private Backtesting repo's backtest_results/tvpta6/
     tri_dir_pressure_overlap_20260813.md), ps vs the linear form
     correlates at pearson=0.840 (R^2=0.706) scale-free, and the
     as-deployed (use_volume=False) column correlates with

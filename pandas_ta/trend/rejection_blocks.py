@@ -330,8 +330,8 @@ later bar's body closes fully through the zone's far edge).
 
 Source: TradingView community indicator "Kale Rejection Blocks - John
 3:16" by lezama03, https://www.tradingview.com/script/
-QjOFE86I-Kale-Rejection-Blocks-John-3-16/ (ported into AwakenAnalytics/
-Backtesting TVPTA-6, 2026-08-11; MPL-2.0 per TradingView's open-source
+QjOFE86I-Kale-Rejection-Blocks-John-3-16/ (ported into the private
+Backtesting repo TVPTA-6, 2026-08-11; MPL-2.0 per TradingView's open-source
 publication convention). Replaces the source's `newRB()` (pivot-candle
 wick qualification), `addRB()`'s array push/FIFO-cap logic (drawing calls
 themselves dropped), and the "relevance lifecycle" `for` loop (the

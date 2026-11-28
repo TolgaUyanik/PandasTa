@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Packaging for the AwakenAnalytics fork of pandas-ta.
+"""Packaging for this fork of pandas-ta (github.com/TolgaUyanik/PandasTa).
 
 ⚠ **The version is load-bearing, and it was wrong until 2026-09-07.** This file
 still declared upstream's `0.2.67b` with upstream's author and URL, so the sole
@@ -20,7 +20,7 @@ from setuptools import setup
 __version__ = "0.2.67b1+tu.1"
 
 long_description = (
-    "AwakenAnalytics fork of pandas-ta: a Python 3 Pandas extension with ~200 "
+    "A fork of pandas-ta: a Python 3 Pandas extension with 400+ "
     "technical analysis indicators, oriented toward machine-learning feature "
     "generation. Adds TradingView/Pine and SMC price-action ports on top of "
     "upstream, plus a generated indicator dictionary recording every column's "

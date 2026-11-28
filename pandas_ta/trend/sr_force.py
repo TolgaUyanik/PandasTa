@@ -344,7 +344,7 @@ touch-count step function into a single 0..5 score.
 
 Source: TradingView community indicator "ATK/DEF Support Resistance SR
 Force Matrix" by ATTDEFS, https://www.tradingview.com/script/1BcGW1Og/
-(ported into AwakenAnalytics/Backtesting TVPTA-6, 2026-08-11; MPL-2.0 per
+(ported into the private Backtesting repo TVPTA-6, 2026-08-11; MPL-2.0 per
 TradingView's open-source publication convention). Replaces the source's
 `calculateResistanceBehavior`/`calculateSupportBehavior` (the two
 functions are byte-identical in the source save for their names -- this

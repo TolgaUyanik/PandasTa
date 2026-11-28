@@ -185,7 +185,7 @@ bounded FIFO of up to `max_levels` zones per side), plus break flags.
 
 Source: TradingView community indicator "Volume-Weighted Support &
 Resistance" (see `datastore/source/pine_triage.csv` for the exact
-attribution row) (ported into AwakenAnalytics/Backtesting TVPTA-3,
+attribution row) (ported into the private Backtesting repo TVPTA-3,
 2026-08-04; MPL-2.0 per TradingView's open-source publication
 convention). Ported in full -- the source's entire substance is this
 detection+zone-lifecycle logic; only the box-drawing/fade-on-break visual

@@ -82,7 +82,7 @@ plain RSI, no additional scale-free work needed.
 
 Source: TradingView community indicator "Kalman Filter-Optimized RSI" by
 markchunwaipaul, https://www.tradingview.com/script/fU13VFoj-Kalman-Filter-Optimized-RSI/
-(ported into AwakenAnalytics/Backtesting TVPTA-3, 2026-08-04; MPL-2.0 per
+(ported into the private Backtesting repo TVPTA-3, 2026-08-04; MPL-2.0 per
 TradingView's open-source publication convention). The source script's
 momentum-histogram/zone-fill display logic is not ported (chart styling
 only, no additional math).

@@ -42,7 +42,7 @@ module docstring so a reader can see exactly how much of §1 is still owed.
 
 ```
 Triangular Directional Pressure (tri_dir_pressure)
-Source: TradingView community indicator "Directional Volume Shapes (Zeiierman)" by Zeiierman, https://www.tradingview.com/script/3XE8qqfr-Directional-Volume-Shapes-Zeiierman/ (ported into AwakenAnalytics/Backtesting TVPTA continuation, TVPTA-6 candidate 10)
+Source: TradingView community indicator "Directional Volume Shapes (Zeiierman)" by Zeiierman, https://www.tradingview.com/script/3XE8qqfr-Directional-Volume-Shapes-Zeiierman/ (ported into the private Backtesting repo TVPTA continuation, TVPTA-6 candidate 10)
 ```
 
 ## 2. Columns and ML form

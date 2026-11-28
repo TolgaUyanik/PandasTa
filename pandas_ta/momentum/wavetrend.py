@@ -68,7 +68,7 @@ deviation.  Returns both the legacy (n1/n2) and confirmed (fixed params)
 variants, plus a crossover signal.
 
 Sources:
-    AwakenAnalytics custom indicator (indicator_engine.py)
+    Custom indicator from the owner's private research engine
     Original: LazyBear's WaveTrend Oscillator (TradingView)
 
 Calculation:

@@ -55,7 +55,7 @@ relationships are aligned bullishly or bearishly.  The result is an
 integer 0-4 for each direction.
 
 Sources:
-    AwakenAnalytics custom indicator (indicator_engine.py)
+    Custom indicator from the owner's private research engine
 
 Calculation:
     EMA_ALIGN_BULL = (EMA9 > EMA21) + (EMA21 > EMA50)

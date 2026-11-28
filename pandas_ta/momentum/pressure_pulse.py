@@ -397,7 +397,7 @@ pressure_pulse.__doc__ = \
 Source: TradingView community indicator "MSL Trend Pulse" by
 MarketStructureLab,
 https://www.tradingview.com/script/5BLfGp6I-Trend-Pulse/
-(ported into AwakenAnalytics/Backtesting TVPTA continuation, TVPTA-6
+(ported into the private Backtesting repo TVPTA continuation, TVPTA-6
 candidate 11)
 
 Pine functions/sections replaced: the Pressure Pulse module (`rawPressure`

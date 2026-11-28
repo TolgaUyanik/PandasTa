@@ -101,7 +101,7 @@ are not exposed, matching this project's distance-form convention).
 
 Source: TradingView community indicator "ConfluX" (Nadaraya-Watson +
 Money Flow Index confluence scorer) (see `datastore/source/pine_triage.csv`
-for the exact attribution row) (ported into AwakenAnalytics/Backtesting
+for the exact attribution row) (ported into the private Backtesting repo
 TVPTA-3, 2026-08-04; MPL-2.0 per TradingView's open-source publication
 convention). Only the kernel-regression envelope itself is ported -- the
 source's MFI confluence scoring (duplicate of the existing `mfi`), volume-

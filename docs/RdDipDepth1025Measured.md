@@ -182,7 +182,7 @@ Pooled max |ρ| 0.8401 and per-frame max median 0.8497 both sit under the 0.90 S
 measured number matches the issue's own prototype measurement almost exactly (0.8401 vs
 `kdj_J_9_3`, same comparator, same band), confirming the prototype's number carried through
 the port unchanged. Ledger row recorded: `python docs/gate_e_ledger.py record
-/home/tolga/.issue-solver/runs/20261127-070101-181/gatee/is181-rd_dip_depth_10_25-4dcb8d6b
+{runs}/20261127-070101-181/gatee/is181-rd_dip_depth_10_25-4dcb8d6b
 --measured 2026-11-27`.
 
 **Non-redundancy against `willr`.** `willr`'s own formula,

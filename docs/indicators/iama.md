@@ -42,7 +42,7 @@ module docstring so a reader can see exactly how much of §1 is still owed.
 
 ```
 Institutional Adaptive MA distance (IAMA_DIST)
-Source: TradingView community indicator "Institutional Moving Averages" by Michael_Fx_Trader, https://www.tradingview.com/script/6SVLw0kE-Institutional-Moving-Averages/ (ported into AwakenAnalytics/Backtesting TVPTA continuation, TVPTA-6 candidate 12)
+Source: TradingView community indicator "Institutional Moving Averages" by Michael_Fx_Trader, https://www.tradingview.com/script/6SVLw0kE-Institutional-Moving-Averages/ (ported into the private Backtesting repo TVPTA continuation, TVPTA-6 candidate 12)
 ```
 
 ## 2. Columns and ML form
