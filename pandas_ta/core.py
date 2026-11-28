@@ -449,8 +449,10 @@ class AnalysisIndicators(BasePandasObject):
                 return df.iloc[:, match[0]] if len(match) else print(NOT_FOUND)
 
     def _indicators_by_category(self, name: str) -> list:
-        """Returns indicators by Categorical name."""
-        return Category[name] if name in self.categories else None
+        """Returns indicators by Categorical name: a COPY, because `strategy()` removes its
+        exclusions from the returned list, and on the shared list that deleted them from
+        `Category` for the rest of the process (#331)."""
+        return list(Category[name]) if name in self.categories else None
 
     def _mp_worker(self, arguments: tuple):
         """Multiprocessing Worker to handle different Methods."""
