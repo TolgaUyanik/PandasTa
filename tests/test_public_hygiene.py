@@ -16,10 +16,10 @@ LOCAL_PATH = re.compile(r"/home/[a-z][a-z0-9_-]*/|/Users/[A-Za-z][^/\s]*/|\b[A-Z
 
 
 def test_no_absolute_local_paths_in_tracked_text():
-    files = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True,
-                           check=True).stdout.split()
+    files = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, text=True,
+                           check=True).stdout.split("\0")
     hits = []
-    for rel in files:
+    for rel in filter(None, files):
         if rel.startswith("docs/pine/") or rel == "tests/test_public_hygiene.py":
             continue
         raw = (ROOT / rel).read_bytes()

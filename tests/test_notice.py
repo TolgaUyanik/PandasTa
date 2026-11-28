@@ -17,7 +17,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MPL = re.compile(r"MPL-2\.0|Mozilla Public License")
-TV = re.compile(r"tradingview\.com/script/[A-Za-z0-9]{8}|pine/[A-Za-z0-9]{8}-")
+TV = re.compile(r"tradingview\.com/script/[A-Za-z0-9]{8}|\b[A-Za-z0-9]{8}-[A-Za-z0-9][A-Za-z0-9-]*\.pine\b")
+# Modules naming a TradingView script by author/title only (no script id): kept by hand.
+NAMED_ONLY = {"pandas_ta/trend/halftrend.py", "pandas_ta/momentum/wavetrend.py"}
 # Upstream pandas-ta modules (present in pandas-ta 0.4.71b0 or pandas-ta-openbb 0.4.25 under the
 # same name) whose docstrings link a TradingView page as a reference, not as a ported source.
 UPSTREAM_REFERENCES = {
@@ -54,5 +56,6 @@ def test_every_tradingview_citation_has_a_licence_statement():
     assert unaccounted == set(), (
         f"modules cite a TradingView script but state no licence: {sorted(unaccounted)}; "
         "state the source's licence in the docstring, or list the file in NOTICE as not verified")
-    stale = (UPSTREAM_REFERENCES | unverified) - silent
+    assert NAMED_ONLY <= unverified, f"author/title-only TradingView sources must be listed as not verified: {sorted(NAMED_ONLY - unverified)}"
+    stale = (UPSTREAM_REFERENCES | (unverified - NAMED_ONLY)) - silent
     assert stale == set(), f"listed as silent but now state a licence or cite nothing: {sorted(stale)}"
