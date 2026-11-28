@@ -5,12 +5,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 A fork of [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, published as
-`github.com/TolgaUyanik/PandasTa`. Upstream shipped ~130 indicators; this fork registers **224** in `Category` — the count that
-matters, since `Category` is what `df.ta.strategy()` sweeps — with the extras being
-TradingView/Pine and SMC price-action ports. README's "Indicators by category" section
-gives the two adjacent counts (232 callable on `df.ta`, plus `drawdown`/`ma` on the module)
-and is checked against the package by `tests/test_readme_counts.py`. Do not retype any of
-the three here.
+`github.com/TolgaUyanik/PandasTa`. Upstream shipped ~130 indicators; this fork registers several
+times that in `Category` — the set that matters, since `Category` is what `df.ta.strategy()`
+sweeps — with the extras being TradingView/Pine, SMC price-action and library ports.
+
+**No count is retyped in the shared files (#331).** The README, `docs/MLCompanionContract.md`, the generated
+dictionary and the tests state no indicator total, no per-category count and no ML-form count:
+every port used to bump them, and two ports merged in either order conflicted on those lines.
+`Category` lists one name per line, sorted, so a port adds one line. Count from the package
+(`sum(map(len, ta.Category.values()))`); `tests/test_readme_counts.py`,
+`tests/test_ml_companions.py` and `tests/test_altport2_ports.py` fail if a count comes back.
 
 Its only consumer is the parent repo, `d:/AwakenAnalytics/Backtesting/`, which pip-installs it from
 GitHub and calls it from `backtesting_engine/indicator_engine.py`. Every indicator here is a candidate
