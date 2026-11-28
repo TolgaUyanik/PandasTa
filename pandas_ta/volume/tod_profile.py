@@ -342,7 +342,7 @@ EXPANDING-WINDOW WARM-UP
     that many strictly-prior samples. This is a floor, not a cure -- the
     sample count keeps growing thereafter, by construction.
 
-    Licence: the source script states none; treated as MPL-2.0 per TradingView's open-source publishing (owner, 2026-11-28; see NOTICE).
+    Licence: the source script states none; treated as MPL-2.0 by the owner's decision (2026-11-28), not by a stated TradingView default; see NOTICE.
 
 Sources:
     https://www.tradingview.com/script/n16YXPSU/

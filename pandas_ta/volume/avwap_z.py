@@ -344,12 +344,12 @@ def avwap_z(high, low, close, volume, anchor=None, min_samples=None, offset=None
 avwap_z.__doc__ = \
 """Anchored VWAP Z-Score (AVWAP_Z)
 
-Licence: the source script states none; treated as MPL-2.0 per TradingView's open-source publishing (owner, 2026-11-28; see NOTICE).
+Licence: the source script states none; treated as MPL-2.0 by the owner's decision (2026-11-28), not by a stated TradingView default; see NOTICE.
 
 Ports ONLY Module 1 ("MODULO 1: VWAP Anclado (automatico)") of the
 TradingView community indicator "MAEM - Volume Suite" by MAEmisary,
 https://www.tradingview.com/script/wbrAnavm/ (ported into the private
-Backtesting repo, task TVPTA continuation, 2026-08-11).
+Backtesting repo during the TVPTA continuation, 2026-08-11).
 
 pandas_ta Category: "volume" (volume-weighted inputs, consistent with
 every sibling in this directory). ML-register family (downstream, in

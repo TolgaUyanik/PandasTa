@@ -672,7 +672,7 @@ test_atr_smoothing_deviates_from_pine_only_during_warmup` pins the
 measured gap. Following the fork's ATR is deliberate -- every sibling
 module in this package reads the same one.
 
-    Licence: the source script states none; treated as MPL-2.0 per TradingView's open-source publishing (owner, 2026-11-28; see NOTICE).
+    Licence: the source script states none; treated as MPL-2.0 by the owner's decision (2026-11-28), not by a stated TradingView default; see NOTICE.
 
 Sources:
     https://www.tradingview.com/script/z8Jv04Q7/
