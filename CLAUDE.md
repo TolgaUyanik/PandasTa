@@ -16,7 +16,7 @@ every port used to bump them, and two ports merged in either order conflicted on
 (`sum(map(len, ta.Category.values()))`); `tests/test_readme_counts.py`,
 `tests/test_ml_companions.py` and `tests/test_altport2_ports.py` fail if a count comes back.
 
-Its only consumer is the parent repo, `d:/AwakenAnalytics/Backtesting/`, which pip-installs it from
+Its only consumer is the parent repo, Backtesting (private; owner-only), which pip-installs it from
 GitHub and calls it from `backtesting_engine/indicator_engine.py`. Every indicator here is a candidate
 **machine-learning feature**, not a chart drawing — that constraint drives the porting rules below.
 
@@ -42,7 +42,7 @@ frames), so a green run does **not** mean the upstream category suites ran.
 **CI.** `.github/workflows/ci.yml` (job `tests`) runs the full suite on every PR and push to `dev`
 and `main`, direct dependencies pinned (pandas 2.3.3 / numpy 1.26.4), with one test deselected by
 name: `test_regenerating_reproduces_the_committed_rows`, which needs the sibling
-`../AlternativeRepos` checkout. `.github/workflows/gate-e-guard.yml` (job `guard`, on
+`../AlternativeRepos` checkout (owner-only). `.github/workflows/gate-e-guard.yml` (job `guard`, on
 `pull_request_target`) runs the BASE branch's copy of `tests/test_gate_e_ledger.py` against the PR,
 so a PR cannot loosen the ledger check it needs loosened. Branch protection on `dev` and `main`
 requires the checks, **admins included**, with the branch up to date with its base: a direct push
@@ -147,7 +147,9 @@ live package and lists every column's observed form.
 
 ## Porting a Pine indicator
 
-Full protocol: `../Backtesting/docs/TVPTA6-Indicator-Porting-Process.md`. Source corpus:
+Full protocol: [`docs/ImplementingAnIndicator.md`](docs/ImplementingAnIndicator.md); scaffold the five
+touch points with `python docs/new_indicator.py <category> <name>` (#331). The older case study,
+`../Backtesting/docs/TVPTA6-Indicator-Porting-Process.md`, is owner-only. Source corpus:
 `docs/pine/` — 2,211 `.pine` files, 46MB, **untracked on purpose** (`.gitignore`). 912 of them
 carry `Mozilla Public License 2.0` / `© TradingView` and the rest state no licence at all, so
 committing them under this repo's root MIT `LICENSE` would misstate their terms. They were tracked
@@ -166,8 +168,8 @@ entry first. Summary of the gates a port must clear:
 | E Attribution | Spearman ρ of each new column against the engine's `compute_all` ∪ the `ml_features` manifest `1d` (329 + 358 = 687 comparators), over the 89 frozen ALTPORT-1 BIST frames (owner's rules, 2026-10-23). Report the measured max with its sample size. Bands (`r3-perframe-0.90`): STRUCK if pooled \|ρ\| ≥ 0.90 or a top-5 comparator's per-frame median ≥ 0.90 · DISCLOSE_GAP 0.80 ≤ ρ < 0.90 · DISCLOSE 0.76 ≤ ρ < 0.80 · SHIP < 0.76. |
 | F Suites | both repos green. |
 
-**Gate E harness:** `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py` (Backtesting #107,
-merged 2026-10-23; reference `../Backtesting/Backtesting/docs/gate_e.md` on Backtesting `main`).
+**Gate E harness (owner-only: it lives in the private repo):**
+`../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py` (Backtesting #107, merged 2026-10-23; reference `../Backtesting/Backtesting/docs/gate_e.md` on Backtesting `main`).
 From `../Backtesting/Backtesting`: `python scripts/analysis/gate_e_overlap.py build` once, then
 `run --module pandas_ta.<category>.<name> --name <name>`; outputs land in
 `../Backtesting/backtest_results/gatee/<name>/`. `run` refuses a stale cache, but **pandas_ta's
@@ -243,7 +245,7 @@ synthetic continuous-float frames and was wrong on real prices: the old loop ret
 while `close <= zone_high`, true on an exact tie, and 86,415 of 408,253 BIST daily bars (21.17%)
 close exactly at an extreme — so the columns fired at 4.63% / 3.51%, driven by tick rounding rather
 than by structure. Gates C/D/E cleared (Gate E max |ρ| 0.6390 / 0.5962, under the 0.76 ship line);
-evidence in the four `fvg_*` CSVs under `../Backtesting/backtest_results/tvpta6/`. The script
+evidence in the four `fvg_*` CSVs under `../Backtesting/backtest_results/tvpta6/` (owner-only). The script
 that produced them was never committed; GATEE-3 re-ran the four columns on the new harness and
 they stay SHIP (Backtesting #107).
 
@@ -259,7 +261,7 @@ function.**
 ## Porting a TA-Lib indicator
 
 Done once, as **TALIB-1** (2026-09-08): the ten `port` rows of
-`../AlternativeRepos/altrepo_talib.csv`. Same five touch points, same Gates A-F; Gate A's
+`../AlternativeRepos/altrepo_talib.csv` (owner-only, like every sibling-repo path in this section). Same five touch points, same Gates A-F; Gate A's
 citation becomes the TA-Lib C function name instead of a Pine line number. Measurements,
 per indicator: `docs/TalibPortsMeasured.md`. Tests: `tests/test_talib1_ports.py`.
 Overlap outputs: `../Backtesting/backtest_results/talib1/`. The harness script was never committed;

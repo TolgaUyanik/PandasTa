@@ -427,3 +427,28 @@ def test_squeeze_flags_stay_int_at_the_default_offset(name):
     assert flags, f"{name} emitted no flag columns"
     dtypes = getattr(df.ta, name)()[flags].dtypes
     assert all(str(d).startswith("int") for d in dtypes), dict(dtypes.astype(str))
+
+
+def test_a_category_strategy_does_not_edit_category():
+    """`strategy("<category>")` removes its exclusions (`long_run`, `short_run`,
+    `td_seq` in trend) from the list `_indicators_by_category` returns. That list
+    WAS `Category[...]` itself, so one trend sweep deleted three registered names
+    from `Category` for the rest of the process (found by #331's Category guard
+    failing only when it ran after this module). It must be a copy."""
+    from pandas_ta import Category
+
+    before = {k: list(v) for k, v in Category.items()}
+    got = pd.DataFrame().ta._indicators_by_category("trend")
+    assert got == Category["trend"] and got is not Category["trend"]
+    got.clear()
+    assert {k: list(v) for k, v in Category.items()} == before
+
+    # The path that actually mutated it: a real category sweep.
+    n = 300
+    rng = np.random.default_rng(0)
+    c = 100 + np.cumsum(rng.normal(0, 1, n))
+    df = pd.DataFrame({"open": c, "high": c + 1, "low": c - 1, "close": c,
+                       "volume": rng.integers(1000, 2000, n).astype(float)},
+                      index=pd.date_range("2020-01-01", periods=n, freq="D"))
+    df.ta.strategy("trend", cores=0, verbose=False)
+    assert {k: list(v) for k, v in Category.items()} == before
