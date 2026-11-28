@@ -9,8 +9,10 @@ either Reddit thread — neither states a formula. Existence, not evidence:
 nothing here tests Kaufman's own claim on real data.
 
 **Status:** Gates A-F measured below. Gate E: **SHIP** (max \|ρ\| 0.7289 vs
-`chop`, under the 0.76 ship line). Whole suites green in the launcher's
-clean worktrees.
+`chop`, under the 0.76 ship line). Whole suites run by the launcher in
+clean worktrees: **0 regressions in either repo** — PandasTa 17,174 passed /
+1 pre-existing failure (base: 17,135 / 1), Backtesting 2,211 passed / 32
+failed / 4 errors, identical at base and HEAD.
 
 | module | category | column | range |
 |---|---|---|---|
@@ -214,7 +216,7 @@ per-frame max median 0.7269 < 0.90, so not STRUCK either.
 
 **Gate E verdict: SHIP.** Recorded in `docs/gate_e_ledger.csv`
 (`python docs/gate_e_ledger.py record
-/home/tolga/.issue-solver/runs/20261127-183057-186/gatee/is186-nm_price_density_10-dc9aa7c9
+{run-dir}/gatee/is186-nm_price_density_10-dc9aa7c9
 --measured 2026-11-27`).
 
 ## Gate F — suites

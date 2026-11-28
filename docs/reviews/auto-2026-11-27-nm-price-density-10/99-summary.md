@@ -20,3 +20,6 @@ launcher's Gate E run and a later receipt session record the ledger row.
 `tests/test_nm_price_density_10.py` alone: 31 passed. CPU-feature variant
 (`python docs/measure_nm_price_density_10_cpu.py`, `AVX512F AVX512_SKX AVX2 FMA3` disabled):
 31 passed.
+
+Superseded at commit 79b4698 — Gate E ran SHIP, ledger row recorded, target suite re-ran
+1,785 passed / 0 failed; see docs/NmPriceDensity10Measured.md.

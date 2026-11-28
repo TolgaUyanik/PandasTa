@@ -196,8 +196,9 @@ REGISTERED = {
 CATEGORY_TOTAL = 421  # +1 on issue #186's nm_price_density_10 port (volatility; Kaufman's
 # price density: SUM(H-L, 10) / (MAX(H, 10) - MIN(L, 10)); named, undefined, in two Reddit
 # threads only, tier 4, rd:algotrading:15xt5xt and rd:algotrading:1nrkjby; Kaufman 2013,
-# Trading Systems and Methods 5th ed., ch. 1 "Other Measurements of Noise"; Gate E:
-# pending, run by issue-solver after this session; see docs/NmPriceDensity10Measured.md),
+# Trading Systems and Methods 5th ed., ch. 1 "Other Measurements of Noise"; Gate E SHIP,
+# 0.7289 vs `chop` (per-frame max median 0.7269), run is186-nm_price_density_10-dc9aa7c9,
+# measured 2026-11-27; see docs/NmPriceDensity10Measured.md),
 # +1 on issue #185's nm_effort_result_20 port (volume; Wyckoff's
 # effort-vs-result, relative volume over relative range: [V/SMA20(V)] / [(H-L)/SMA20(H-L)];
 # named in two Reddit threads only, tier 4, rd:Daytrading:1k9oyhh and a round-6 "Volume Range
