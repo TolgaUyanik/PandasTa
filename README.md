@@ -29,7 +29,7 @@ on automated tests (and, for queue work, an automated reviewer), not on a human 
   suite (about 17,000 tests) before the PR merges into `dev`. Its redundancy against a fixed set of several hundred reference
   features (Gate E) is recorded in `docs/gate_e_ledger.csv`; a release to `main` fails until
   every new indicator has its row.
-- **Actively maintained.** 215 pull requests merged since 2026-09-11 (measured 2026-11-28). The
+- **Actively maintained.** 216 pull requests merged since 2026-09-11 (measured 2026-11-28). The
   original upstream GitHub repository is no longer available.
 
 **How it compares** (counted 2026-11-28 by the method in the last column; libraries count
@@ -199,7 +199,7 @@ generated [Known breaks](docs/IndicatorDictionary.md#known-breaks) section.
 
 ## How this repository is built
 
-About nine in ten merged pull requests (190 of 215, measured 2026-11-28) were written by AI coding
+About nine in ten merged pull requests (191 of 216, measured 2026-11-28) were written by AI coding
 agents (Claude Code), most of them from a GitHub issue queue. A human owner decides what gets
 built and rules on judgement calls; `dev` requires no human approving review, so what merges
 is gated by the automated checks below. The pipeline:
