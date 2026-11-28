@@ -88,7 +88,7 @@ Source: TradingView community indicator "Pocket Pivot (Kacher/Morales) -
 Custom" by an unattributed orphan-metadata slug (see
 `datastore/source/pine_triage.csv`),
 https://www.tradingview.com/script/fU5exdA3-Pocket-Pivot-Kacher-Morales-tez/
-(ported into the private Backtesting repo TVPTA-3, 2026-08-04; MPL-2.0 per
+(ported into the private Backtesting repo, task TVPTA-3, 2026-08-04; MPL-2.0 per
 TradingView's open-source publication convention).
 
 Calculation:

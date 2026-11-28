@@ -42,7 +42,7 @@ module docstring so a reader can see exactly how much of §1 is still owed.
 
 ```
 Anchored VWAP Z-Score (AVWAP_Z)
-Ports ONLY Module 1 ("MODULO 1: VWAP Anclado (automatico)") of the TradingView community indicator "MAEM - Volume Suite" by MAEmisary, https://www.tradingview.com/script/wbrAnavm/ (ported into the private Backtesting repo, TVPTA continuation, 2026-08-11).
+Ports ONLY Module 1 ("MODULO 1: VWAP Anclado (automatico)") of the TradingView community indicator "MAEM - Volume Suite" by MAEmisary, https://www.tradingview.com/script/wbrAnavm/ (ported into the private Backtesting repo, task TVPTA continuation, 2026-08-11).
 ```
 
 ## 2. Columns and ML form

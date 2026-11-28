@@ -69,7 +69,7 @@ currently has no ticket.
 That is **83.5 %** of the pages carrying the stub token in §6–§9 — the number is derived here
 from the two rows above and appears in no artifact.
 
-Pages in the measured column: [`atr`](atr.md), [`atr2`](atr2.md), [`beta`](beta.md), [`bos`](bos.md), [`bw_mfi`](bw_mfi.md), [`cvi`](cvi.md), [`dema2`](dema2.md), [`dtdb`](dtdb.md), [`ema`](ema.md), [`ema2`](ema2.md), [`equal_highs_lows`](equal_highs_lows.md), [`fvg`](fvg.md), [`fvg_sweep_magnet`](fvg_sweep_magnet.md), [`har_park`](har_park.md), [`head_shoulders`](head_shoulders.md), [`ht_dcperiod`](ht_dcperiod.md), [`ht_dcphase`](ht_dcphase.md), [`ht_phasor`](ht_phasor.md), [`ht_sine`](ht_sine.md), [`ht_trendline`](ht_trendline.md), [`ht_trendmode`](ht_trendmode.md), [`imi`](imi.md), [`liquidity_compression_box`](liquidity_compression_box.md), [`macd_area_divergence`](macd_area_divergence.md), [`mama`](mama.md), [`nadaraya_watson_envelope`](nadaraya_watson_envelope.md), [`pressure_pulse`](pressure_pulse.md), [`range_profile`](range_profile.md), [`rma2`](rma2.md), [`rounding_cup`](rounding_cup.md), [`sarext`](sarext.md), [`smc_sweep`](smc_sweep.md), [`sr_corridor`](sr_corridor.md), [`supertrend2`](supertrend2.md), [`t3`](t3.md), [`t3_tv`](t3_tv.md), [`tema2`](tema2.md), [`triangle_wedge`](triangle_wedge.md), [`triple_top_bottom`](triple_top_bottom.md), [`tvstop`](tvstop.md).
+Pages in the measured column: [`atr`](atr.md), [`atr2`](atr2.md), [`beta`](beta.md), [`bos`](bos.md), [`bw_mfi`](bw_mfi.md), [`cvi`](cvi.md), [`dema2`](dema2.md), [`dtdb`](dtdb.md), [`ema`](ema.md), [`ema2`](ema2.md), [`equal_highs_lows`](equal_highs_lows.md), [`fvg`](fvg.md), [`fvg_sweep_magnet`](fvg_sweep_magnet.md), [`har_park`](har_park.md), [`head_shoulders`](head_shoulders.md), [`ht_dcperiod`](ht_dcperiod.md), [`ht_dcphase`](ht_dcphase.md), [`ht_phasor`](ht_phasor.md), [`ht_sine`](ht_sine.md), [`ht_trendline`](ht_trendline.md), [`ht_trendmode`](ht_trendmode.md), [`imi`](imi.md), [`liquidity_compression_box`](liquidity_compression_box.md), [`macd_area_divergence`](macd_area_divergence.md), [`mama`](mama.md), [`nadaraya_watson_envelope`](nadaraya_watson_envelope.md), [`range_profile`](range_profile.md), [`rma2`](rma2.md), [`rounding_cup`](rounding_cup.md), [`sarext`](sarext.md), [`smc_sweep`](smc_sweep.md), [`sr_corridor`](sr_corridor.md), [`supertrend2`](supertrend2.md), [`t3`](t3.md), [`t3_tv`](t3_tv.md), [`tema2`](tema2.md), [`triangle_wedge`](triangle_wedge.md), [`triple_top_bottom`](triple_top_bottom.md), [`tvstop`](tvstop.md).
 
 **Every page's Gate A, C and E rows are stubs unless that page says otherwise.**
 **14** indicators have a Gate E run (`backtest_results/gatee/*/meta.json`, mode `run`;
@@ -157,7 +157,6 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`pgo`](pgo.md) | yes | 1 | stub |
 | [`po`](po.md) | yes | 1 | stub |
 | [`ppo`](ppo.md) | yes | 3 | stub |
-| [`pressure_pulse`](pressure_pulse.md) | yes | 1 | measured |
 | [`psl`](psl.md) | yes | 1 | stub |
 | [`pvo`](pvo.md) | yes | 3 | stub |
 | [`pzo`](pzo.md) | yes | 1 | stub |
@@ -205,7 +204,6 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`hma`](hma.md) | yes | 1 | stub |
 | [`ht_trendline`](ht_trendline.md) | **no** | 0 | measured |
 | [`hwma`](hwma.md) | **no** | 0 | stub |
-| [`iama`](iama.md) | yes | 1 | stub |
 | [`ichimoku`](ichimoku.md) | yes | 5 | stub |
 | [`ichimoku_ml`](ichimoku_ml.md) | yes | 8 | stub |
 | [`jma`](jma.md) | yes | 1 | stub |
@@ -380,7 +378,6 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`pvr`](pvr.md) | yes | 1 | stub |
 | [`pvt`](pvt.md) | yes | 1 | stub |
 | [`tod_profile`](tod_profile.md) | yes | 2 | stub |
-| [`tri_dir_pressure`](tri_dir_pressure.md) | yes | 1 | stub |
 | [`up_and_down_volume`](up_and_down_volume.md) | **no** | 0 | stub |
 | [`vfi`](vfi.md) | yes | 1 | stub |
 | [`vol_delta`](vol_delta.md) | yes | 1 | stub |

@@ -284,7 +284,7 @@ both event types; levels older than `max_age` bars expire unresolved.
 Source: TradingView community indicator "Liquidity Sweep Hunter |
 AlphaScript" by AlphaScript, https://www.tradingview.com/script/
 PqkIPsgl-Liquidity-Sweep-Hunter-AlphaScript/ (ported into the private
-Backtesting repo TVPTA-6, 2026-08-11; MPL-2.0 per TradingView's open-source
+Backtesting repo, task TVPTA-6, 2026-08-11; MPL-2.0 per TradingView's open-source
 publication convention). Replaces the source's pivot-detection block
 (`ta.pivothigh`/`ta.pivotlow` under `barstate.isconfirmed`), its per-side
 level-pool maintenance (push/shift array with `maxLevels`/`maxAge`), and

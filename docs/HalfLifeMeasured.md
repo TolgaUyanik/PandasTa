@@ -16,7 +16,7 @@
 > **Review rounds 1 and 2 (2026-11-08/09)** changed the implementation (rolling cov/var, then
 > blocked and anchored with an exact flatness test; the NaN domain) and replaced the Gate A oracle;
 > every number below is from the current code. The records are
-> `D:\pandas_ta_issues\docs\reviews\2026-11-08-issue-4-halflife-review.md` and
+> `<workspace>\docs\reviews\2026-11-08-issue-4-halflife-review.md` and
 > `...\2026-11-09-issue-4-halflife-review-r2.md` (outside the repo) and the PR #256 thread.
 
 `HLIFE_100` is the Ornstein-Uhlenbeck mean-reversion half-life in bars: over the last 100

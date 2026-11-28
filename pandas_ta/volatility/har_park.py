@@ -197,7 +197,7 @@ single-scale range measures with no multi-horizon regression component).
 
 Source: TradingView community indicator "HAR-Parkinson Volume Forecast" by
 jqu2, https://www.tradingview.com/script/WnzgKfOS-HAR-Parkinson-Volume-Forecast/
-(ported into the private Backtesting repo TVPTA-6, 2026-08-10; MPL-2.0 per
+(ported into the private Backtesting repo, task TVPTA-6, 2026-08-10; MPL-2.0 per
 TradingView's open-source publication convention). Only the forecast value
 itself (`fpct`, the scale-free % output) is ported. NOT replicated: the
 price-scale `expRange` conversion (`fpct/100 * close * sqrt(4ln2)`, a raw

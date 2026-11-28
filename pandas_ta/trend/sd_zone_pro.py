@@ -470,7 +470,7 @@ shelf's mass expressed in average-bars-of-volume.
 Source: TradingView community indicator "SD Zone Pro"
 (`docs/TradingView/pine/gIs5tbMW.pine`, Pine v6, 440 lines; see
 `datastore/source/pine_candidates_families.csv` for the attribution row)
-(ported into the private Backtesting repo TVPTA-6, 2026-08-15; MPL-2.0
+(ported into the private Backtesting repo, task TVPTA-6, 2026-08-15; MPL-2.0
 per TradingView's open-source publication convention).
 
 WHY THIS IS NOT A `volume_sr_zones` RE-PORT

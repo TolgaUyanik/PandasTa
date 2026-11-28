@@ -77,7 +77,7 @@ following month.
 Source: TradingView community indicator "Institution Levels Gath" by
 wintonbanks-adjacent authorship (see `datastore/source/pine_triage.csv`
 for the exact attribution row), section "18. PREVIOUS-MONTH RELATIONSHIP"
-(ported into the private Backtesting repo TVPTA-3, 2026-08-04; MPL-2.0 per
+(ported into the private Backtesting repo, task TVPTA-3, 2026-08-04; MPL-2.0 per
 TradingView's open-source publication convention). Only the prior-month
 high/low/midpoint distance is ported -- the source script's psychological
 (round-number) price-level grid, monthly separators/shading, and

@@ -52,7 +52,7 @@ setup(
     download_url="https://github.com/TolgaUyanik/PandasTa.git",
     keywords=["technical analysis", "trading", "python3", "pandas",
               "machine learning", "feature engineering"],
-    license="The MIT License (MIT)",
+    license="MIT AND MPL-2.0",  # MPL-2.0 for the TradingView-derived files listed in NOTICE
     python_requires=">=3.9",
     classifiers=[
         "Development Status :: 4 - Beta",
@@ -62,6 +62,7 @@ setup(
         "Programming Language :: Python :: 3.12",
         "Operating System :: OS Independent",
         "License :: OSI Approved :: MIT License",
+        "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
         "Natural Language :: English",
         "Intended Audience :: Developers",
         "Intended Audience :: Financial and Insurance Industry",

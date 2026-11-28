@@ -336,7 +336,7 @@ score -- never re-scored as the level ages in the pool.
 
 Source: TradingView community indicator "ATK/DEF Support Resistance S/R
 Channel Rating Engine" by ATTDEFS, https://www.tradingview.com/script/2wGxbRZP/
-(ported into the private Backtesting repo TVPTA continuation, 2026-08-13;
+(ported into the private Backtesting repo, task TVPTA continuation, 2026-08-13;
 MPL-2.0 per TradingView's open-source publication convention). This
 source is a documented SUPERSET of `1BcGW1Og` ("ATK/DEF Support
 Resistance SR Force Matrix", already ported as `sr_force.py`) -- same

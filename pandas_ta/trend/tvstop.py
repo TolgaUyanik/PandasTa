@@ -129,7 +129,7 @@ WHAT WAS BUILT, MEASURED AND THEN DELETED
 duplicates an ENGINE column, and not marginally:
 
     Spearman(TVS_DIST, RSI) = +0.930462 over 404,066 pooled bars
-    (89 BIST_100 daily frames, private `Backtesting`).
+    (89 BIST_100 daily frames, the private `Backtesting` repo).
 
 That is not a pooling artifact.  Measured on each frame SEPARATELY the
 same cell reads mean +0.9321 / median +0.9329 / min +0.8126 / max

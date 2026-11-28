@@ -8,7 +8,9 @@ of the book with a formula was readable (issue #261, 2026-11-08). The definition
 divided by the mean, and finta's constant 3.2, which multiplies both numerator and denominator,
 cancels and is left out. The math is ported, not the code. The ProRealCode port (which does not
 divide by the mean) is the reading not taken (§A4). Nothing here tests predictive value.
-**Status (2026-11-26): Gate A cleared against finta's own code (§A0). Gate E DISCLOSE_GAP,
+**Status (2026-11-26; Gate A evidence updated 2026-11-28): Gate A by the formula oracle written as
+explicit loops (§A1, `tests/test_wavepm.py`); agreement with finta's code was measured 2026-11-26
+before that test was removed (§A0). Gate E DISCLOSE_GAP,
 0.8088 vs `CHOP` (§E).** §A0 and §E were added at merge time and are NOT printed by
 `docs/measure_wavepm.py`: §A0 came from `tests/test_wavepm.py::test_gate_a_matches_finta_wavepm` (removed 2026-11-28, see §A0),
 §E from the Gate E harness run recorded in `docs/gate_e_ledger.csv`.

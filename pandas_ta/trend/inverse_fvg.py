@@ -297,7 +297,7 @@ detector ignores micro-imbalances and keys on displacement-sized ones.
 
 Source: TradingView community indicator "Liquidity Sweeps & Inverse FVGs
 [LuxAlgo]" by LuxAlgo, https://www.tradingview.com/script/GC3Vxs8n/
-(ported into the private Backtesting repo TVPTA-6 candidate 14,
+(ported into the private Backtesting repo, task TVPTA-6 candidate 14,
 2026-08-14; MPL-2.0, per the source file's own header). Ports the
 source's INVERSE-FVG half in full: the volatility-filtered FVG detection
 block, the inversion state machine that promotes a detected FVG to a

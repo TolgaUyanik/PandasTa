@@ -147,7 +147,7 @@ this reuses) -- no divergence detector exists anywhere in the catalog.
 
 Source: TradingView community indicator "RSI Divergence Engine v3 [30-40
 Bar Window]" (see `datastore/source/pine_triage.csv` for the exact
-attribution row) (ported into the private Backtesting repo TVPTA-3,
+attribution row) (ported into the private Backtesting repo, task TVPTA-3,
 2026-08-04; MPL-2.0 per TradingView's open-source publication
 convention). Only the divergence-detection logic is ported -- the
 source's fixed reward:risk SL/TP line drawing and 200-EMA trend-filter

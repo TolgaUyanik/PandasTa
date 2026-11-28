@@ -201,7 +201,7 @@ close crosses through it. Not a duplicate of `zigzag`/`swing_equilibrium`
 
 Source: TradingView community indicator "Equal Highs & Equal Lows" (see
 `datastore/source/pine_triage.csv` for the exact attribution row) (ported
-into the private Backtesting repo TVPTA-3, 2026-08-04; MPL-2.0 per
+into the private Backtesting repo, task TVPTA-3, 2026-08-04; MPL-2.0 per
 TradingView's open-source publication convention). Pivot confirmation
 uses Pine's actual `ta.pivothigh`/`ta.pivotlow` tie semantics (strict,
 unique extreme -- a genuine tie confirms NEITHER bar), deliberately

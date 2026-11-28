@@ -173,7 +173,7 @@ uses band WIDTH, not raw range/ATR + body-ratio + touch-count).
 
 Source: TradingView community indicator "Liquidity Compression Box" (see
 `datastore/source/pine_triage.csv` for the exact attribution row) (ported
-into the private Backtesting repo TVPTA-3, 2026-08-04; MPL-2.0 per
+into the private Backtesting repo, task TVPTA-3, 2026-08-04; MPL-2.0 per
 TradingView's open-source publication convention). Only the box-
 detection + frozen-breakout state machine is ported -- the source's
 trailing take-profit and stop-loss trade-management overlay (a

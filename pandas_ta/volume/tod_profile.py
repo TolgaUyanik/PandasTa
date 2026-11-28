@@ -141,7 +141,7 @@ Ports the PROFILE ACCUMULATOR (Pine L101-175) of the TradingView community
 indicator "Volume & Volatility Time-of-Day - Seasonality Forecast"
 (source file: 291 lines, verified by `wc -l`; slug n16YXPSU, vendored at
 Backtesting/docs/TradingView/pine/n16YXPSU-Volume-Volatility-Time-of-Day.pine),
-ported into the private Backtesting repo TVPTA-6 (2026-08-14, candidate 16).
+ported into the private Backtesting repo, task TVPTA-6 (2026-08-14, candidate 16).
 
 The question it answers is not "buy or sell" but "at what TIME OF DAY does
 this instrument typically wake up". For every minute-of-day slot it keeps a
@@ -341,6 +341,8 @@ EXPANDING-WINDOW WARM-UP
     L58): no value is emitted for a slot until it has accumulated at least
     that many strictly-prior samples. This is a floor, not a cure -- the
     sample count keeps growing thereafter, by construction.
+
+    Licence: the source script states none; treated as MPL-2.0 per TradingView's open-source publishing (owner, 2026-11-28; see NOTICE).
 
 Sources:
     https://www.tradingview.com/script/n16YXPSU/

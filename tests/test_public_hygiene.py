@@ -11,17 +11,21 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-LOCAL_PATH = re.compile(r"/home/[a-z][a-z0-9_-]*/|\b[A-Za-z]:[\\/]+(?:Users|home)[\\/]")
+# /home/<user>/, /Users/<user>/ (macOS), and any Windows drive path X:\<dir>\ or X:/<dir>/.
+LOCAL_PATH = re.compile(r"/home/[a-z][a-z0-9_-]*/|/Users/[A-Za-z][^/\s]*/|\b[A-Za-z]:[\\/]+[A-Za-z_][^\s\\/:]*[\\/]")
 
 
 def test_no_absolute_local_paths_in_tracked_text():
-    files = subprocess.run(["git", "ls-files", "*.md", "*.py", "*.csv", "*.json", "*.txt", "*.yml"],
-                           cwd=ROOT, capture_output=True, text=True, check=True).stdout.split()
+    files = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True,
+                           check=True).stdout.split()
     hits = []
     for rel in files:
         if rel.startswith("docs/pine/") or rel == "tests/test_public_hygiene.py":
             continue
-        text = (ROOT / rel).read_text(encoding="utf8", errors="replace")
+        raw = (ROOT / rel).read_bytes()
+        if b"\0" in raw[:4096]:       # binary
+            continue
+        text = raw.decode("utf8", errors="replace")
         for n, line in enumerate(text.splitlines(), 1):
             if LOCAL_PATH.search(line):
                 hits.append(f"{rel}:{n}")

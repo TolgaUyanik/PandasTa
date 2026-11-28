@@ -359,7 +359,7 @@ doing it.
 
 Source: TradingView community indicator "趋势结构系统均线共振版" (Trend
 Structure System, MA Resonance Edition), https://www.tradingview.com/
-script/iOd2A4mw/ (ported into the private Backtesting repo TVPTA-6
+script/iOd2A4mw/ (ported into the private Backtesting repo, task TVPTA-6
 candidate 15; MPL-2.0 per TradingView's open-source publication
 convention). Pine v6, 172 lines.
 

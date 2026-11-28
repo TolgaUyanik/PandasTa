@@ -64,7 +64,7 @@ comparable, and directly usable by an ML model without per-ticker scaling.
 
 Source: TradingView community indicator "TY's MA disparity for mean
 reversion strategy" by TY, https://www.tradingview.com/script/QbWGkTqA-TY-s-MA-disparity-for-mean-reversion-strategy/
-(ported into the private Backtesting repo TVPTA-3, 2026-08-03; MPL-2.0 per
+(ported into the private Backtesting repo, task TVPTA-3, 2026-08-03; MPL-2.0 per
 TradingView's open-source publication convention -- see the corpus's
 `docs/reviews/auto-2026-08-03-tvpta-2345/` for the porting session).
 
