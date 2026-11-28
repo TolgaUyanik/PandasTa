@@ -141,6 +141,8 @@ def bpress(close, length=None, offset=None, **kwargs):
 bpress.__doc__ = \
 """Bubble Pressure (BPRESS)
 
+Licence of the source script: MPL-2.0 (its header), (c) BorisTheBlade687; this file is MPL-2.0 (see NOTICE).
+
 Ports ONLY the `bubblePressure` sub-component of the TradingView community
 indicator "Bitcoin Critical State Indicator (BCSI)" by BorisTheBlade687
 (https://www.tradingview.com/script/RiUxCPkj/). BCSI is a 7-component

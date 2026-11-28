@@ -14,6 +14,7 @@ from .decay import decay
 from .decreasing import decreasing
 from .dpo import dpo
 from .dtdb import dtdb
+from .expand3_3pct import expand3_3pct
 from .dx import dx
 from .equal_highs_lows import equal_highs_lows
 from .flag_breakout import flag_breakout
@@ -21,10 +22,12 @@ from .fvg import fvg
 from .fvg_sweep_magnet import fvg_sweep_magnet
 from .g191_069 import g191_069
 from .g191_098 import g191_098
-from .halftrend import halftrend
 from .head_shoulders import head_shoulders
 from .increasing import increasing
 from .inverse_fvg import inverse_fvg
+from .j_chandelier_dist import j_chandelier_dist
+from .j_kaufmanstop_dist import j_kaufmanstop_dist
+from .j_safezone_dist import j_safezone_dist
 from .liquidity_compression_box import liquidity_compression_box
 from .liquidity_sweep import liquidity_sweep
 from .smc_sweep import smc_sweep
@@ -37,6 +40,9 @@ from .priormonth_range import priormonth_range
 from .psar import psar
 from .sarext import sarext
 from .qstick import qstick
+from .rd_adx3_med10 import rd_adx3_med10
+from .rd_adx8_med20 import rd_adx8_med20
+from .rd_lh_run import rd_lh_run
 from .rejection_blocks import rejection_blocks
 from .renko_trend import renko_trend
 from .ribbon_concordance import ribbon_concordance
@@ -47,7 +53,9 @@ from .sphinx_unicorn import sphinx_unicorn
 from .sr_corridor import sr_corridor
 from .sr_decay import sr_decay
 from .sr_force import sr_force
+from .stiffness import stiffness
 from .swing_equilibrium import swing_equilibrium
+from .tdi import tdi
 from .tsignals import tsignals
 from .triangle_wedge import triangle_wedge
 from .triple_top_bottom import triple_top_bottom

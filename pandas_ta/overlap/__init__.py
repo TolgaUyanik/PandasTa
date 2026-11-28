@@ -21,7 +21,8 @@ from .ichimoku_ml import ichimoku_ml
 from .linreg import linreg
 from .linreg_channel import linreg_channel
 from .ma import ma
-# iama imports pandas_ta.volatility.atr, whose own top-level `from
+# A module importing pandas_ta.volatility.atr (iama did, until its removal on
+# 2026-11-28) meets atr's own top-level `from
 # pandas_ta.overlap import ma` resolves against THIS partially-built
 # module while overlap/__init__.py is still executing (a circular
 # self-import) -- placing this line before `ma` is bound above makes
@@ -36,7 +37,6 @@ from .ma import ma
 # review, 2026-08-14) -- any overlap-package module that transitively
 # imports atr()/ma() would trip this if placed above line 19.
 # Must stay below the `ma` import.
-from .iama import iama
 from .ma_disparity import ma_disparity
 from .mama import mama
 from .mcgd import mcgd

@@ -68,8 +68,12 @@ deviation.  Returns both the legacy (n1/n2) and confirmed (fixed params)
 variants, plus a crossover signal.
 
 Sources:
-    AwakenAnalytics custom indicator (indicator_engine.py)
-    Original: LazyBear's WaveTrend Oscillator (TradingView)
+    Custom indicator from the owner's private research engine
+    Original: LazyBear's WaveTrend Oscillator (TradingView),
+    https://www.tradingview.com/script/2KE8wTuF-Indicator-WaveTrend-Oscillator-WT/
+    Licence: the source script states none (only "If you use this code in its original/modified
+    form, do drop me a note", read 2026-11-28); treated as MPL-2.0 by the owner's decision
+    (2026-11-28), not by a stated TradingView default; see NOTICE.
 
 Calculation:
     Default Inputs:

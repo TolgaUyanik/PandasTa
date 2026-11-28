@@ -40,6 +40,7 @@ from .inertia import inertia
 from .imi import imi
 from .j_acosc import j_acosc
 from .j_gator import j_gator
+from .j_wae import j_wae
 from .kalman_rsi import kalman_rsi
 from .kdj import kdj
 from .kst import kst
@@ -56,10 +57,10 @@ from .pfe import pfe
 from .pgo import pgo
 from .po import po
 from .ppo import ppo
-from .pressure_pulse import pressure_pulse
 from .psl import psl
 from .pvo import pvo
 from .qqe import qqe
+from .rd_dip_depth_10_25 import rd_dip_depth_10_25
 from .roc import roc
 from .rsi import rsi
 from .rsi_divergence import rsi_divergence
@@ -79,10 +80,12 @@ from .trix import trix
 from .trixh import trixh
 from .tsi import tsi
 from .uo import uo
+from .vwd import vwd
 from .vwmacd import vwmacd
 from .wavetrend import wavetrend
 from .willr import willr
 from .pzo import pzo
 from .szo import szo
+from .tao import tao
 from .wpo import wpo
 from .stc_tv import stc_tv

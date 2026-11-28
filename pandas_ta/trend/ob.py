@@ -77,7 +77,7 @@ Identifies institutional order block zones and flags when the current
 bar's close is inside an active (unmitigated) order block zone.
 
 Sources:
-    AwakenAnalytics custom indicator (indicator_engine.py)
+    Custom indicator from the owner's private research engine
     ICT (Inner Circle Trader) concept
 
 Calculation:

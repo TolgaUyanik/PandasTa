@@ -97,7 +97,7 @@ Detects 3-bar Fair Value Gaps (imbalances) and tracks whether the
 current bar is inside an active (unfilled) FVG zone.
 
 Sources:
-    AwakenAnalytics custom indicator (indicator_engine.py)
+    Custom indicator from the owner's private research engine
     ICT (Inner Circle Trader) concept
 
 ⚠ Membership and fill are both evaluated on CLOSE, not on the bar's low/high.

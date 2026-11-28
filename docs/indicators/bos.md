@@ -42,7 +42,7 @@ module docstring so a reader can see exactly how much of §1 is still owed.
 
 ```
 Break of Structure (bos)
-Identifies when price breaks above the last swing high (bullish BOS) or below the last swing low (bearish BOS).  Also returns HIGHER_HIGH and LOWER_LOW signals at swing pivot bars.
+Identifies when price closes above the last confirmed swing high (bullish BOS) or below the last confirmed swing low (bearish BOS). Also returns HIGHER_HIGH and LOWER_LOW on the bar that confirms a swing.
 ```
 
 ## 2. Columns and ML form
@@ -74,7 +74,7 @@ and were alive on real prices (`CLAUDE.md`, FVGDEAD).
 | | |
 |---|---|
 | Source | STUB: not measured — fill from pandas_ta/trend/bos.py |
-| Module length | 98 newline-terminated lines, 3284 bytes (`grep -c '' pandas_ta/trend/bos.py`) |
+| Module length | 148 newline-terminated lines, 5631 bytes (`grep -c '' pandas_ta/trend/bos.py`) |
 | Version / licence | STUB: not measured — fill from pandas_ta/trend/bos.py |
 | TA-Lib equivalent | STUB: not measured — fill from docs/TalibPortsMeasured.md |
 | Gate A anchor | STUB: not measured — fill from pandas_ta/trend/bos.py |

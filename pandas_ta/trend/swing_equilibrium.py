@@ -142,7 +142,7 @@ already-validated `dist_to_res_level`.
 
 Source: TradingView community indicator "Market Structure & 50%
 Retracement" by Gringa507, https://www.tradingview.com/script/pBEGoW2X-Market-Structure-50-Retracement/
-(ported into AwakenAnalytics/Backtesting TVPTA-3, 2026-08-04; MPL-2.0 per
+(ported into the private Backtesting repo, task TVPTA-3, 2026-08-04; MPL-2.0 per
 TradingView's open-source publication convention).
 
 ⚠ Overlaps existing `pandas_ta.trend.bos` (swing-high/low + BOS booleans)

@@ -19,7 +19,7 @@ function name only.
 
 ## 1. Measured inventory
 
-Every number PINEBI-2's task text asserts, checked. Commands are re-runnable from `d:/AwakenAnalytics/`.
+Every number PINEBI-2's task text asserts, checked. Commands are re-runnable from `<workspace>/`.
 
 | Claim in PINEBI-2 | Verdict | Measured |
 |---|---|---|
@@ -368,7 +368,7 @@ Two corrections to make in `TODO.md` while doing that, both stale text:
 ## Reproducing this document
 
 ```sh
-cd d:/AwakenAnalytics
+cd <workspace>
 git -C PandasTa check-ignore -v docs/pine
 find PandasTa/docs/pine -name '*.pine' -type f | wc -l
 grep -rl "Mozilla Public License" PandasTa/docs/pine | wc -l

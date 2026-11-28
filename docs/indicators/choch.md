@@ -72,7 +72,7 @@ and were alive on real prices (`CLAUDE.md`, FVGDEAD).
 | | |
 |---|---|
 | Source | STUB: not measured — fill from pandas_ta/trend/choch.py |
-| Module length | 113 newline-terminated lines, 3640 bytes (`grep -c '' pandas_ta/trend/choch.py`) |
+| Module length | 127 newline-terminated lines, 4183 bytes (`grep -c '' pandas_ta/trend/choch.py`) |
 | Version / licence | STUB: not measured — fill from pandas_ta/trend/choch.py |
 | TA-Lib equivalent | STUB: not measured — fill from docs/TalibPortsMeasured.md |
 | Gate A anchor | STUB: not measured — fill from pandas_ta/trend/choch.py |

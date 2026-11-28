@@ -50,9 +50,11 @@ def _ohlcv(n=600, level=100.0, seed=11):
     )
 
 
+# Named for the eleven WIRING-1 fixed; `halftrend` was removed on 2026-11-28 (its TradingView
+# source is GPL-3.0), so ten remain.
 ELEVEN = [
     "wavetrend", "ema_align", "ichimoku_ml", "linreg_channel", "bos", "choch",
-    "fvg", "halftrend", "ob", "zigzag", "vol_delta",
+    "fvg", "ob", "zigzag", "vol_delta",
 ]
 
 
@@ -103,7 +105,6 @@ NON_DEFAULT_KWARGS = {
     "bos": {"swing_length": 12},
     "choch": {"swing_length": 12},
     "fvg": {"max_zones": 3},
-    "halftrend": {"atr_period": 9, "amplitude": 3},
     "ob": {"max_zones": 3},
     "zigzag": {"pct_threshold": 0.02},
     "vol_delta": {},                       # takes no parameter beyond offset
@@ -238,7 +239,7 @@ def test_full_strategy_runs_with_no_exclude_list():
     # Spot-check that the previously dark indicators actually contributed --
     # one column from each of the three defects this task fixed.
     for column in ("WAVETREND", "ICHI_PRICE_VS_CLOUD", "EMA_ALIGN_BULL",
-                   "BOS_BULL", "CHoCH_BULL", "FVG_BULL", "HALFTREND",
+                   "BOS_BULL", "CHoCH_BULL", "FVG_BULL",
                    "LINREG_SLOPE"):
         assert column in df.columns, f"{column} missing after strategy()"
     assert any(c.startswith("ZIGZAG_") for c in df.columns)      # zigzag
@@ -261,7 +262,7 @@ def test_full_strategy_runs_on_the_default_multiprocessing_path():
     df.ta.strategy()
     assert df.shape[1] > before, "strategy() appended no columns"
     for column in ("WAVETREND", "ICHI_PRICE_VS_CLOUD", "EMA_ALIGN_BULL",
-                   "BOS_BULL", "CHoCH_BULL", "FVG_BULL", "HALFTREND",
+                   "BOS_BULL", "CHoCH_BULL", "FVG_BULL",
                    "LINREG_SLOPE"):
         assert column in df.columns, f"{column} missing after strategy()"
     assert any(c.startswith("ABER_") for c in df.columns)
@@ -427,3 +428,28 @@ def test_squeeze_flags_stay_int_at_the_default_offset(name):
     assert flags, f"{name} emitted no flag columns"
     dtypes = getattr(df.ta, name)()[flags].dtypes
     assert all(str(d).startswith("int") for d in dtypes), dict(dtypes.astype(str))
+
+
+def test_a_category_strategy_does_not_edit_category():
+    """`strategy("<category>")` removes its exclusions (`long_run`, `short_run`,
+    `td_seq` in trend) from the list `_indicators_by_category` returns. That list
+    WAS `Category[...]` itself, so one trend sweep deleted three registered names
+    from `Category` for the rest of the process (found by #331's Category guard
+    failing only when it ran after this module). It must be a copy."""
+    from pandas_ta import Category
+
+    before = {k: list(v) for k, v in Category.items()}
+    got = pd.DataFrame().ta._indicators_by_category("trend")
+    assert got == Category["trend"] and got is not Category["trend"]
+    got.clear()
+    assert {k: list(v) for k, v in Category.items()} == before
+
+    # The path that actually mutated it: a real category sweep.
+    n = 300
+    rng = np.random.default_rng(0)
+    c = 100 + np.cumsum(rng.normal(0, 1, n))
+    df = pd.DataFrame({"open": c, "high": c + 1, "low": c - 1, "close": c,
+                       "volume": rng.integers(1000, 2000, n).astype(float)},
+                      index=pd.date_range("2020-01-01", periods=n, freq="D"))
+    df.ta.strategy("trend", cores=0, verbose=False)
+    assert {k: list(v) for k, v in Category.items()} == before

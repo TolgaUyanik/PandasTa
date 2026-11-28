@@ -2,7 +2,7 @@
 
 Invocation: `/brutally-honest-review --auto TODO.md`
 Run folder: `docs/reviews/auto-2026-09-10-pandasta-8/`
-Task file: `d:\AwakenAnalytics\PandasTa\TODO.md`
+Task file: `<workspace>\PandasTa\TODO.md`
 
 ## Phase 1 — resolved, then narrowed
 

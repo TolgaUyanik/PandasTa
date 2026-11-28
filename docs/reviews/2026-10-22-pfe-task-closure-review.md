@@ -8,7 +8,7 @@
 ## Findings
 
 ### CRITICAL
-- **Done-when; docs/PfeMeasured.md status line and Gate C/E/F rows** — Neither exit condition of the task is met. `../Backtesting` is not on this machine, and no `measure_*_overlap_full.py` exists under /home/blue. That leaves three gaps: Gate C has no real-data counts, Gate E has never been run, and the parent-repo half of Gate F has never been run. `pfe` sits uncommitted in `Category`, neither shipped nor reverted. The doc does honestly say "OWED / verdict pending".
+- **Done-when; docs/PfeMeasured.md status line and Gate C/E/F rows** — Neither exit condition of the task is met. `../Backtesting` is not on this machine, and no `measure_*_overlap_full.py` exists on the reviewing machine. That leaves three gaps: Gate C has no real-data counts, Gate E has never been run, and the parent-repo half of Gate F has never been run. `pfe` sits uncommitted in `Category`, neither shipped nor reverted. The doc does honestly say "OWED / verdict pending".
   - Fix: either (a) bring the parent repo onto this machine, then run `measure_pfe_overlap_full.py` and both suites, or (b) get the owner's approval to revert on the proxy evidence (ρ 0.874 vs summed `CMO_10`, 0.900 at σ 5%), delete the five touch points, and relabel the doc "REVERTED on proxy; Gate E not run".
 
 ### MAJOR

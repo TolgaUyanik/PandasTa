@@ -85,7 +85,7 @@ on the failing node IDs matching, not on a zero.
   `pandas_ta/` matches `6df7539`). The 20 failing node-id lists are identical:
   `test_build_strategy_master.py` 8, `test_strategy_loader.py` 6, `test_spmine_golden.py` 5,
   `test_exit_no_drift.py` 1. All 20 fail on `dev`'s code too. Each run printed the tree it
-  imported. The dev run imported `D:\AwakenAnalytics\PandasTa\pandas_ta` (tree sha1 `efca0690`,
+  imported. The dev run imported `<workspace>\PandasTa\pandas_ta` (tree sha1 `efca0690`,
   the value on the other ledger rows). The branch run imported
   `...\PandasTa-197-maxvol-adv\pandas_ta` (tree sha1 `8a2d3e46`, the value in the Gate E r2 run's
   `meta.json`).

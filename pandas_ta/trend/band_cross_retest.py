@@ -190,7 +190,7 @@ is not a duplicate of any crossover/band indicator in the catalog.
 Source: TradingView community indicator "HTS - Wstęgi PRO 4 Alerty [v7]"
 (polish: "HTS - Bands PRO 4 Alerts") by xwaytheory (see
 `datastore/source/pine_triage.csv` for the exact attribution row) (ported
-into AwakenAnalytics/Backtesting TVPTA-3, 2026-08-04; MPL-2.0 per
+into the private Backtesting repo, task TVPTA-3, 2026-08-04; MPL-2.0 per
 TradingView's open-source publication convention). Ported in full -- the
 detection logic is the entire substance; the source's steep-band-warning
 label styling is decorative and not replicated.

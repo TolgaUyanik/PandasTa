@@ -109,7 +109,7 @@ WHAT THIS FILE PINS, in order of how much it would hurt to lose.
    in the usable window, so the relative-volume denominator never settles. The
    test asserts >= 90, so a real regression cannot hide behind that allowance.
 
-7. **The wiring, all five touch points.** 221 -> **224** in `Category`
+7. **The wiring, all five touch points.** At the time of that port, 221 -> 224 in `Category`
    (trend 55 -> 56, volatility 18 -> 19, volume 21 -> 22), one accessor each,
    and every one callable from a bulk `df.ta.strategy()` sweep -- none of the
    three needs an argument a sweep cannot supply, so none belongs in
@@ -155,46 +155,6 @@ REGISTERED = {
     "volume": ["bw_mfi"],
     "trend": ["smc_sweep"],
 }
-
-#: `Category` totals AFTER this port. 221 before; the three buckets each +1.
-#: 224 -> 231 by PINEBI-1b tranche 1, -> 240 by tranche 2, -> 233 once Gate E
-#: reverted 7 of the 16 (see docs/PineBuiltinsMeasured.md), -> 234 by pfe,
-#: -> 235 by kalman_trend, -> 236 by range_compress_run, -> 237 by maxvol_adv
-#: (all four measured in docs/gate_e_ledger.csv; pfe and KFT_VEL are STRUCK, kept
-#: under waivers #23 / #22), -> 240 by LIQ (issue #10: `corwin_schultz` and
-#: `roll_spread` into volatility, `amihud` into volume; Gate E SHIP, in the ledger).
-#: -> 241 by adxr (Gate E DISCLOSE_GAP, 0.8838, in the ledger), -> 242 by
-#: tf_centroid_20 (statistics; Gate E measured, SHIP, 0.5943 vs
-#: ATR_Ratio_5_20_Pctl, see docs/TfCentroid20Measured.md), -> 243 by
-#: median_ad_hl2 (statistics, #119; Gate E SHIP, 0.4989, in the ledger), -> 244 by kpss (#157, Gate E SHIP,
-#: 0.2256, in the ledger), -> 245 by cusum (#16, Gate E DISCLOSE,
-#: 0.7767, in the ledger), -> 246 by gapm (Gate E SHIP, 0.3738,
-#: in the ledger), -> 247 by max_return (#12, Gate E SHIP,
-#: 0.6716, in the ledger), -> 248 by tf_median_absdiff_20 (#118, volatility;
-#: Gate E SHIP, 0.7422, in the ledger), -> 249 by entlz (#11, statistics;
-#: Gate E pending, run by issue-solver after this session), -> 250 by ffd (#13,
-#: statistics; Gate E DISCLOSE_GAP, 0.8494 vs Dist_to_SMA_200_pct, in the ledger;
-#: see docs/FfdMeasured.md), -> 251 by ovn_split (#14, momentum;
-#: Gate E pending, run by issue-solver after this session), -> 252 by volvol (#15, volatility;
-#: Gate E SHIP, 0.6408 vs natr, in the ledger), -> 257 by volcv (#19, volume; Gate E
-#: pending, run by issue-solver after this session; see
-#: docs/VolcvMeasured.md), -> 258 by trend_scan (#20, statistics;
-#: Gate E DISCLOSE_GAP 0.8804 (TSCAN_T) / SHIP 0.2909 (TSCAN_L), in the
-#: ledger; see docs/TrendScanMeasured.md), -> 260 by crsi (#21, momentum;
-#: Gate E STRUCK on 2 of 3 columns (`CRSI_3_2_100`, `CRSI_PCTRANK_100`,
-#: reverted), DISCLOSE_GAP on `CRSI_STREAK_2` (shipped), in the ledger; see
-#: docs/CrsiMeasured.md), -> 262 by ie_asym (#28, statistics; Gate E
-#: pending, run by issue-solver after this session; see
-#: docs/IeAsymMeasured.md; this +1 chain has a pre-existing one-off drift
-#: against the live Category count somewhere before this line -- the pinned
-#: integer below is independently recounted from pandas_ta/__init__.py, not
-#: derived from this comment), -> 263 by seas (#27, performance; Gate E
-#: pending, run by issue-solver after this session; see
-#: docs/SeasMeasured.md). Pinned, not
-#: computed, precisely so an accidental Category edit fails here instead of
-#: shipping silently.
-CATEGORY_TOTAL = 352  # +1 on issue #90's ts_strike_20 port (statistics), +1 on issue #113's tf_zero_cross_20 port (statistics), +1 on issue #112's tf_dfa_100 port (statistics), +1 on issue #111's tf_spec_entropy_64 port (statistics), +1 on issue #109's sk_rocwb_ratio port (momentum), +1 on issue #108's sk_fcb_pos port (momentum), +1 on issue #107's sk_fcb_width port (volatility), +1 on issue #106's j_acosc port (momentum), +1 on issue #105's j_damiani port (volatility), +1 on issue #104's j_gator port (momentum), +1 on issue #103's ts_reoccur_20 port (statistics), +1 on issue #102's ts_energy_last_20 port (statistics), +1 on issue #101's ts_q05_60 port (statistics), +1 on issue #100's ts_cross_mean_20 port (statistics), +1 on issue #99's ts_imq_20 port (statistics), +1 on issue #152's firstzero_ac port (statistics), +1 on issue #183's edge port (volatility), +1 on issue #154's arch_lm port (statistics), +1 on issue #156's lumpiness port (statistics), +1 on issue #153's diff2_acf1 port (statistics), +1 on issue #4's halflife port (statistics), +1 on issue #98's ts_medskew_20 port (statistics), +1 on issue #97's ts_above_mean_20 port (statistics), +1 on issue #96's ts_aggac_60 port (statistics), +1 on issue #95's ts_cid_ce_20 port (statistics), +1 on issue #94's ts_ac1_60 port (statistics), +1 on issue #93's ts_kurt_60 port (statistics), +1 on issue #92's ts_peaks_20 port (statistics), +1 on issue #91's ts_perment_20 port (statistics), +1 on issue #87's lean_tdd_20 port (statistics), +1 on issue #89's ts_binent_20 port (statistics), +1 on issue #88's ts_c3_20 port (statistics), +1 on issue #86's lean_momersion_20 port (momentum), +1 on issue #85's lean_hurst_100 port (statistics), +1 on issue #84's g191_110 port (momentum), +1 on issue #83's g191_188 port (volatility), +1 on issue #82's g191_022 port (momentum), +1 on issue #81's g191_158 port (volatility), +1 on issue #79's g191_003 port (momentum), +1 on issue #78's g191_145 port (volume), +1 on issue #77's g191_040 port (volume), +1 on issue #76's g191_109 port (volatility), +1 on issue #75's g191_129 port (momentum), +1 on issue #74's g191_174 port (volatility), +1 on issue #73's g191_023 port (volatility), +1 on issue #72's g191_169 port (momentum), +1 on issue #71's g191_111 port (volume), +1 on issue #70's g191_069 port (trend), +1 on issue #69's g191_043 port (volume), +1 on issue #68's g191_167 port (momentum), +1 on issue #67's g191_160 port (volatility), +1 on issue #66's g191_152 port (momentum), +1 on issue #65's g191_187 port (momentum), +1 on issue #63's g191_002 port (momentum), +1 on issue #62's g191_093 port (momentum), +1 on issue #61's g191_189 port (statistics), +1 on issue #206's mtd_ret port (performance), +1 on issue #27's seas port (performance), +1 on issue #29's ewmac port (momentum), +3 on issue #34's A158GAPS trio (rank/wvma/vsumd), +1 on issue #33's demand port (volume), +1 on issue #36's osap_retskew_21 port (statistics), +1 on issue #37's osap_mrrev port (momentum), +1 on issue #38's osap_voltrend_60 port (volume), +1 on issue #39's lot_zeroret_60 port (statistics), +1 on issue #40's osap_intmom port (momentum), +1 on issue #35's osap_lrrev port (momentum), +1 on issue #43's vol_sign_rev port (volume), +1 on issue #41's a101_048 port (momentum), +1 on issue #42's a101_058 port (volume), +1 on issue #45's a101_021 port (momentum), +1 on issue #46's a101_043 port (momentum), +1 on issue #47's a101_023 port (momentum), +1 on issue #48's a101_053 port (momentum), +1 on issue #49's a101_046 port (momentum), +1 on issue #50's a101_035 port (volume), +1 on issue #44's a101_026 port (volume), +1 on issue #51's a101_007 port (momentum), +1 on issue #52's g191_146 port (momentum), +1 on issue #53's g191_191 port (volume), +1 on issue #54's g191_076 port (volume), +1 on issue #55's g191_165 port (statistics), +1 on issue #56's g191_026 port (statistics), +1 on issue #57's g191_144 port (volume), +1 on issue #58's g191_098 port (trend), +1 on issue #59's g191_190 port (statistics), +1 on issue #60's g191_044 port (statistics), +1 on issue #64's g191_080 port (volume)
-CATEGORY_BUCKETS = {"trend": 62, "volatility": 37, "volume": 42}
 
 #: Gate E, re-measured on the SHIPPED columns over 89 BIST_100 daily frames /
 #: 408,253 bars against 496 comparators. See docstring item 4.
@@ -328,18 +288,50 @@ def test_all_five_wiring_touch_points():
     # 5 is this file.
 
 
-def test_the_category_count_moved_by_exactly_three():
-    """A missing trailing comma silently CONCATENATES two adjacent strings and
-    deletes two indicators. The total and the per-bucket counts are both
-    asserted so a compensating pair of errors cannot cancel."""
-    total = sum(len(v) for v in ta.Category.values())
-    assert total == CATEGORY_TOTAL, f"Category total {total}, expected {CATEGORY_TOTAL}"
-    for bucket, n in CATEGORY_BUCKETS.items():
-        assert len(ta.Category[bucket]) == n, \
-            f"Category[{bucket!r}] has {len(ta.Category[bucket])}, expected {n}"
-    for names in ta.Category.values():
+def test_category_lists_are_sorted_unique_and_complete():
+    """Replaces the pinned `CATEGORY_TOTAL` / `CATEGORY_BUCKETS` (#331).
+
+    The pin was a retyped total that every port bumped, so two ports merged in
+    either order conflicted on it. It guarded two failures, both checked here
+    without a retyped number:
+
+    * a missing trailing comma silently CONCATENATES two adjacent strings and
+      deletes two indicators: every entry must be a callable `ta.<name>` with
+      no space in it, and each list sorted with no duplicate (the one-name-per-
+      line format the order keeps conflict-light);
+    * an accidental deletion: one name per line makes it a visible one-line
+      diff, and every indicator in `docs/gate_e_grandfathered.json` or with a
+      Gate E ledger row must still be registered, unless its row is STRUCK with
+      no waiver (a measured revert keeps its row as the receipt, e.g. `g191_055`;
+      a waived STRUCK row such as `pfe` #23 stays registered and is covered).
+    """
+    import csv
+    import json
+    import os
+
+    for cat, names in ta.Category.items():
+        assert names == sorted(names), f"Category[{cat!r}] is not sorted"
+        dup = sorted({n for n in names if names.count(n) > 1})
+        assert dup == [], f"Category[{cat!r}] has duplicates: {dup}"
         for n in names:
-            assert " " not in n, f"concatenated Category entry: {n!r}"
+            # A concatenation ("ab" "cd" -> "abcd") is not a function: this catches it.
+            assert callable(getattr(ta, n, None)), f"Category entry {n!r} is not ta.{n}"
+
+    # Removed on purpose, so absent from Category although frozen in the grandfathered list
+    # (that file is hash-pinned and is not edited): their TradingView sources are CC BY-NC-SA 4.0
+    # (pressure_pulse, tri_dir_pressure), "All Rights Reserved" (iama) or GPL-3.0 (halftrend),
+    # which an MIT package cannot carry (owner, 2026-11-28).
+    retired = {"halftrend", "iama", "pressure_pulse", "tri_dir_pressure"}
+    registered = {n for names in ta.Category.values() for n in names}
+    docs = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs")
+    with open(os.path.join(docs, "gate_e_grandfathered.json"), encoding="utf8") as fh:
+        frozen = set(json.load(fh)["indicators"])
+    with open(os.path.join(docs, "gate_e_ledger.csv"), encoding="utf8", newline="") as fh:
+        kept = {r["indicator"] for r in csv.DictReader(fh)
+                if r["verdict"] != "STRUCK" or r["waiver"].strip()}
+    assert retired.isdisjoint(registered), f"retired names are back in Category: {retired & registered}"
+    missing = sorted((frozen | kept) - registered - retired)
+    assert missing == [], f"grandfathered or ledgered but no longer in Category: {missing}"
 
 
 def test_none_of_the_three_needs_a_strategy_exclusion():

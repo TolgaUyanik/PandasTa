@@ -11,7 +11,7 @@ WHAT "SHIPPED" MEANS HERE, stated once and applied everywhere
 `TODO.md`'s INDREF-1 line said "all 201". That number was stale before this ran
 (two batches landed after it was written) and it was also ambiguous, because
 this package has three different indicator surfaces -- `docs/IndicatorDictionary.md`
-§"How many indicators is that, exactly" prints all three from a live probe.
+§"Three surfaces" names them; counts come from the package, not from a file (#331).
 
 The definition used by THIS generator:
 
@@ -108,7 +108,7 @@ BACKTEST_RESULTS = PARENT / "backtest_results"
 IE = CODE / "backtesting_engine" / "indicator_engine.py"
 SI = CODE / "backtesting_engine" / "speedy_indicators.py"
 ANALYSIS = CODE / "scripts" / "analysis"
-# Exists nowhere under D:\AwakenAnalytics (2026-10-23); SWEPT_SET() tolerates it absent.
+# Exists nowhere under <workspace> (2026-10-23); SWEPT_SET() tolerates it absent.
 INDREF2 = CODE / "docs" / "indicators" / "_indref2_facts.json"
 GATE_E = "../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py"
 

@@ -5,14 +5,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 A fork of [twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, published as
-`github.com/TolgaUyanik/PandasTa`. Upstream shipped ~130 indicators; this fork registers **224** in `Category` — the count that
-matters, since `Category` is what `df.ta.strategy()` sweeps — with the extras being
-TradingView/Pine and SMC price-action ports. README's "Indicators by category" section
-gives the two adjacent counts (232 callable on `df.ta`, plus `drawdown`/`ma` on the module)
-and is checked against the package by `tests/test_readme_counts.py`. Do not retype any of
-the three here.
+`github.com/TolgaUyanik/PandasTa`. Upstream registered 156 in `Category` at the fork point (the root
+commit); this fork registers several times that in `Category` — the set that matters, since `Category` is what `df.ta.strategy()`
+sweeps — with the extras being TradingView/Pine, SMC price-action and library ports.
 
-Its only consumer is the parent repo, `d:/AwakenAnalytics/Backtesting/`, which pip-installs it from
+**No count is retyped in the shared files (#331).** The README, `docs/MLCompanionContract.md`, the generated
+dictionary and the tests state no indicator total, no per-category count and no ML-form count:
+every port used to bump them, and two ports merged in either order conflicted on those lines.
+`Category` lists one name per line, sorted, so a port adds one line. Count from the package
+(`sum(map(len, ta.Category.values()))`); `tests/test_readme_counts.py`,
+`tests/test_ml_companions.py` and `tests/test_altport2_ports.py` fail if a count comes back.
+
+Its only consumer is the parent repo, Backtesting (private; owner-only), which pip-installs it from
 GitHub and calls it from `backtesting_engine/indicator_engine.py`. Every indicator here is a candidate
 **machine-learning feature**, not a chart drawing — that constraint drives the porting rules below.
 
@@ -38,7 +42,7 @@ frames), so a green run does **not** mean the upstream category suites ran.
 **CI.** `.github/workflows/ci.yml` (job `tests`) runs the full suite on every PR and push to `dev`
 and `main`, direct dependencies pinned (pandas 2.3.3 / numpy 1.26.4), with one test deselected by
 name: `test_regenerating_reproduces_the_committed_rows`, which needs the sibling
-`../AlternativeRepos` checkout. `.github/workflows/gate-e-guard.yml` (job `guard`, on
+`../AlternativeRepos` checkout (owner-only). `.github/workflows/gate-e-guard.yml` (job `guard`, on
 `pull_request_target`) runs the BASE branch's copy of `tests/test_gate_e_ledger.py` against the PR,
 so a PR cannot loosen the ledger check it needs loosened. Branch protection on `dev` and `main`
 requires the checks, **admins included**, with the branch up to date with its base: a direct push
@@ -97,7 +101,8 @@ indicator module.
 | 5 | `tests/test_<name>.py` | test suite |
 
 Touch points 3 and 4 drifted apart once: 11 indicators (`wavetrend`, `ema_align`,
-`ichimoku_ml`, `linreg_channel`, `bos`, `choch`, `fvg`, `halftrend`, `ob`, `zigzag`, `vol_delta`) sat
+`ichimoku_ml`, `linreg_channel`, `bos`, `choch`, `fvg`, `halftrend` (removed 2026-11-28: GPL-3.0
+source), `ob`, `zigzag`, `vol_delta`) sat
 in `Category` with no accessor, so `df.ta.strategy()` and the affected category runs raised
 `AttributeError`. Fixed 2026-09-07 (WIRING-1). `tests/test_wiring_accessors.py` is now the guard:
 `test_every_registered_indicator_has_an_accessor` fails the moment a name enters `Category` without a
@@ -124,11 +129,15 @@ live package and lists every column's observed form.
   range(0, m)`, so at `i = 0` it read `ssf.iloc[-1]` — Python negative indexing, the LAST bar of
   the series — and the recursion propagated that forward. Perturbing only bars ≥ 300 of a 400-bar
   frame moved **bar 0** by 31.4. Fixed and pinned by `tests/test_ssf_causality.py`.
-  🔴 **`bos` is a fourth, and it is still OPEN** — all four columns. It flags swings with
-  `rolling(swing_length, center=True)`, so it reads exactly `(swing_length - 1) // 2` bars ahead
-  (measured: 1 / 2 / 3 / 4 at `swing_length` 4 / 5 / 7 / 9). A bug, not a design choice; fixing it
-  changes column values, so **owner's call**. `swing_equilibrium` is the causal model for a fix.
-  Pinned by `tests/test_bos_lookahead.py`, which fails if the reach changes in either direction.
+  **`bos` was a fourth, and `choch` a fifth — both fixed in #332 (2026-11-27/28).** Both flagged swings
+  with `rolling(swing_length, center=True)` and wrote the flag on the pivot bar, so every column
+  read exactly `(swing_length - 1) // 2` bars ahead (measured for `bos`: 1 / 2 / 3 / 4 at
+  `swing_length` 4 / 5 / 7 / 9; `choch` used the same two lines and its mutant measures the same
+  reach). A bug, not a design choice. Both now share `pandas_ta.trend.bos._confirmed_swings`
+  (the same window, each swing written on the bar that confirms it, rightmost tie wins, modelled
+  on `swing_equilibrium`), so their column VALUES changed under unchanged names. Pinned by
+  `tests/test_bos_causal.py` (mutant with the old placement caught; `tests/test_bos_lookahead.py`
+  is deleted).
   **Do not trust this list as a substitute for measuring.** `ssf` was found by a per-parent
   perturbation probe in MLCOL-1's companion screen, not by reading it; a hand-maintained list
   contains only the cases someone already thought of.
@@ -139,7 +148,9 @@ live package and lists every column's observed form.
 
 ## Porting a Pine indicator
 
-Full protocol: `../Backtesting/docs/TVPTA6-Indicator-Porting-Process.md`. Source corpus:
+Full protocol: [`docs/ImplementingAnIndicator.md`](docs/ImplementingAnIndicator.md); scaffold the five
+touch points with `python docs/new_indicator.py <category> <name>` (#331). The older case study,
+`../Backtesting/docs/TVPTA6-Indicator-Porting-Process.md`, is owner-only. Source corpus:
 `docs/pine/` — 2,211 `.pine` files, 46MB, **untracked on purpose** (`.gitignore`). 912 of them
 carry `Mozilla Public License 2.0` / `© TradingView` and the rest state no licence at all, so
 committing them under this repo's root MIT `LICENSE` would misstate their terms. They were tracked
@@ -158,8 +169,8 @@ entry first. Summary of the gates a port must clear:
 | E Attribution | Spearman ρ of each new column against the engine's `compute_all` ∪ the `ml_features` manifest `1d` (329 + 358 = 687 comparators), over the 89 frozen ALTPORT-1 BIST frames (owner's rules, 2026-10-23). Report the measured max with its sample size. Bands (`r3-perframe-0.90`): STRUCK if pooled \|ρ\| ≥ 0.90 or a top-5 comparator's per-frame median ≥ 0.90 · DISCLOSE_GAP 0.80 ≤ ρ < 0.90 · DISCLOSE 0.76 ≤ ρ < 0.80 · SHIP < 0.76. |
 | F Suites | both repos green. |
 
-**Gate E harness:** `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py` (Backtesting #107,
-merged 2026-10-23; reference `../Backtesting/Backtesting/docs/gate_e.md` on Backtesting `main`).
+**Gate E harness (owner-only: it lives in the private repo):**
+`../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py` (Backtesting #107, merged 2026-10-23; reference `../Backtesting/Backtesting/docs/gate_e.md` on Backtesting `main`).
 From `../Backtesting/Backtesting`: `python scripts/analysis/gate_e_overlap.py build` once, then
 `run --module pandas_ta.<category>.<name> --name <name>`; outputs land in
 `../Backtesting/backtest_results/gatee/<name>/`. `run` refuses a stale cache, but **pandas_ta's
@@ -235,7 +246,7 @@ synthetic continuous-float frames and was wrong on real prices: the old loop ret
 while `close <= zone_high`, true on an exact tie, and 86,415 of 408,253 BIST daily bars (21.17%)
 close exactly at an extreme — so the columns fired at 4.63% / 3.51%, driven by tick rounding rather
 than by structure. Gates C/D/E cleared (Gate E max |ρ| 0.6390 / 0.5962, under the 0.76 ship line);
-evidence in the four `fvg_*` CSVs under `../Backtesting/backtest_results/tvpta6/`. The script
+evidence in the four `fvg_*` CSVs under `../Backtesting/backtest_results/tvpta6/` (owner-only). The script
 that produced them was never committed; GATEE-3 re-ran the four columns on the new harness and
 they stay SHIP (Backtesting #107).
 
@@ -251,7 +262,7 @@ function.**
 ## Porting a TA-Lib indicator
 
 Done once, as **TALIB-1** (2026-09-08): the ten `port` rows of
-`../AlternativeRepos/altrepo_talib.csv`. Same five touch points, same Gates A-F; Gate A's
+`../AlternativeRepos/altrepo_talib.csv` (owner-only, like every sibling-repo path in this section). Same five touch points, same Gates A-F; Gate A's
 citation becomes the TA-Lib C function name instead of a Pine line number. Measurements,
 per indicator: `docs/TalibPortsMeasured.md`. Tests: `tests/test_talib1_ports.py`.
 Overlap outputs: `../Backtesting/backtest_results/talib1/`. The harness script was never committed;

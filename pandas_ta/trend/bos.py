@@ -4,6 +4,37 @@ from pandas import DataFrame
 from pandas_ta.utils import get_offset, verify_series
 
 
+def _confirmed_swings(high, low, swing_length):
+    """Swing highs/lows, each written on the bar where it becomes known.
+
+    Same window as the old centred `rolling(swing_length, center=True)`:
+    with `L = swing_length`, `k = (L - 1) // 2` and `left = L - 1 - k`, bar
+    `j` is a swing high when `high[j]` is the max of `high[j-left .. j+k]`
+    and no bar in `(j, j+k]` ties it (the rightmost tie wins, as in
+    `swing_equilibrium._confirm_pivots`). That is decided only once bar
+    `j + k` has printed, so the swing is written on bar `t = j + k`, never
+    on `j`. Lows mirror it with `min`.
+
+    Returns two float Series indexed like `high`: the confirmed swing's
+    high (resp. low) on its confirmation bar, NaN elsewhere.
+    """
+    k = (swing_length - 1) // 2
+
+    def _side(series, is_high):
+        cand = series.shift(k)                      # the bar j = t - k
+        roll = series.rolling(swing_length)         # bars [t-L+1, t] = [j-left, j+k]
+        extreme = roll.max() if is_high else roll.min()
+        hit = cand == extreme
+        if k > 0:
+            later = series.rolling(k)               # bars (j, j+k] = [t-k+1, t]
+            later_ext = later.max() if is_high else later.min()
+            # `cand` is the extreme, so a later tie is a later bar EQUAL to it.
+            hit &= (later_ext < cand) if is_high else (later_ext > cand)
+        return cand.where(hit)
+
+    return _side(high, True), _side(low, False)
+
+
 def bos(high, low, close, swing_length=None, offset=None, **kwargs):
     """Indicator: Break of Structure (BOS)"""
     # Validate Arguments
@@ -15,9 +46,12 @@ def bos(high, low, close, swing_length=None, offset=None, **kwargs):
 
     if high is None or low is None or close is None: return
 
-    # Compute swing highs/lows (local extremes over centered window)
-    swing_high = (high == high.rolling(swing_length, center=True).max()).astype(int)
-    swing_low = (low == low.rolling(swing_length, center=True).min()).astype(int)
+    # Swings are written on the bar that confirms them (bar j + k), so no
+    # column reads a bar after the one it is written on.
+    sh_conf, sl_conf = _confirmed_swings(high, low, swing_length)
+    sh = sh_conf.to_numpy(dtype=float)
+    sl = sl_conf.to_numpy(dtype=float)
+    cl = close.to_numpy(dtype=float)
 
     n = len(close)
     bos_bull = np.zeros(n)
@@ -28,21 +62,24 @@ def bos(high, low, close, swing_length=None, offset=None, **kwargs):
     last_swing_high = np.nan
     last_swing_low = np.nan
 
-    for i in range(n):
-        if swing_high.iloc[i] == 1:
-            if not np.isnan(last_swing_high) and high.iloc[i] > last_swing_high:
-                higher_high[i] = 1
-            last_swing_high = high.iloc[i]
+    for t in range(n):
+        if not np.isnan(sh[t]):
+            # HIGHER_HIGH fires on the confirmation bar, against the previous
+            # confirmed swing high.
+            if not np.isnan(last_swing_high) and sh[t] > last_swing_high:
+                higher_high[t] = 1
+            last_swing_high = sh[t]
 
-        if swing_low.iloc[i] == 1:
-            if not np.isnan(last_swing_low) and low.iloc[i] < last_swing_low:
-                lower_low[i] = 1
-            last_swing_low = low.iloc[i]
+        if not np.isnan(sl[t]):
+            if not np.isnan(last_swing_low) and sl[t] < last_swing_low:
+                lower_low[t] = 1
+            last_swing_low = sl[t]
 
-        if not np.isnan(last_swing_high) and close.iloc[i] > last_swing_high:
-            bos_bull[i] = 1
-        if not np.isnan(last_swing_low) and close.iloc[i] < last_swing_low:
-            bos_bear[i] = 1
+        # BOS compares close[t] only with swings confirmed at or before t.
+        if not np.isnan(last_swing_high) and cl[t] > last_swing_high:
+            bos_bull[t] = 1
+        if not np.isnan(last_swing_low) and cl[t] < last_swing_low:
+            bos_bear[t] = 1
 
     df = DataFrame({
         "BOS_BULL":    bos_bull,
@@ -68,29 +105,42 @@ def bos(high, low, close, swing_length=None, offset=None, **kwargs):
 bos.__doc__ = \
 """Break of Structure (bos)
 
-Identifies when price breaks above the last swing high (bullish BOS) or
-below the last swing low (bearish BOS).  Also returns HIGHER_HIGH and
-LOWER_LOW signals at swing pivot bars.
+Identifies when price closes above the last confirmed swing high (bullish
+BOS) or below the last confirmed swing low (bearish BOS). Also returns
+HIGHER_HIGH and LOWER_LOW on the bar that confirms a swing.
+
+Causal since issue #332: a swing is written on the bar where it becomes
+known, `(swing_length - 1) // 2` bars after the pivot bar. Before #332
+the swings came from `rolling(swing_length, center=True)` and were written
+on the pivot bar itself, so every column read that many bars ahead.
 
 Sources:
-    AwakenAnalytics custom indicator (indicator_engine.py)
-    ICT / Smart Money Concept
+    ICT / Smart Money Concept (break of structure).
+    Swing confirmation: this repo's `pandas_ta/trend/swing_equilibrium.py`
+    `_confirm_pivots` (MIT), applied to the centred window `bos` used
+    before #332, with the same rightmost-tie rule.
 
 Calculation:
     Default Inputs:
         swing_length=5
-    swing_high = local high over centered rolling(swing_length)
-    swing_low  = local low  over centered rolling(swing_length)
-    BOS_BULL = 1 when close > last swing high
-    BOS_BEAR = 1 when close < last swing low
-    HIGHER_HIGH = 1 at a swing high that exceeds the previous swing high
-    LOWER_LOW   = 1 at a swing low  that is below the previous swing low
+    L = swing_length, k = (L - 1) // 2, left = L - 1 - k
+    swing high at bar j, confirmed on bar t = j + k, iff
+        high[j] == max(high[j-left .. j+k])  and
+        high[i] != high[j] for every i in (j, j+k]     (rightmost tie wins)
+    swing low: the mirror, with min over low
+    BOS_BULL = 1 when close[t] > the last swing high confirmed at or before t
+    BOS_BEAR = 1 when close[t] < the last swing low confirmed at or before t
+    HIGHER_HIGH = 1 on a confirmation bar whose swing high exceeds the
+        previous confirmed swing high
+    LOWER_LOW   = 1 on a confirmation bar whose swing low is below the
+        previous confirmed swing low
 
 Args:
     high (pd.Series): Series of 'high's
     low (pd.Series): Series of 'low's
     close (pd.Series): Series of 'close's
-    swing_length (int): Centered rolling window for swing detection. Default: 5
+    swing_length (int): Swing window length, as the old centred window.
+        Default: 5
     offset (int): Periods to offset. Default: 0
 
 Returns:

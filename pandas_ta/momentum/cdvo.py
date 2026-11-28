@@ -95,7 +95,7 @@ not ATR).
 
 Source: TradingView community indicator "Custom DVO (ATR-Adjusted Varadi
 Oscillator)" (see `datastore/source/pine_triage.csv` for the exact
-attribution row) (ported into AwakenAnalytics/Backtesting TVPTA-3,
+attribution row) (ported into the private Backtesting repo, task TVPTA-3,
 2026-08-04; MPL-2.0 per TradingView's open-source publication
 convention). Ported in full -- the entire source is this one calculation
 plus 3 `hline()` reference levels, no additional UI to scope out.
