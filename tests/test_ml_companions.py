@@ -164,42 +164,21 @@ def test_companions_are_not_registered_as_indicators():
     assert exposed == [], f"companions exposed on df.ta: {exposed}"
 
 
-def test_the_contract_quotes_the_dictionarys_actual_ml_form_counts():
-    """The contract said "Measured: 128 PX, 172 SF, 92 BIN, 3 PX2". The
-    dictionary it cites says 126/169/90/2 — all four wrong, with the word
-    "Measured" attached, in the opening paragraph of the document the rollout is
-    templated on. Asserted now, not retyped. ORD, CONST, ?? and the total were
-    added 2026-10-28: unchecked, they had drifted to 49 / 568 against a
-    dictionary that said 50 / 570."""
+def test_the_contract_retypes_no_ml_form_counts():
+    """The contract once said "Measured: 128 PX, 172 SF, 92 BIN, 3 PX2" -- all
+    four wrong. The counts were then asserted against the dictionary, which made
+    every port bump them, and two ports merged in either order conflicted on that
+    line (#331). Now the contract states no count; this keeps one from coming
+    back."""
     import os
     import re
-    from collections import Counter
 
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    doc = open(os.path.join(here, "docs", "IndicatorDictionary.md"),
-               encoding="utf8").read()
-    body = doc[doc.index("## candles"):]
-    tags = Counter(re.findall(r"`[^`]+`\s+(PX2|PX|SF|BIN|ORD|CONST|\?\?)(?!\w)", body))
-
     contract = open(os.path.join(here, "docs", "MLCompanionContract.md"),
                     encoding="utf8").read()
-    wrong = []
-    total = re.search(r"(\d+) tagged columns", contract)
-    if not total or int(total.group(1)) != sum(tags.values()):
-        wrong.append(("total", total and int(total.group(1)), sum(tags.values())))
-    for tag in ("PX", "SF", "BIN", "PX2", "ORD", "CONST", "??"):
-        t = re.escape(tag)
-        match = re.search(rf"\*\*(\d+) `{t}`\*\*|(\d+) `{t}`", contract)
-        if not match:
-            wrong.append((tag, None, tags[tag]))
-            continue
-        quoted = int(match.group(1) or match.group(2))
-        if quoted != tags[tag]:
-            wrong.append((tag, quoted, tags[tag]))
-    assert wrong == [], (
-        f"the contract quotes counts the dictionary does not support "
-        f"{{(tag, quoted, actual)}}: {wrong}"
-    )
+    retyped = re.findall(r"\d+ tagged columns|\d+ `(?:PX2|PX|SF|BIN|ORD|CONST|\?\?)`",
+                         contract)
+    assert retyped == [], f"retyped ML-form counts in the contract: {retyped}"
 
 
 def test_state_on_a_price_level_is_known_to_be_lopsided():
