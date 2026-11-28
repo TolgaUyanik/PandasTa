@@ -22,6 +22,7 @@ from .inrange_count import inrange_count
 from .j_damiani import j_damiani
 from .kc import kc
 from .massi import massi
+from .nm_price_density_10 import nm_price_density_10
 from .pdist import pdist
 from .range_compress_run import range_compress_run
 from .range_profile import range_profile
