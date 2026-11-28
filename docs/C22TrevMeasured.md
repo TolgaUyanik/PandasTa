@@ -14,7 +14,7 @@ PandasTa issue **#263** (C22-TREV), ported 2026-11-28 on branch
 | Gate B | causal; 0 of 43 offsets leak on six frames (and 0 of 35 at `length` 3, 120, 250 — `tests/test_c22_trev.py`); six mutants (write-back-dated, two window-shift, returns-rolled, two chunk-wide-mean/sd) all live and caught 43/43 (10 of 10 in the pytest 35-offset sweep for each); the overflow guard is LOAD-BEARING here (unlike `c22_mode_5`'s redundant one): removing it revives exactly the 100 bars the real guard blanks, reading ≈0.0 — §B |
 | Gate C | fires on every bar with a full window on all six synthetic frames; not constant on five of six (the cosine frame is near-constant at ≈0 by construction); the tick-rounded penny frame (21.68% exactly-zero returns) still fires on every eligible bar — §C |
 | Gate D | ×8/×64/×2⁻⁴⁰/×2⁴⁰ bit-identical; worst |diff| 2.3e-13 under ×10/×3.7/×0.1/×1.0000001 inexact return rescale on the `walk` frame; `0 < fires < n`; not constant — §D |
-| Gate E | pending, run by issue-solver after this session — §E |
+| Gate E | max \|ρ\| 0.1534 vs `SMA_50_200_Spread_pct_Pctl` (manifest, n = 375,887); per-frame max median \|ρ\| 0.1612 (same comparator, 89 frames); verdict **SHIP** — §E |
 | Gate F | PandasTa green (98 module tests, both dispatches; required subset below); whole suites run by issue-solver in clean worktrees — §F |
 
 Every number below was produced by `python docs/measure_c22_trev.py`, by
@@ -228,13 +228,20 @@ machine-precision noise, nowhere near the 1e-6 tolerance
 wider than 0.01; `cosine` is the one near-constant frame, by construction
 (§C).
 
-## E. Gate E — attribution (owed)
+## E. Gate E — attribution
 
-Gate E: pending, run by issue-solver after this session. This repository
-cannot run it (private Backtesting engine, 827 MB BIST cache); a later
-receipt session records the ledger row (`docs/gate_e_ledger.csv`) and fills
-in this section with the measured max |ρ|, comparator, sample size and
-verdict.
+Run `is263-c22_trev-e4e798ba` (issue-solver, 2026-11-28), 89 frozen
+ALTPORT-1 BIST frames, 687 comparators (329 `compute_all` + 358
+`ml_features` manifest):
+
+| column | max \|ρ\| | against | n | per-frame max median \|ρ\| | verdict |
+|---|---|---|---|---|---|
+| `C22TREV_100` | 0.1534 | `SMA_50_200_Spread_pct_Pctl` (manifest) | 375,887 | 0.1612 (same comparator, 89 frames, 0% ≥ 0.90) | **SHIP** |
+
+0.1534 is well under the 0.76 ship line (CLAUDE.md Gate E bands,
+`r3-perframe-0.90`), close to this issue's own round-3 screen reading of
+0.1534 pooled / 0.1612 per-frame median. Recorded in
+`docs/gate_e_ledger.csv` (row `c22_trev`, `--measured 2026-11-28`).
 
 ## F. Gate F — suites
 
@@ -244,8 +251,7 @@ verdict.
 | the same under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_c22_trev_cpu.py`) | **98 passed** |
 | `python docs/measure_c22_trev_cpu.py A B C D G P` — re-measured under the disabled dispatch | every structural figure (fires, mutant catch counts, bit-identical cells, GPL-3.0 agreement) identical to the default-dispatch run; float values agree to the same ~1e-14 noise floor, not digit-for-digit; the cosine frame's distinct-value count moves 1,394 → 1,395 (expected, not pinned) |
 | `python -m pytest -q tests/test_c22_trev.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` | **1868 passed, 7 skipped** |
-| `python -m pytest -q tests/test_gate_e_ledger.py` | **1 failed, 1626 passed** — `Failed: no Gate E ledger row for ['c22_trev'] (...)`, expected/owed until issue-solver's Gate E run and a receipt session record it |
-| `python -m pytest -q tests/test_c22_trev.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` | **1 failed, 1868 passed, 7 skipped** — the one failure is the same owed Gate E row |
+| `python -m pytest -q tests/test_c22_trev.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` (after Gate E ledger row `c22_trev` recorded 2026-11-28) | **1876 passed, 7 skipped** |
 
 Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
