@@ -256,6 +256,7 @@ No counts are printed here (#331: a retyped or generated total is a line every p
 | `c22_outlier_timing_pos` | C | `length=None` | `C22OUTLIERTIMINGPOS_100` SF | 100 | Z-score the last `length` daily returns (no negation), so the window's most strongly POSITIVE returns read as `y`'s largest values. Sweep a threshold… |
 | `c22_periodicity` | C | `length=None` | `C22PERIODICITY_100` ORD | 100 | The period of the last `length` daily returns, read the way Wang, Wirth and Wang (2007) read one: z-score the window, detrend it with a single-knot… |
 | `c22_stretch_decreasing` | C | `length=None` | `C22STRETCHDEC_100` ORD | 100 | How long the recent returns kept falling, one after another: take the `length` trailing simple returns, mark every bar whose return is STRICTLY below… |
+| `c22_trev` | C | `length=None` | `C22TREV_100` SF | 100 | Z-score the last `length` daily simple returns and report the mean CUBE of the window's consecutive (lag-1) z-score differences -- positive when… |
 | `c22_whiten_timescale` | C | `length=None` | `C22WHITENTIMESCALE_100` SF | 100 | Over the last `length` daily simple returns, take the first difference (the residual of a trivial "forecast the previous value" predictor) and report… |
 | `covariance` | C | `other=None`, `length=None`, `ddof=None` | `COV_30_1` SF | 30 | The trailing covariance of two series over `length` bars. The two-series counterpart of `variance`, and the unnormalised counterpart of `correlation`. |
 | `cusum` | C | `length=None` | `CUSUM_100` SF | 100 | The largest standardised rise of log price over any earlier reference bar in a rolling window: for each reference bar n, the log change from n to the… |
@@ -635,6 +636,7 @@ Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation nee
 - `c22_outlier_timing_pos`
 - `c22_periodicity`
 - `c22_stretch_decreasing`
+- `c22_trev`
 - `c22_whiten_timescale`
 - `covariance`
 - `cusum`

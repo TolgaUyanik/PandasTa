@@ -15,6 +15,7 @@ from .c22_outlier_timing_neg import c22_outlier_timing_neg
 from .c22_outlier_timing_pos import c22_outlier_timing_pos
 from .c22_periodicity import c22_periodicity
 from .c22_stretch_decreasing import c22_stretch_decreasing
+from .c22_trev import c22_trev
 from .c22_whiten_timescale import c22_whiten_timescale
 from .diff1_pacf5 import diff1_pacf5
 from .diff2_acf1 import diff2_acf1

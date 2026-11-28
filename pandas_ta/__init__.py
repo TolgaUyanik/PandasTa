@@ -238,6 +238,7 @@ Category = {
         "c22_outlier_timing_pos",
         "c22_periodicity",
         "c22_stretch_decreasing",
+        "c22_trev",
         "c22_whiten_timescale",
         "covariance",
         "cusum",
