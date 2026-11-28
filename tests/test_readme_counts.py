@@ -132,3 +132,21 @@ def test_the_unregistered_accessors_really_are_callable(name):
     """The paragraph claims they work; prove it rather than asserting prose."""
     assert callable(getattr(AnalysisIndicators, name, None))
     assert name not in {n for names in pandas_ta.Category.values() for n in names}
+
+
+def test_the_readme_links_the_disclaimer_near_the_top():
+    """Issue #6: a disclaimer exists and the README shows it before any usage section."""
+    root = os.path.dirname(_HERE)
+    assert os.path.isfile(os.path.join(root, "DISCLAIMER.md"))
+    text = _readme()
+    assert "(DISCLAIMER.md)" in text[: text.index("## Install")], \
+        "the README must link DISCLAIMER.md before the Install section"
+
+
+def test_the_readme_count_floor_is_true():
+    """The README may state one rounded floor ("400+") instead of an exact count (#331 keeps
+    exact counts out). The floor must stay true: it is the number a reader will quote."""
+    floors = [int(n) for n in re.findall(r"\b(\d+)\+ (?:technical-analysis )?indicators\b", _readme())]
+    assert floors, "the README no longer states its rounded indicator floor"
+    actual = sum(len(v) for v in pandas_ta.Category.values())
+    assert all(f <= actual for f in floors), f"README floor(s) {floors} exceed the registered count {actual}"

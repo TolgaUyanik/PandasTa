@@ -1,18 +1,48 @@
-# Pandas TA — Tolga Uyanik's fork
+# PandasTa — technical indicators as machine-learning features
 
-Technical analysis indicators as a pandas extension. Fork of
-[twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, extended with
-price-action / SMC indicators and oriented toward **machine-learning feature generation**.
+[![tests](https://github.com/TolgaUyanik/PandasTa/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/TolgaUyanik/PandasTa/actions/workflows/ci.yml)
+![licence](https://img.shields.io/badge/licence-MIT%20%2B%20MPL--2.0%20files-blue)
 
-Indicators are registered in `Category`, across 9 categories: that is the set that
-matters, because `Category` is exactly what `df.ta.strategy()` sweeps. Two wider surfaces
-are easy to confuse with it: a few more are callable as `df.ta.<name>()` without being
-registered, and `drawdown` and `ma` are importable as `ta.<name>()` only (listed under
-*Indicators by category* below). No count is typed here: it changes with every port (#331).
-Count from the package with
-`python -c "import pandas_ta as ta; print(sum(map(len, ta.Category.values())))"`.
-Every indicator returns a `Series` or `DataFrame`
-with `UPPERCASE_UNDERSCORE_PARAM` column names.
+A pandas extension with **400+ technical-analysis indicators**, built so that every column can be
+fed to a model: causal (no bar reads the future), scale-free where it matters, and documented
+column by column. A maintained fork of
+[twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, developed almost
+entirely by AI coding agents under a human owner's review ([how](#how-this-repository-is-built)).
+
+> **Not financial advice. No warranty.** This is software for computing indicators, not a
+> trading recommendation. Read the [disclaimer](DISCLAIMER.md) before using it.
+
+---
+
+## Why this fork
+
+- **400+ indicators registered for bulk computation** (`df.ta.strategy()`), across 9 categories:
+  upstream's set, plus TradingView/Pine ports, SMC price-action structure, TA-Lib ports, and
+  time-series features from catch22, Kats and tsfresh-style definitions.
+- **Built for ML, not charts.** Every column's observed form (scale-free, price level, binary,
+  ordinal) and warm-up is generated into [`docs/IndicatorDictionary.md`](docs/IndicatorDictionary.md).
+  Look-ahead bugs inherited from upstream or found in ports are fixed and pinned by tests
+  (`dpo`, `ssf`, `bos`, `choch`).
+- **Gated, not just added.** A new indicator must pass correctness against its source,
+  a causality *mutant* test, reachability, scale-invariance, a redundancy check against
+  several hundred existing features, and the full suite (about 17,000 tests) before it merges.
+- **Maintained.** The original upstream GitHub repository is no longer available; this fork is
+  developed continuously.
+
+**How it compares** (counted 2026-11-28 by the method in the last column; libraries count
+differently, so read the unit):
+
+| library | version | indicators | how counted |
+|---|---|---|---|
+| **PandasTa (this fork)** | dev | **400+** | names in `Category` |
+| pandas-ta-classic | 0.9.0 | 284 | indicator modules in the wheel, each candle pattern counted separately |
+| pandas-ta-openbb | 0.4.25 | 156 | names in `Category` |
+| pandas-ta (PyPI) | 0.4.71b0 | 151 | names in `Category` |
+| TA-Lib (Python wrapper) | installed | 161 | `talib.get_functions()` |
+
+That makes this fork larger than every other open-source technical-analysis library we
+measured. Time-series feature libraries (tsfresh, hctsa) compute more *features* and are not
+in this table.
 
 ---
 
@@ -23,8 +53,6 @@ pip install -U git+https://github.com/TolgaUyanik/PandasTa
 ```
 
 Requires `pandas`, `numpy`. Optional: `scipy`, `sklearn`, `statsmodels`, `talib`, `yfinance`, `mplfinance`, `tqdm`.
-
----
 
 ## Quick start
 
@@ -40,7 +68,6 @@ sma10 = ta.sma(df["close"], length=10)        # Series "SMA_10"
 bb    = ta.bbands(df["close"], length=20)     # DataFrame: BBL_/BBM_/BBU_/BBB_20_2.0
 
 # 2. DataFrame extension — infers the ohlcv columns
-sma10 = df.ta.sma(length=10)
 df.ta.bbands(length=20, append=True)          # writes the columns into df
 
 # 3. Strategy — named group, multiprocessed, always appends
@@ -51,193 +78,158 @@ feat = ta.Strategy(name="ml_v1", ta=[
 ])
 df.ta.strategy(feat)
 
-# Every registered indicator also works standalone -- useful when you want one
-# result joined on your own terms rather than appended by a strategy run:
+# Any indicator also works standalone, joined on your own terms:
 df = df.join(ta.ichimoku_ml(df["high"], df["low"], df["close"]))
 ```
 
 Discovery:
 
 ```python
-df.ta.indicators()                 # print every indicator + utility
-df.ta.indicators(as_list=True)     # same, as a list
+df.ta.indicators(as_list=True)     # every indicator + utility
 df.ta.categories                   # category names
 help(ta.bbands)                    # signature, params, output columns, sources
+sum(map(len, ta.Category.values()))   # the exact count today
 ```
 
 ---
 
-## Using this for machine learning
-
-Fork rules. Read before feeding any column to a model.
+## Using it for machine learning
 
 ### 1. Causality is the contract
 
-Indicators added in this fork are **causal**: the value at bar `T` uses only data at `<= T`.
-One upstream column is not at default parameters —
-[docs/IndicatorDictionary.md](docs/IndicatorDictionary.md#leak-watchlist) tracks it — and one
-upstream option reads the future when you turn it on:
+The value at bar `T` uses only data at `<= T`. Two upstream behaviours are the exceptions, and
+[the dictionary's leak watchlist](docs/IndicatorDictionary.md#leak-watchlist) tracks them:
 
 | Column | Problem | What to do |
 |---|---|---|
-| `ichimoku` → `ICS_26` | Chikou span is `close.shift(-kijun)` — the future | drop the column, or use `ichimoku_ml` |
-| `dpo` → `DPO_20` | `centered=True` reads `length // 2 + 1` bars ahead. The default here is `False` (upstream's is `True`) | leave `centered` at its default |
+| `ichimoku` → `ICS_26` | Chikou span is `close.shift(-kijun)`, the future | drop the column, or use `ichimoku_ml` |
+| `dpo` → `DPO_20` | `centered=True` reads `length // 2 + 1` bars ahead; the default here is `False` (upstream's is `True`) | leave `centered` at its default |
 
-Non-repainting is enforced elsewhere: `nadaraya_watson_envelope`, for example, weights a
-trailing window only. Ported price-action indicators state causality in their module
-docstring — `help(ta.<name>)` and read the leak note.
+Ported indicators state their causality in the module docstring (`help(ta.<name>)`).
 
 ### 2. Trees cannot read absolute price
 
-An indicator returning a *price level* (`SMA_50 = 41.72`) is a dead feature — the model
-cannot compare it to `close`, and the level moves with the ticker and the year. Feed
-**relations**, not levels.
+An indicator returning a price level (`SMA_50 = 41.72`) is a dead feature: the model cannot
+compare it to `close`, and the level moves with the ticker and the year. Feed relations.
 
 ```python
 # bad: absolute level                    # good: scale-free relation
 df.ta.sma(length=50, append=True)        (df["close"] - ta.sma(df["close"], 50)) / df["close"]
-df.ta.atr(append=True)                   df.ta.natr(append=True)    # ATR normalized by price
+df.ta.atr(append=True)                   df.ta.natr(append=True)    # ATR normalised by price
 ```
 
 `ichimoku_ml` is the worked example: the 5 Ichimoku price lines become 8 scale-free causal
-features (`ICHI_PRICE_VS_CLOUD`, `ICHI_PRICE_VS_KIJUN`, `ICHI_TK_DIST`, `ICHI_TK_CROSS_AGE`,
-`ICHI_CLOUD_COLOR`, `ICHI_CLOUD_THICK`, `ICHI_FUTURE_CLOUD_COLOR`, `ICHI_CHIKOU_VS_CLOUD`).
-Prefer a `*_ml` variant wherever one exists.
-
-Properties to prefer in a feature: scale-free (ratio, or percent of price), bounded or
-distribution-stable across tickers, and stationary enough that a threshold learned in one
-period still means the same thing in the next.
+features. Prefer a `*_ml` variant wherever one exists.
 
 ### 3. Warm-up NaNs are real
 
-Every rolling indicator emits `NaN` for its first `length` (often more) bars. Drop the
-warm-up window **per ticker**, before concatenating tickers. Never `fillna(0)` — that
-invents signal at the start of each series.
-
-```python
-feats = feats.iloc[max_lookback:]     # per ticker, then concat
-```
+Rolling indicators emit `NaN` for their first `length` (often more) bars. Drop the warm-up
+**per ticker**, before concatenating tickers. Never `fillna(0)`: it invents signal at the start
+of each series.
 
 ### 4. Naming is stable, so parse it
 
-Column names encode the parameters: `STOCHk_14_3_3`, `BBU_20_2.0`, `MACDh_12_26_9`.
-Pass `col_names=(...)` to pin fixed names — note it disables multiprocessing for that
-Strategy.
+Column names encode the parameters: `STOCHk_14_3_3`, `BBU_20_2.0`, `MACDh_12_26_9`. Pass
+`col_names=(...)` to pin fixed names (it disables multiprocessing for that Strategy).
 
 ### 5. Signals are labels, not features
 
-`tsignals` / `xsignals` turn a trend or a crossover into entry / exit / trend columns
-(`asbool=True` for boolean). Use them to build **labels**; feeding them back as features
-is how a target leaks in.
+`tsignals` / `xsignals` turn a trend or a crossover into entry / exit columns. Use them to build
+labels; feeding them back as features is how a target leaks in.
 
 ---
 
-## Indicators by category
+## Indicators
 
-Full reference — every output column, its ML form (scale-free / price-level / binary),
-warm-up bars, and parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDictionary.md)**
-(generated by `python docs/gen_indicator_dictionary.py`).
-
-`help(ta.<name>)` for the same per indicator.
-
-Every registered indicator, by category, with its columns: the category tables of
-[docs/IndicatorDictionary.md](docs/IndicatorDictionary.md). They are generated from the
-package, so they are not repeated here.
+Every registered indicator, by category, with its output columns, ML form, warm-up and
+parameters: **[docs/IndicatorDictionary.md](docs/IndicatorDictionary.md)**, generated from the
+package (`python docs/gen_indicator_dictionary.py`). Per-indicator reference pages live under
+[`docs/indicators/`](docs/indicators/).
 
 Present but outside `Category`, so skipped by `df.ta.strategy()`: `beta`, `drawdown`,
-`hwma`, `vp`, `ma` (moving-average selector — `help(ta.ma)`), and the two lower-timeframe
+`hwma`, `vp`, `ma` (moving-average selector — `help(ta.ma)`), the two lower-timeframe
 functions `up_and_down_volume` / `volume_delta`, and the three TA-Lib ports
 `ht_trendline`, `mama` and `sarext`. `beta`, `ht_trendline`, `hwma`, `mama`, `sarext`, `vp`,
 `up_and_down_volume` and `volume_delta` are reachable as `df.ta.<name>()`; `drawdown` and
-`ma` only as `ta.drawdown()` / `ta.ma()`. `beta` is a TALIB-1 port and needs a BENCHMARK
-series a single-frame sweep cannot supply, which is the same reason as the two volume
-functions below; it is absent from the dictionary for the same reason they are.
+`ma` only as `ta.drawdown()` / `ta.ma()`. `beta` needs a benchmark series and the two volume
+functions need a second, lower-timeframe frame, which a single-frame sweep cannot supply
+(see `docs/LowerTimeframeData.md`). `ht_trendline`, `mama` and `sarext` return TA-Lib's raw
+price levels; their distance forms restated existing columns, so a sweep would only add dead
+price-level columns.
 
-`ht_trendline`, `mama` and `sarext` return TA-Lib's raw PRICE LEVELS, and their
-scale-free distance forms were measured into the Gate E revert band against columns
-the engine already ships — `bias` 0.9576, `QQE_RSIMA` 0.9408, `dist_to_psar_pct`
-0.9850. They stay callable (`emit_dist=True` restores the deleted columns for
-re-measurement) but a strategy sweep would only emit dead `PX` columns. `beta`
-needs a second series a sweep cannot supply.
-
-The two volume functions are excluded **deliberately**: they require a second
-(lower-timeframe) frame, which a strategy sweep cannot supply, so registering them took
-the whole multiprocessing path down with a `ValueError`. See `docs/LowerTimeframeData.md`. `drawdown` was previously counted under
-**performance** above AND listed here as outside `Category` — it is the latter.
-
-Utilities: `above` `above_value` `below` `below_value` `cross`.
-
-Performance metrics (return a `float`, called standalone — `ta.cagr(df.close)`): `cagr`
-`calmar_ratio` `downside_deviation` `jensens_alpha` `log_max_drawdown` `max_drawdown`
-`pure_profit_score` `sharpe_ratio` `sortino_ratio` `volatility`.
-
----
+Utilities: `above` `above_value` `below` `below_value` `cross`. Performance metrics (return a
+`float`, called standalone — `ta.cagr(df.close)`): `cagr` `calmar_ratio` `downside_deviation`
+`jensens_alpha` `log_max_drawdown` `max_drawdown` `pure_profit_score` `sharpe_ratio`
+`sortino_ratio` `volatility`.
 
 ## DataFrame extension reference
 
 ```python
 df.ta.adjusted = "adj_close"   # use adj_close instead of close; None resets
 df.ta.cores = 4                # strategy multiprocessing; 0 disables it
-df.ta.categories               # category list
 df.ta.datetime_ordered         # True if DatetimeIndex and ascending
-df.ta.exchange = "LSE"         # exchange used by last_run
-df.ta.last_run                 # last run timestamp
 df.ta.reverse                  # df in reverse order
-df.ta.time_range               # index span, default "years"
 df.ta.to_utc                   # index -> UTC
-
 df.ta.hl2(prefix="pre", suffix="post")   # -> "pre_HL2_post"
-df.ta.constants(True, [1])               # add / remove constant columns
 df.ta.ticker("aapl", period="1y")        # yfinance download (optional dep)
-```
 
-Strategy shortcuts:
-
-```python
 df.ta.strategy()                            # everything (large)
 df.ta.strategy("momentum")                  # one category
-df.ta.strategy("overlap", length=42)        # override a shared kwarg
-df.ta.strategy(exclude=["vp"], verbose=True, timed=True)   # skip what you do not want
+df.ta.strategy(exclude=["vp"], verbose=True, timed=True)
 ```
 
-`vwap` requires a `DatetimeIndex`.
-
-Known breaks: **none** — every registered indicator calls cleanly on pandas 2.3.3, and every
-name in `Category` has a `df.ta.<name>()` accessor. The dictionary's
-[Known breaks](docs/IndicatorDictionary.md#known-breaks) section is generated from a live
-probe, so it is the authority rather than this line.
-
-`fvg`'s `IN_FVG_BULL`/`IN_FVG_BEAR` were **repaired 2026-09-07** and are safe to feed. They
-had been driven by tick rounding: a zone was evicted on the bar that created it, so it
-survived only when the close tied the bar's extreme. They now fire at **22.17% / 19.85%**
-over 89 BIST_100 frames and 408,253 daily bars, with Gates C/D/E cleared (max |ρ| 0.6390 /
-0.5962, under the 0.76 ship line). Evidence:
-`../Backtesting/scripts/analysis/measure_fvg_overlap_full.py` (never committed, Backtesting #107; rebuilt harness: `gate_e_overlap.py`) and its four CSVs.
-
-⚠ The **live trading container** still runs an unrepaired private copy of the same loop
-(`FVGENG-2`, tracked in the Backtesting repo), so research and live currently compute different `IN_FVG_*`
-values. Account for that before comparing them.
+`vwap` requires a `DatetimeIndex`. Known breaks, if any, are listed in the dictionary's
+generated [Known breaks](docs/IndicatorDictionary.md#known-breaks) section.
 
 ---
 
-## Adding an indicator (fork conventions)
+## How this repository is built
 
-1. One module per indicator in `pandas_ta/<category>/`; function name == file name.
-2. Docstring states source, formula, **causality** (which bars each output reads), and any
-   column deliberately dropped for leaking or for duplicating an existing one.
-3. Register in `pandas_ta/<category>/__init__.py` and in `Category` in `pandas_ta/__init__.py`.
-4. Add the DataFrame extension method in `pandas_ta/core.py`.
-5. Tests in `tests/`. Measure a new column against the existing set first — columns that
-   overlap an existing one get deleted, not shipped.
+Nearly every change here is written by AI coding agents (Claude Code) working a GitHub issue
+queue. A human owner decides what gets built, rules on every judgement call, and owns the
+result. The pipeline:
+
+1. **issue-writer** (an agent skill) turns an idea, a formula or a script into a
+   self-contained GitHub issue: source, formula, parameters, gates owed, a "done when" line.
+   It checks for duplicates and lints the issue with the solver's own parser. The owner
+   approves it and labels it `agent`.
+2. **issue-solver** (a headless launcher) takes the oldest eligible issue and runs it with no
+   human in the loop: an isolated worktree, a work session, then code checks (allowed paths,
+   both test suites in clean worktrees, a CPU-feature variant, the redundancy measurement).
+3. **An independent reviewer gate.** A fresh agent with no memory of the work reviews the
+   result against the issue and the repository's rules and returns PASS or REVISE with concrete
+   fixes; up to three rounds, each REVISE answered by a fix session.
+4. **CI and a merge queue.** The PR runs the full suite on GitHub Actions; a home-built merge
+   queue (GitHub's native one is not available on this plan) updates and merges PRs into `dev`
+   one at a time.
+5. **The owner** takes over whatever the pipeline cannot settle: attended ports, licence
+   questions, failed reviews, and anything that changes existing column values.
+
+Measured on GitHub on 2026-11-28: 215 merged pull requests since 2026-09-11, 190 of them opened
+with a Claude Code footer; 172 of 211 issues were labelled for the agent queue; 170 review runs
+are kept in [`docs/reviews/`](docs/reviews/). Human contributors also work in the same queue.
+The agent skills live in a separate repository.
+
+What it does not mean: an agent wrote it, so no line here is warranted, and every
+indicator's evidence is a set of measurements, not a claim of predictive value.
 
 ---
 
-## Sources
+## Contributing an indicator
 
-[TA-Lib](http://ta-lib.org/) · [TradingView](http://www.tradingview.com) ·
-[Sierra Chart](https://search.sierrachart.com/?Query=indicators&submitted=true) ·
-[MQL5](https://www.mql5.com) · [FM Labs](https://www.fmlabs.com/reference/default.htm) ·
-[Pro Real Code](https://www.prorealcode.com/prorealtime-indicators)
+Follow [`docs/ImplementingAnIndicator.md`](docs/ImplementingAnIndicator.md). Scaffold the five
+wiring files with `python docs/new_indicator.py <category> <name>`, which also writes the
+causality, scale and reachability tests that must pass.
 
-MIT. Upstream author: Kevin Johnson ([twopirllc](https://github.com/twopirllc)) and
-[contributors](https://github.com/twopirllc/pandas-ta#contributors-).
+## Licence and credits
+
+MIT ([LICENSE](LICENSE)), except the files listed in [NOTICE](NOTICE): modules translated from
+TradingView Pine scripts published under the Mozilla Public License 2.0 stay MPL-2.0 file by
+file, and a few modules' source licence is still being verified. See also the
+[disclaimer](DISCLAIMER.md).
+
+Upstream: Kevin Johnson ([twopirllc](https://github.com/twopirllc)) and
+[contributors](https://github.com/twopirllc/pandas-ta#contributors-). Indicator authors are
+credited in each module's docstring. Formula references: [TA-Lib](http://ta-lib.org/) ·
+[TradingView](http://www.tradingview.com) · [catch22](https://github.com/DynamicsAndNeuralSystems/catch22) ·
+[FM Labs](https://www.fmlabs.com/reference/default.htm).
