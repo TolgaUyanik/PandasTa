@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import numpy as np
-from pandas import DataFrame, Series
+from pandas import DataFrame
 from pandas_ta.utils import get_offset, verify_series
 
 

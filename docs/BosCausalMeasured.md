@@ -64,14 +64,16 @@ scaled by x1.4 and separately by x0.6, seeds 0-3, `swing_length` 4 / 5 / 7 / 9, 
 its own. Measured reach: **0** bars on all six columns.
 
 `test_mutant_with_the_old_centred_placement_is_caught`: the module source with the swing written
-back on its pivot bar (`.shift(-k)`, exactly the old placement) is exec'd in memory; `choch` gets
+back on its pivot bar (`.shift(-k)`: the old placement on tie-free frames, which these continuous
+float frames are; on a tie the old window flagged every tied bar) is exec'd in memory; `choch` gets
 the mutant helper injected. Measured reach: **k** = 1 / 2 / 3 / 4 for each module, so the probe
 sees the old defect in both.
 
 ## Gate C — reachability
 
-89 frames, 398,849 daily bars (the Gate E universe below), default `swing_length` 5, new vs old
-module:
+89 frames, 398,849 daily bars (the Gate E universe below: `gate_e_overlap.load_frame` over
+`UNIVERSE`), default `swing_length` 5, new vs old module (old = `git show
+origin/dev:pandas_ta/trend/{bos,choch}.py` before this change), counted per column:
 
 | column | new fires | old fires | bars with the same value | frames firing (new) |
 |---|---|---|---|---|
@@ -97,7 +99,8 @@ Every column fires on some bars and not on all (`0 < fires < 1,200`).
 keeps the unchanged names from matching themselves). 89 ALTPORT-1 frames, 398,849 pooled bars,
 687 comparators (329 `compute_all` + 358 manifest), canary bit-equal on
 AKBNK.IS/BIENY.IS/AGHOL.IS/SASA.IS, `degenerate.csv` empty. Candidate sha1: `bos.py`
-`6ecd443b348362063832570c206278e9f5a90cf8`, `choch.py` `f5f46002bf5644cebffe92de0162ff5214e7ca0e`.
+`6ecd443b348362063832570c206278e9f5a90cf8`, `choch.py` `f5f46002bf5644cebffe92de0162ff5214e7ca0e`. `bos.py` then lost one unused
+import (`Series`) in review; no executable line changed.
 
 | column | max \|rho\| | against | n | per-frame max median \|rho\| | verdict |
 |---|---|---|---|---|---|
@@ -127,12 +130,15 @@ Both whole suites, run 2026-11-28 on this branch rebased onto `origin/dev` (c8a3
   the sibling `../AlternativeRepos` checkout and is deselected by name in CI.
 - Backtesting (`python -m pytest -q tests/`, the Gate E checkout, `PYTHONPATH` = PandasTa):
   base (`origin/dev`) **2,211 passed, 32 failed, 4 errors, 17 skipped**; this branch
-  **2,211 passed, 32 failed, 4 errors, 17 skipped**. Same counts; the failures and errors are
-  pre-existing in that checkout and not caused by this change.
+  **2,211 passed, 32 failed, 4 errors, 17 skipped**. Same counts; the failing test IDs were not
+  compared. Backtesting does not call `ta.bos` / `ta.choch` (its engine computes its own BOS and
+  CHoCH), so the failures cannot come from these modules (grep of its non-test code).
 
 Targeted: `tests/test_bos_causal.py` 69 passed.
 
 ## Counters touched
 
 None: no module added or removed. `docs/IndicatorDictionary.md` and `docs/indicators/bos.md` /
-`choch.md` regenerated (docstring and module length only); `CLAUDE.md`'s look-ahead list updated.
+`choch.md` regenerated (docstring and module length only; their generated Gate B row still
+says "no mutant test recorded", a generic line from `docs/gen_indicator_pages.py` that does not
+see `tests/test_bos_causal.py`); `CLAUDE.md`'s look-ahead list updated.

@@ -24,14 +24,15 @@ WHAT IS PINNED, in order of how much it would hurt to lose
    unseat a swing low, so the low side needs the downward move). Seeds 0-3, `swing_length`
    4 / 5 / 7 / 9: every bar before the cut is unchanged, on all six columns, each module alone.
 2. **The probe catches the old defect** (mutant). The module source with the swing written back
-   `k` bars (`.shift(-k)`, which is exactly the old centred placement) is exec'd in memory and
+   `k` bars (`.shift(-k)`: the old centred placement on tie-free frames, which the sweep's frames
+   are; on a tie the old window flagged every tied bar, the mutant only the rightmost) is exec'd in memory and
    measures reach `k` on each module alone, at every length above.
 3. **The formula** (Gate A). An independent per-bar loop over the issue's formula matches the
    module's swings and all six columns exactly, `swing_length` 1-9, seeds 0-4.
 4. **Same swings as before, only later.** On a frame with no tied highs or lows, the confirmed
    swings are exactly the old centred swings moved `k` bars later.
 5. **Ties.** A double top inside one window confirms exactly one swing high: the right-hand bar.
-6. **Scale-free** (Gate D). x8 / x64 bit-identical, x10 / x3.7 identical (0/1 flags of price
+6. **Scale-free** (Gate D). x8 / x64 / x10 / x3.7 identical (0/1 flags of price
    comparisons), with every column firing on some bars and not on all.
 """
 import inspect

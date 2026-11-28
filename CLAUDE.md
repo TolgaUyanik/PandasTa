@@ -124,7 +124,7 @@ live package and lists every column's observed form.
   range(0, m)`, so at `i = 0` it read `ssf.iloc[-1]` — Python negative indexing, the LAST bar of
   the series — and the recursion propagated that forward. Perturbing only bars ≥ 300 of a 400-bar
   frame moved **bar 0** by 31.4. Fixed and pinned by `tests/test_ssf_causality.py`.
-  **`bos` was a fourth, and `choch` a fifth — both fixed 2026-11-27 (#332).** Both flagged swings
+  **`bos` was a fourth, and `choch` a fifth — both fixed in #332 (2026-11-27/28).** Both flagged swings
   with `rolling(swing_length, center=True)` and wrote the flag on the pivot bar, so every column
   read exactly `(swing_length - 1) // 2` bars ahead (measured for `bos`: 1 / 2 / 3 / 4 at
   `swing_length` 4 / 5 / 7 / 9; `choch` used the same two lines and its mutant measures the same
