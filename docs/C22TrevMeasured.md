@@ -230,7 +230,7 @@ wider than 0.01; `cosine` is the one near-constant frame, by construction
 
 ## E. Gate E — attribution
 
-Run `is263-c22_trev-e4e798ba` (issue-solver, 2026-11-28), 89 frozen
+Run `is263-c22_trev-ac0ba962` (issue-solver, 2026-11-28), 89 frozen
 ALTPORT-1 BIST frames, 687 comparators (329 `compute_all` + 358
 `ml_features` manifest):
 
