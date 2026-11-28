@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """MINOR (round 9): the README's indicator inventory is checked, not typed.
 
-Since #331 the README carries no counts and no per-category lists at all (see
+Since #331 the README carries no exact counts and no per-category lists (one rounded floor is
+allowed and guarded; see
 `test_the_readme_retypes_no_indicator_count`); the history below explains why the
 outside-`Category` paragraph is still checked against the package.
 
@@ -57,7 +58,8 @@ def _accessor_indicators():
 
 
 def test_the_readme_retypes_no_indicator_count():
-    """Since #331 the README states no indicator count and no per-category list.
+    """Since #331 the README states no exact indicator count and no per-category list (one
+    rounded floor such as "400+" is allowed and guarded by `test_the_readme_count_floor_is_true`).
 
     Every port used to bump the headline, the accessor count and its category's
     `**name (n)**` row, so two ports merged in either order conflicted on those
@@ -146,7 +148,7 @@ def test_the_readme_links_the_disclaimer_near_the_top():
 def test_the_readme_count_floor_is_true():
     """The README may state one rounded floor ("400+") instead of an exact count (#331 keeps
     exact counts out). The floor must stay true: it is the number a reader will quote."""
-    floors = [int(n) for n in re.findall(r"\b(\d+)\+ (?:technical-analysis )?indicators\b", _readme())]
+    floors = [int(n) for n in re.findall(r"\b(\d+)\+", _readme())]   # every "N+" in the README
     assert floors, "the README no longer states its rounded indicator floor"
     actual = sum(len(v) for v in pandas_ta.Category.values())
     assert all(f <= actual for f in floors), f"README floor(s) {floors} exceed the registered count {actual}"

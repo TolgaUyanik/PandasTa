@@ -5,9 +5,10 @@
 
 A pandas extension with **400+ technical-analysis indicators**, built so that every column can be
 fed to a model: causal (no bar reads the future), scale-free where it matters, and documented
-column by column. A maintained fork of
-[twopirllc/pandas-ta](https://github.com/twopirllc/pandas-ta) `0.2.67b`, developed almost
-entirely by AI coding agents under a human owner's review ([how](#how-this-repository-is-built)).
+column by column. A fork of pandas-ta `0.2.67b` (twopirllc), written mostly by AI coding
+agents: a human owner approves the work queue and rules on judgement calls, and changes merge
+on automated tests and an automated reviewer, not on a human code review
+([how](#how-this-repository-is-built)).
 
 > **Not financial advice. No warranty.** This is software for computing indicators, not a
 > trading recommendation. Read the [disclaimer](DISCLAIMER.md) before using it.
@@ -21,13 +22,15 @@ entirely by AI coding agents under a human owner's review ([how](#how-this-repos
   time-series features from catch22, Kats and tsfresh-style definitions.
 - **Built for ML, not charts.** Every column's observed form (scale-free, price level, binary,
   ordinal) and warm-up is generated into [`docs/IndicatorDictionary.md`](docs/IndicatorDictionary.md).
-  Look-ahead bugs inherited from upstream or found in ports are fixed and pinned by tests
-  (`dpo`, `ssf`, `bos`, `choch`).
-- **Gated, not just added.** A new indicator must pass correctness against its source,
-  a causality *mutant* test, reachability, scale-invariance, a redundancy check against
-  several hundred existing features, and the full suite (about 17,000 tests) before it merges.
-- **Maintained.** The original upstream GitHub repository is no longer available; this fork is
-  developed continuously.
+  Look-ahead bugs are fixed and pinned by tests (`ssf`, `bos`, `choch`) or made causal by
+  default (`dpo`).
+- **Gated, not just added.** Before a PR merges into `dev`, a new indicator passes correctness
+  against its source, a causality *mutant* test, reachability, scale-invariance and the full
+  suite (about 17,000 tests). Its redundancy against a fixed set of several hundred reference
+  features (Gate E) is recorded in `docs/gate_e_ledger.csv`; a release to `main` fails until
+  every new indicator has its row.
+- **Actively maintained.** 215 pull requests merged since 2026-09-11 (measured 2026-11-28). The
+  original upstream GitHub repository is no longer available.
 
 **How it compares** (counted 2026-11-28 by the method in the last column; libraries count
 differently, so read the unit):
@@ -35,21 +38,23 @@ differently, so read the unit):
 | library | version | indicators | how counted |
 |---|---|---|---|
 | **PandasTa (this fork)** | dev | **400+** | names in `Category` |
-| pandas-ta-classic | 0.9.0 | 284 | indicator modules in the wheel, each candle pattern counted separately |
+| pandas-ta-classic | 0.9.0 | 284 | indicator modules in the wheel (their README's own number): 65 candle modules counted one by one, and a 31-module math package (253 without it) |
 | pandas-ta-openbb | 0.4.25 | 156 | names in `Category` |
 | pandas-ta (PyPI) | 0.4.71b0 | 151 | names in `Category` |
-| TA-Lib (Python wrapper) | installed | 161 | `talib.get_functions()` |
+| TA-Lib (Python wrapper) | 0.7.1 | 161 | `talib.get_functions()` |
 
-That makes this fork larger than every other open-source technical-analysis library we
-measured. Time-series feature libraries (tsfresh, hctsa) compute more *features* and are not
-in this table.
+The units favour the others: this fork counts all TA-Lib candle patterns as one name
+(`cdl_pattern`). Even so it is larger than every other open-source technical-analysis library
+we measured. Time-series feature libraries (tsfresh, hctsa) count parameterised features, a
+different unit, so they are not compared here.
 
 ---
 
 ## Install
 
 ```sh
-pip install -U git+https://github.com/TolgaUyanik/PandasTa
+pip install -U "git+https://github.com/TolgaUyanik/PandasTa@dev"   # latest, what this page describes
+pip install -U git+https://github.com/TolgaUyanik/PandasTa         # last release (main), fewer indicators
 ```
 
 Requires `pandas`, `numpy`. Optional: `scipy`, `sklearn`, `statsmodels`, `talib`, `yfinance`, `mplfinance`, `tqdm`.
@@ -77,6 +82,7 @@ feat = ta.Strategy(name="ml_v1", ta=[
     {"kind": "zscore", "length": 20},
 ])
 df.ta.strategy(feat)
+df.ta.strategy("overlap", length=42)          # a category, with a shared kwarg override
 
 # Any indicator also works standalone, joined on your own terms:
 df = df.join(ta.ichimoku_ml(df["high"], df["low"], df["close"]))
@@ -85,7 +91,8 @@ df = df.join(ta.ichimoku_ml(df["high"], df["low"], df["close"]))
 Discovery:
 
 ```python
-df.ta.indicators(as_list=True)     # every indicator + utility
+df.ta.indicators()                 # print every indicator + utility
+df.ta.indicators(as_list=True)     # same, as a list
 df.ta.categories                   # category names
 help(ta.bbands)                    # signature, params, output columns, sources
 sum(map(len, ta.Category.values()))   # the exact count today
@@ -97,8 +104,9 @@ sum(map(len, ta.Category.values()))   # the exact count today
 
 ### 1. Causality is the contract
 
-The value at bar `T` uses only data at `<= T`. Two upstream behaviours are the exceptions, and
-[the dictionary's leak watchlist](docs/IndicatorDictionary.md#leak-watchlist) tracks them:
+The value at bar `T` uses only data at `<= T`. One upstream column leaks at default parameters
+([tracked in the leak watchlist](docs/IndicatorDictionary.md#leak-watchlist)), and one upstream
+option leaks when you turn it on:
 
 | Column | Problem | What to do |
 |---|---|---|
@@ -119,13 +127,19 @@ df.ta.atr(append=True)                   df.ta.natr(append=True)    # ATR normal
 ```
 
 `ichimoku_ml` is the worked example: the 5 Ichimoku price lines become 8 scale-free causal
-features. Prefer a `*_ml` variant wherever one exists.
+features. Prefer a `*_ml` variant wherever one exists. Properties to prefer in a feature:
+scale-free (a ratio, or percent of price), bounded or distribution-stable across tickers, and
+stationary enough that a threshold learned in one period still means the same in the next.
 
 ### 3. Warm-up NaNs are real
 
 Rolling indicators emit `NaN` for their first `length` (often more) bars. Drop the warm-up
 **per ticker**, before concatenating tickers. Never `fillna(0)`: it invents signal at the start
 of each series.
+
+```python
+feats = feats.iloc[max_lookback:]     # per ticker, then concat
+```
 
 ### 4. Naming is stable, so parse it
 
@@ -134,7 +148,8 @@ Column names encode the parameters: `STOCHk_14_3_3`, `BBU_20_2.0`, `MACDh_12_26_
 
 ### 5. Signals are labels, not features
 
-`tsignals` / `xsignals` turn a trend or a crossover into entry / exit columns. Use them to build
+`tsignals` / `xsignals` turn a trend or a crossover into entry / exit columns (`asbool=True`
+for boolean). Use them to build
 labels; feeding them back as features is how a target leaks in.
 
 ---
@@ -185,9 +200,10 @@ generated [Known breaks](docs/IndicatorDictionary.md#known-breaks) section.
 
 ## How this repository is built
 
-Nearly every change here is written by AI coding agents (Claude Code) working a GitHub issue
-queue. A human owner decides what gets built, rules on every judgement call, and owns the
-result. The pipeline:
+About nine in ten merged pull requests (190 of 215, measured 2026-11-28) were written by AI coding
+agents (Claude Code), most of them from a GitHub issue queue. A human owner decides what gets
+built and rules on judgement calls; `dev` requires no human approving review, so what merges
+is gated by the automated checks below. The pipeline:
 
 1. **issue-writer** (an agent skill) turns an idea, a formula or a script into a
    self-contained GitHub issue: source, formula, parameters, gates owed, a "done when" line.
@@ -195,23 +211,25 @@ result. The pipeline:
    approves it and labels it `agent`.
 2. **issue-solver** (a headless launcher) takes the oldest eligible issue and runs it with no
    human in the loop: an isolated worktree, a work session, then code checks (allowed paths,
-   both test suites in clean worktrees, a CPU-feature variant, the redundancy measurement).
+   the full test suite in a clean worktree, a CPU-feature variant, and the redundancy
+   measurement, run on the owner's machine).
 3. **An independent reviewer gate.** A fresh agent with no memory of the work reviews the
    result against the issue and the repository's rules and returns PASS or REVISE with concrete
    fixes; up to three rounds, each REVISE answered by a fix session.
 4. **CI and a merge queue.** The PR runs the full suite on GitHub Actions; a home-built merge
-   queue (GitHub's native one is not available on this plan) updates and merges PRs into `dev`
+   queue (GitHub's native one is not available on this repository) updates and merges PRs into `dev`
    one at a time.
 5. **The owner** takes over whatever the pipeline cannot settle: attended ports, licence
    questions, failed reviews, and anything that changes existing column values.
 
-Measured on GitHub on 2026-11-28: 215 merged pull requests since 2026-09-11, 190 of them opened
-with a Claude Code footer; 172 of 211 issues were labelled for the agent queue; 170 review runs
-are kept in [`docs/reviews/`](docs/reviews/). Human contributors also work in the same queue.
-The agent skills live in a separate repository.
+Measured on GitHub on 2026-11-28: 172 of 211 issues were labelled for the agent queue, and
+170 automated review runs are kept in [`docs/reviews/`](docs/reviews/). Human contributors work
+in the same issue queue; their PRs go through the same CI and are queued by the owner (see the
+[contributors graph](https://github.com/TolgaUyanik/PandasTa/graphs/contributors)). The agent
+skills live in a separate repository.
 
-What it does not mean: an agent wrote it, so no line here is warranted, and every
-indicator's evidence is a set of measurements, not a claim of predictive value.
+Agent authorship is not a warranty: no line here is warranted, and every indicator's evidence is
+a set of measurements, not a claim of predictive value.
 
 ---
 
@@ -224,12 +242,14 @@ causality, scale and reachability tests that must pass.
 ## Licence and credits
 
 MIT ([LICENSE](LICENSE)), except the files listed in [NOTICE](NOTICE): modules translated from
-TradingView Pine scripts published under the Mozilla Public License 2.0 stay MPL-2.0 file by
-file, and a few modules' source licence is still being verified. See also the
-[disclaimer](DISCLAIMER.md).
+TradingView Pine scripts that are MPL-2.0 (by the script's header or, where the script states
+none, by the owner's stated assumption) stay MPL-2.0 file by file, and a few modules' source
+licence is still being verified. See also the [disclaimer](DISCLAIMER.md).
 
-Upstream: Kevin Johnson ([twopirllc](https://github.com/twopirllc)) and
-[contributors](https://github.com/twopirllc/pandas-ta#contributors-). Indicator authors are
-credited in each module's docstring. Formula references: [TA-Lib](http://ta-lib.org/) ·
+Upstream: pandas-ta by Kevin Johnson (twopirllc) and its contributors
+([PyPI](https://pypi.org/project/pandas-ta/)). Indicator authors are credited in each module's
+docstring. Formula references: [TA-Lib](http://ta-lib.org/) ·
 [TradingView](http://www.tradingview.com) · [catch22](https://github.com/DynamicsAndNeuralSystems/catch22) ·
-[FM Labs](https://www.fmlabs.com/reference/default.htm).
+[Sierra Chart](https://search.sierrachart.com/?Query=indicators&submitted=true) ·
+[MQL5](https://www.mql5.com) · [FM Labs](https://www.fmlabs.com/reference/default.htm) ·
+[ProRealCode](https://www.prorealcode.com/prorealtime-indicators).
