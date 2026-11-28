@@ -3310,6 +3310,12 @@ class AnalysisIndicators(BasePandasObject):
         result = natr(high=high, low=low, close=close, length=length, mamode=mamode, scalar=scalar, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
+    def nm_price_density_10(self, length=None, offset=None, **kwargs):
+        high = self._get_column(kwargs.pop("high", "high"))
+        low = self._get_column(kwargs.pop("low", "low"))
+        result = nm_price_density_10(high=high, low=low, length=length, offset=offset, **kwargs)
+        return self._post_process(result, **kwargs)
+
     def tf_median_absdiff_20(self, length=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = tf_median_absdiff_20(close=close, length=length, offset=offset, **kwargs)
