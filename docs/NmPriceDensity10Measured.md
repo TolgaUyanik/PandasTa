@@ -12,7 +12,8 @@ nothing here tests Kaufman's own claim on real data.
 `chop`, under the 0.76 ship line). Whole suites run by the launcher in
 clean worktrees: **0 regressions in either repo** — PandasTa 17,174 passed /
 1 pre-existing failure (base: 17,135 / 1), Backtesting 2,211 passed / 32
-failed / 4 errors, identical at base and HEAD.
+failed / 4 errors, identical at base and HEAD (launcher run at 56d901a, before the
+origin/dev merge).
 
 | module | category | column | range |
 |---|---|---|---|
@@ -248,14 +249,20 @@ rules name, not this machine's full dispatchable set, which also has
 `tests/test_nm_price_density_10.py`; the ledger/readme/wiring modules
 above are not CPU-sensitive and are not re-run under this flag).
 
+After merging `origin/dev` (357cadb): same targeted command, **1,801 passed, 7 skipped,
+0 failed**; `tests/test_gate_e_ledger.py` strict (no `GATE_E_PENDING_OK`) **1,626 passed**.
+
 Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
 ## Counters touched
 
-- `CATEGORY_TOTAL` 420 → 421 (`tests/test_altport2_ports.py`);
+Rebased onto `origin/dev` at merge 357cadb (#188 and #139 landed first); at port time
+(pre-merge) these were 420 → 421, 428 → 429 and 765 → 766 / 390 → 391.
+
+- `CATEGORY_TOTAL` 422 → 423 (`tests/test_altport2_ports.py`);
   `CATEGORY_BUCKETS["volatility"]` 43 → 44.
-- README: 420 → 421 registered, 428 → 429 callable, volatility (43) → (44).
-- `docs/MLCompanionContract.md`: 765 → 766 tagged and 390 → 391 `SF`
+- README: 422 → 423 registered, 430 → 431 callable, volatility (43) → (44).
+- `docs/MLCompanionContract.md`: 767 → 768 tagged and 392 → 393 `SF`
   (newest first in the chain). `NM_PRICE_DENSITY_10` tags `SF` because the
   numerator scales linearly with a positive price rescale and the
   denominator (window high minus window low) scales by the same exact

@@ -22,4 +22,4 @@ launcher's Gate E run and a later receipt session record the ledger row.
 31 passed.
 
 Superseded at commit 79b4698 — Gate E ran SHIP, ledger row recorded, target suite re-ran
-1,785 passed / 0 failed; see docs/NmPriceDensity10Measured.md.
+1,785 passed, 7 skipped, 0 failed; see docs/NmPriceDensity10Measured.md.
