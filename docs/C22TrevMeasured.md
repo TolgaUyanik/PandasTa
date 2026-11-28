@@ -230,7 +230,7 @@ wider than 0.01; `cosine` is the one near-constant frame, by construction
 
 ## E. Gate E — attribution
 
-Run `is263-c22_trev-ac0ba962` (issue-solver, 2026-11-28), 89 frozen
+Run `is263-c22_trev-38502e65` (issue-solver, 2026-11-28), 89 frozen
 ALTPORT-1 BIST frames, 687 comparators (329 `compute_all` + 358
 `ml_features` manifest):
 
@@ -251,7 +251,7 @@ ALTPORT-1 BIST frames, 687 comparators (329 `compute_all` + 358
 | the same under `NPY_DISABLE_CPU_FEATURES="AVX512F AVX512_SKX AVX2 FMA3"` (`docs/measure_c22_trev_cpu.py`) | **98 passed** |
 | `python docs/measure_c22_trev_cpu.py A B C D G P` — re-measured under the disabled dispatch | every structural figure (fires, mutant catch counts, bit-identical cells, GPL-3.0 agreement) identical to the default-dispatch run; float values agree to the same ~1e-14 noise floor, not digit-for-digit; the cosine frame's distinct-value count moves 1,394 → 1,395 (expected, not pinned) |
 | `python -m pytest -q tests/test_c22_trev.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` | **1868 passed, 7 skipped** |
-| `python -m pytest -q tests/test_c22_trev.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` (after Gate E ledger row `c22_trev` recorded 2026-11-28) | **1876 passed, 7 skipped** |
+| `python -m pytest -q tests/test_c22_trev.py tests/test_readme_counts.py tests/test_altport2_ports.py tests/test_wiring_accessors.py tests/test_ml_companions.py tests/test_gate_e_ledger.py tests/test_pine_coverage_csv.py tests/test_prose_counts_match_the_csvs.py` (after Gate E ledger row `c22_trev` recorded 2026-11-28, re-run `is263-c22_trev-38502e65`) | **1873 passed, 7 skipped** |
 
 Whole suites: run by issue-solver in clean worktrees (see the PR body).
 
