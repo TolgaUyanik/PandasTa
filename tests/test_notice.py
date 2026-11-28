@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MPL = re.compile(r"MPL-2\.0|Mozilla Public License")
 TV = re.compile(r"tradingview\.com/script/[A-Za-z0-9]{8}|\b[A-Za-z0-9]{8}-[A-Za-z0-9][A-Za-z0-9-]*\.pine\b")
 # Modules naming a TradingView script by author/title only (no script id): kept by hand.
-NAMED_ONLY = {"pandas_ta/trend/halftrend.py", "pandas_ta/momentum/wavetrend.py"}
+NAMED_ONLY: set = set()
 # Upstream pandas-ta modules (present in pandas-ta 0.4.71b0 or pandas-ta-openbb 0.4.25 under the
 # same name) whose docstrings link a TradingView page as a reference, not as a ported source.
 UPSTREAM_REFERENCES = {

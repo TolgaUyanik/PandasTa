@@ -333,7 +333,6 @@ Category = {
         "fvg_sweep_magnet",
         "g191_069",
         "g191_098",
-        "halftrend",
         "head_shoulders",
         "increasing",
         "inverse_fvg",

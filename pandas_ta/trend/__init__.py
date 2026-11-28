@@ -22,7 +22,6 @@ from .fvg import fvg
 from .fvg_sweep_magnet import fvg_sweep_magnet
 from .g191_069 import g191_069
 from .g191_098 import g191_098
-from .halftrend import halftrend
 from .head_shoulders import head_shoulders
 from .increasing import increasing
 from .inverse_fvg import inverse_fvg

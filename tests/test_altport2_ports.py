@@ -319,9 +319,9 @@ def test_category_lists_are_sorted_unique_and_complete():
 
     # Removed on purpose, so absent from Category although frozen in the grandfathered list
     # (that file is hash-pinned and is not edited): their TradingView sources are CC BY-NC-SA 4.0
-    # (pressure_pulse, tri_dir_pressure) or "All Rights Reserved" (iama), which an MIT package
-    # cannot carry (owner, 2026-11-28).
-    retired = {"iama", "pressure_pulse", "tri_dir_pressure"}
+    # (pressure_pulse, tri_dir_pressure), "All Rights Reserved" (iama) or GPL-3.0 (halftrend),
+    # which an MIT package cannot carry (owner, 2026-11-28).
+    retired = {"halftrend", "iama", "pressure_pulse", "tri_dir_pressure"}
     registered = {n for names in ta.Category.values() for n in names}
     docs = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs")
     with open(os.path.join(docs, "gate_e_grandfathered.json"), encoding="utf8") as fh:

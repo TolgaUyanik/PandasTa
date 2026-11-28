@@ -290,7 +290,6 @@ Slow and clock-dependent inputs live in `_facts.json`, so a plain re-run is byte
 | [`flag_breakout`](flag_breakout.md) | yes | 3 | stub |
 | [`fvg`](fvg.md) | yes | 4 | measured |
 | [`fvg_sweep_magnet`](fvg_sweep_magnet.md) | yes | 6 | measured |
-| [`halftrend`](halftrend.md) | yes | 2 | stub |
 | [`head_shoulders`](head_shoulders.md) | yes | 5 | measured |
 | [`increasing`](increasing.md) | yes | 1 | stub |
 | [`inverse_fvg`](inverse_fvg.md) | yes | 6 | stub |
