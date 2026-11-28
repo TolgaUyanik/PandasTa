@@ -101,7 +101,8 @@ indicator module.
 | 5 | `tests/test_<name>.py` | test suite |
 
 Touch points 3 and 4 drifted apart once: 11 indicators (`wavetrend`, `ema_align`,
-`ichimoku_ml`, `linreg_channel`, `bos`, `choch`, `fvg`, `halftrend`, `ob`, `zigzag`, `vol_delta`) sat
+`ichimoku_ml`, `linreg_channel`, `bos`, `choch`, `fvg`, `halftrend` (removed 2026-11-28: GPL-3.0
+source), `ob`, `zigzag`, `vol_delta`) sat
 in `Category` with no accessor, so `df.ta.strategy()` and the affected category runs raised
 `AttributeError`. Fixed 2026-09-07 (WIRING-1). `tests/test_wiring_accessors.py` is now the guard:
 `test_every_registered_indicator_has_an_accessor` fails the moment a name enters `Category` without a
