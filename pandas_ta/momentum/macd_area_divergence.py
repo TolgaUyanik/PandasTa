@@ -373,7 +373,7 @@ WHAT IS NOT PORTED (all verified against the source, line by line):
   * The ATR trend line (L24, L40-54): `trendLine` is a running max of
     `low - ATR(14)` in an uptrend / running min of `high + ATR(14)` in a
     downtrend, reset on flip -- that is a plain ATR trailing stop, which
-    `overlap/supertrend` and `trend/halftrend` already cover.
+    `overlap/supertrend` already covers.
   * Every `label.new` (L119-123, L139-143) and the structure-point
     connecting lines (L145-161), including the `bullHighTime` /
     `bearLowTime` / `lastPointTime` / `lastPointPrice` state that exists

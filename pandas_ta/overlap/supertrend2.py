@@ -164,7 +164,7 @@ instead of `close` for the reversal; `pandas_ta.supertrend` has no equivalent.
 The polarity sentence is FIRST on purpose: `docs/IndicatorDictionary.md`
 truncates this description at 150 characters, and CLAUDE.md tells a reader to
 consult that file before judging a column. A sign note that only exists below
-the fold does not reach the person who needs it. `halftrend` does the same.
+the fold does not reach the person who needs it.
 
 Sources:
     TradingView `ta` library (RA2vGpkA), L602-625. MPL-2.0, (c) TradingView.

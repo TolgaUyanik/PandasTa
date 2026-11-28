@@ -104,6 +104,8 @@ identify trend direction and potential reversal points.
 
 Sources:
     https://www.tradingview.com/script/sU9molfV/
+    Licence of the source script: MPL-2.0 (its header, read 2026-11-28), (c) KivancOzbilgic;
+    this file is MPL-2.0 (see NOTICE).
     https://www.prorealcode.com/prorealtime-indicators/pmax/
 
 Calculation:

@@ -354,7 +354,6 @@ No counts are printed here (#331: a retyped or generated total is a line every p
 | `fvg_sweep_magnet` | O/H/L/C/V | `fvg_lookback=None`, `disp_atr_mult=None`, `atr_len=None`, `min_gap_atr=None`, `require_disp=None`, `max_fvg_age=None`, `pivot_len=None`, `liq_keep=None`, `sweep_wick_mult=None`, `sweep_confirm=None`, `magnet_window=None`, `min_score=None` | `FSME_MAG_BULL_5` CONST<br>`FSME_MAG_BEAR_5` CONST<br>`FSME_CE_DIST_BULL_5` ??<br>`FSME_CE_DIST_BEAR_5` ??<br>`FSME_CE_SCORE_BULL_5` ??<br>`FSME_CE_SCORE_BEAR_5` ?? | 0 | Two engines coupled into one signal: (1) displacement-validated Fair Value Gaps (3-bar imbalances that also clear a minimum ATR-scaled size AND, by… |
 | `g191_069` | O/H/L/C | `length=None` | `G191_069_20` SF | 20 | Guotai Junan's (2017, "GTJA191") alpha `#69`, per issue #70. Builds two non-negative, open-anchored range terms per bar -- `DTM` on an up-gap-open… |
 | `g191_098` | C | `length=None`, `reversal_length=None`, `threshold=None` | `G191_098_100_3_0.05` SF | 199 | Guotai Junan's (2017, "GTJA191") alpha `#98`, per issue #58. A ternary gated by how much a 100-bar moving average of `close` has itself drifted over… |
-| `halftrend` | H/L/C | `atr_period=None`, `amplitude=None` | `HALFTREND` PX<br>`HALFTREND_DIR` BIN | 14 | An ATR-based trend-following indicator that alternates between an uptrend line (support) and a downtrend line (resistance). HALFTREND_DIR is +1 in… |
 | `head_shoulders` | H/L/C | `left=None`, `right=None`, `tol=None`, `max_wait=None` | `HS_CONF_BEAR_5_5_0.03_60` BIN<br>`HS_CONF_BULL_5_5_0.03_60` BIN<br>`HS_TGT_PCT_5_5_0.03_60` ??<br>`HS_PEND_5_5_0.03_60` ORD<br>`HS_AGE_5_5_0.03_60` SF | 14 | A five-pivot chart-pattern shape matcher, in the family `dtdb` opened: a confirmed-pivot stream is matched against a template, the candidate is… |
 | `increasing` | C | `length=None`, `strict=None`, `asint=None` | `INC_1` BIN | 0 | Returns True if the series is increasing over a period, False otherwise. If the kwarg 'strict' is True, it returns True if it is continuously… |
 | `inverse_fvg` | H/L/C | `atr_len=None`, `vol_mult=None`, `max_fvg_age=None`, `max_ifvg=None` | `IFVG_CONF_BULL_14` BIN<br>`IFVG_CONF_BEAR_14` BIN<br>`IFVG_MIT_BULL_14` BIN<br>`IFVG_MIT_BEAR_14` BIN<br>`IFVG_DIST_SUP_14` SF<br>`IFVG_DIST_RES_14` SF | 45 | A Fair Value Gap (3-bar imbalance) that price later closes back THROUGH flips polarity: the gap that failed as continuation becomes a zone of the… |
@@ -463,7 +462,7 @@ No counts are printed here (#331: a retyped or generated total is a line every p
 | `adosc` | O/H/L/C/V | `fast=None`, `slow=None` | `ADOSC_3_10` SF | 9 | Accumulation/Distribution Oscillator indicator utilizes Accumulation/Distribution and treats it similarily to MACD or APO. |
 | `amihud` | C/V | `length=None` | `AMIHUD_21` SF | 21 | Amihud (2002)'s illiquidity measure: the average absolute return per unit of dollar volume over a trailing window -- a large price move on thin… |
 | `aobv` | C/V | `fast=None`, `slow=None`, `mamode=None`, `max_lookback=None`, `min_lookback=None` | `OBV` SF<br>`OBV_min_2` SF<br>`OBV_max_2` SF<br>`OBVe_4` SF<br>`OBVe_12` SF<br>`AOBV_LR_2` BIN<br>`AOBV_SR_2` BIN | 11 | Indicator: Archer On Balance Volume (AOBV) |
-| `avwap_z` | H/L/C/V | `anchor=None`, `min_samples=None` | `AVWAP_Z_W` SF<br>`AVWAP_DIST_PCT_W` SF | 1 | Licence: the source script states none; treated as MPL-2.0 per TradingView's open-source publishing (owner, 2026-11-28; see NOTICE). |
+| `avwap_z` | H/L/C/V | `anchor=None`, `min_samples=None` | `AVWAP_Z_W` SF<br>`AVWAP_DIST_PCT_W` SF | 1 | Licence: the source script states none; treated as MPL-2.0 by the owner's decision (2026-11-28), not by a stated TradingView default; see NOTICE. |
 | `b2_vol_above_mid_20` | H/L/C/V | `length=None` | `B2_VOL_ABOVE_MID_20` SF | 19 | Equilibrium/zeroline reading, crowd talk (Reddit, tier 4): split the current 20-bar window at its own midpoint, `(HHV(high,20) + LLV(low,20)) / 2`,… |
 | `bw_mfi` | H/L/C/V | `length=None`, `raw=False` | `MFI_BW_SF_20` SF | 19 | How much price movement does one unit of volume buy? Price impact, or liquidity efficiency. `eom` is the nearest shipped idea but is directional and… |
 | `cmf` | O/H/L/C/V | `length=None` | `CMF_20` SF | 19 | Chailin Money Flow measures the amount of money flow volume over a specific period in conjunction with Accumulation/Distribution. |
@@ -930,7 +929,6 @@ ratio, or z-score against `close` (or drop it and keep the indicator's `SF` colu
 | `cksp` | `CKSPl_10_3_20` `CKSPs_10_3_20` |
 | `decay` | `LDECAY_5` |
 | `dpo` | `DPO_20` |
-| `halftrend` | `HALFTREND` |
 | `pmax` | `PMAX_E_10_3.0` |
 | `psar` | `PSARl_0.02_0.2` `PSARs_0.02_0.2` |
 | `qstick` | `QS_10` |

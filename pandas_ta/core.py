@@ -2666,13 +2666,6 @@ class AnalysisIndicators(BasePandasObject):
                            threshold=threshold, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
-    def halftrend(self, atr_period=None, amplitude=None, offset=None, **kwargs):
-        high = self._get_column(kwargs.pop("high", "high"))
-        low = self._get_column(kwargs.pop("low", "low"))
-        close = self._get_column(kwargs.pop("close", "close"))
-        result = halftrend(high=high, low=low, close=close, atr_period=atr_period, amplitude=amplitude, offset=offset, **kwargs)
-        return self._post_process(result, **kwargs)
-
     def head_shoulders(self, left=None, right=None, tol=None, max_wait=None,
                        offset=None, **kwargs):
         high = self._get_column(kwargs.pop("high", "high"))
