@@ -36,8 +36,8 @@ No count anywhere needs a bump (#331): the README, the contract and the dictiona
    - *Paper or book*: a fixture computed by hand from the definition. The weakest of the four:
      say so in the receipt.
 5. **Gates B, C, D.** Run `python -m pytest -q tests/test_<name>.py`. The scaffolded tests are the
-   floor: a source-exec mutant that reads one bar ahead must be caught, x8 / x64 bit-identical,
-   x10 / x3.7 within tolerance, not constant. Add the Gate A test, then rewrite the test module's
+   floor for the Gate B and D rows of CLAUDE.md's gate table (a source-exec mutant reading one bar
+   ahead must be caught; the scale factors are the table's). Add the Gate A test, then rewrite the test module's
    docstring with what is pinned and the measured numbers. Gate C on real data is owner-only (the
    data lives in the private repo).
 6. **Regenerate the dictionary.** `python docs/gen_indicator_dictionary.py docs/IndicatorDictionary.md`.

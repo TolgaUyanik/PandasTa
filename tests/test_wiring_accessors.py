@@ -442,3 +442,13 @@ def test_a_category_strategy_does_not_edit_category():
     assert got == Category["trend"] and got is not Category["trend"]
     got.clear()
     assert {k: list(v) for k, v in Category.items()} == before
+
+    # The path that actually mutated it: a real category sweep.
+    n = 300
+    rng = np.random.default_rng(0)
+    c = 100 + np.cumsum(rng.normal(0, 1, n))
+    df = pd.DataFrame({"open": c, "high": c + 1, "low": c - 1, "close": c,
+                       "volume": rng.integers(1000, 2000, n).astype(float)},
+                      index=pd.date_range("2020-01-01", periods=n, freq="D"))
+    df.ta.strategy("trend", cores=0, verbose=False)
+    assert {k: list(v) for k, v in Category.items()} == before

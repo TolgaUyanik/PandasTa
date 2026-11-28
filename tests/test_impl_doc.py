@@ -49,7 +49,9 @@ def test_the_doc_retypes_no_count():
 
 def test_every_sibling_repo_path_in_claude_md_is_labelled_owner_only():
     """GEN-4: a public clone has no `../Backtesting` or `../AlternativeRepos`. Each paragraph of
-    CLAUDE.md that names one must say "owner-only", so a reader knows the path will not resolve."""
+    CLAUDE.md that names one must say "owner-only", so a reader knows the path will not resolve.
+    Checked per paragraph by design: one label covers every path in its paragraph, so a new path
+    added to an already-labelled paragraph passes (it is owner-only by the same sentence)."""
     text = (ROOT / "CLAUDE.md").read_text(encoding="utf8")
     sibling = re.compile(r"\.\./(?:Backtesting|AlternativeRepos)|[a-zA-Z]:/\w+/Backtesting")
     unlabelled = [p.strip()[:80] for p in re.split(r"\n\s*\n", text)

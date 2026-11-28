@@ -9,15 +9,17 @@ not retyped here); `<name>` is a new lower-case identifier.
 MANIFEST -- `git status` afterwards shows exactly these five paths (A = added, M = modified):
 
     A  pandas_ta/<category>/<name>.py     the indicator; its body returns None until you write it
-    M  pandas_ta/<category>/__init__.py   one `from .<name> import <name>` line, in sorted position
-    M  pandas_ta/__init__.py              one `"<name>",` line in `Category[<category>]`, sorted
-    M  pandas_ta/core.py                  one `df.ta.<name>()` accessor, in sorted position inside
-                                          the category's section
+    M  pandas_ta/<category>/__init__.py   one `from .<name> import <name>` line
+    M  pandas_ta/__init__.py              one `"<name>",` line in `Category[<category>]` (sorted)
+    M  pandas_ta/core.py                  one `df.ta.<name>()` accessor inside the category's section
     A  tests/test_<name>.py               Gate B (mutant), C (reachability) and D (scale) tests,
                                           already written; they FAIL until the indicator is real
 
-Every edit is one line or one block placed by sort order, so two ports in the same category touch
-different lines unless their names are alphabetical neighbours.
+Each edit is one line or one block, placed before the first entry that sorts after the new name
+(`Category` is fully sorted; most `__init__` files and core.py sections only roughly), so two ports
+in the same category touch different lines unless their names are neighbours. In
+`overlap/__init__.py` a new import always goes below the `ma` import (that file's ordering hazard).
+All five texts are built in memory first; nothing is written unless every edit succeeds.
 
 Refuses, writing nothing, when the category is unknown, the name is not a valid identifier, or the
 name already exists anywhere (module file, `ta.<name>`, `Category`, accessor, test module). It does
@@ -148,10 +150,15 @@ def test_scale_free():
         np.testing.assert_allclose(out.dropna(), base.dropna(), rtol=1e-9, atol=0)
 
 
-def test_reachable_and_not_constant():
+def test_produces_values_and_is_not_constant():
+    \"\"\"A floor, not Gate C: some bars produce a value, and not all the same value.\"\"\"
     out = {name}(_close()).dropna()
-    assert 0 < len(out) < N + 1 and out.nunique() > 1
+    assert len(out) > 0 and out.nunique() > 1
 '''
+
+
+class Refused(Exception):
+    """A refusal or a locate failure; raised before any file is written."""
 
 
 def fail(msg):
@@ -159,85 +166,115 @@ def fail(msg):
     sys.exit(2)
 
 
-def insert_sorted(lines, lo, hi, pattern, key, new):
-    """Insert `new` before the first line in [lo, hi) whose `pattern` group sorts after `key`."""
+def insert_before_first_later(lines, lo, hi, pattern, key, new):
+    """Insert `new` before the first line in [lo, hi) whose `pattern` group sorts after `key`,
+    else after the last matching line. Most category `__init__` files and core.py sections are
+    not fully sorted, so this is the rule, not "sorted position"."""
     hits = [(i, m.group(1)) for i in range(lo, hi) for m in [re.match(pattern, lines[i])] if m]
     if not hits:
-        fail(f"no line matching {pattern!r} in the expected block")
+        raise Refused(f"no line matching {pattern!r} in the expected block")
     later = [i for i, k in hits if k > key]
     pos = later[0] if later else hits[-1][0] + 1
     lines[pos:pos] = new if isinstance(new, list) else [new]
 
 
-def edit_init(path, name):
-    lines = path.read_text(encoding="utf8").split("\n")
-    insert_sorted(lines, 0, len(lines), r"from \.(\w+) import", name, f"from .{name} import {name}")
-    path.write_text("\n".join(lines), encoding="utf8")
+# overlap/__init__.py: modules that import atr()/ma() must be imported below `from .ma import ma`
+# (a circular self-import otherwise binds the submodule; see the comment block in that file).
+# A new module cannot know yet what it will import, so it always goes below this marker.
+INIT_FLOOR_MARKER = "# Must stay below the `ma` import."
 
 
-def edit_category(path, category, name):
-    lines = path.read_text(encoding="utf8").split("\n")
-    lo = lines.index(f'    "{category}": [')
-    hi = next(i for i in range(lo, len(lines)) if lines[i] == "    ],")
-    insert_sorted(lines, lo, hi, r'        "(\w+)",$', name, f'        "{name}",')
-    path.write_text("\n".join(lines), encoding="utf8")
+def edit_init(text, name):
+    lines = text.split("\n")
+    lo = next((i + 1 for i, x in enumerate(lines) if x.strip() == INIT_FLOOR_MARKER), 0)
+    insert_before_first_later(lines, lo, len(lines), r"from \.(\w+) import", name,
+                              f"from .{name} import {name}")
+    return "\n".join(lines)
 
 
-def edit_core(path, category, categories, name):
-    lines = path.read_text(encoding="utf8").split("\n")
+def edit_category(text, category, name):
+    lines = text.split("\n")
+    try:
+        lo = lines.index(f'    "{category}": [')
+        hi = next(i for i in range(lo, len(lines)) if lines[i] == "    ],")
+    except (ValueError, StopIteration):
+        raise Refused(f"Category[{category!r}] block not found in pandas_ta/__init__.py")
+    insert_before_first_later(lines, lo, hi, r'        "(\w+)",$', name, f'        "{name}",')
+    return "\n".join(lines)
+
+
+def edit_core(text, category, categories, name):
+    lines = text.split("\n")
     headers = {f"    # {c.capitalize()}" for c in categories} | {"    # Utility"}
-    lo = lines.index(f"    # {category.capitalize()}")
+    try:
+        lo = lines.index(f"    # {category.capitalize()}")
+    except ValueError:
+        raise Refused(f"no '# {category.capitalize()}' section in pandas_ta/core.py")
+    # The section ends at the next category header, or at the end of the class/file
+    # (`volume` is the last section and core.py ends inside the class).
     hi = next((i for i in range(lo + 1, len(lines)) if lines[i] in headers), None)
-    if hi is None:   # last section: up to the end of the class
-        hi = next(i for i in range(lo + 1, len(lines)) if lines[i] and not lines[i].startswith(" "))
+    if hi is None:
+        hi = next((i for i in range(lo + 1, len(lines))
+                   if lines[i] and not lines[i].startswith((" ", "#"))), len(lines))
     defs = [(i, m.group(1)) for i in range(lo, hi) for m in [re.match(r"    def (\w+)\(", lines[i])] if m]
     if not defs:
-        fail(f"no accessor in core.py's {category} section")
+        raise Refused(f"no accessor in core.py's {category} section")
+    block = ACCESSOR.format(name=name).split("\n")[:-1]   # ends with one blank line
     later = [i for i, k in defs if k > name]
     if later:
         pos = later[0]
-    else:  # after the last accessor block: the next blank-then-dedent boundary
+    else:  # after the section's last accessor: just past its last non-blank line
         pos = hi
-        while lines[pos - 1].strip() == "":
+        while pos > lo and lines[pos - 1].strip() == "":
             pos -= 1
-        pos += 1
-    lines[pos:pos] = ACCESSOR.format(name=name).split("\n")[:-1]
-    path.write_text("\n".join(lines), encoding="utf8")
+        block = [""] + block[:-1]
+    lines[pos:pos] = block
+    return "\n".join(lines)
+
+
+def plan(category, name, ta, accessor_cls, repo=REPO):
+    """Every path the scaffold writes -> its new full text. Nothing is written here, so a
+    refusal or a failed locate leaves the tree untouched."""
+    categories = list(ta.Category)
+    if category not in categories:
+        raise Refused(f"unknown category {category!r}; one of {categories}")
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", name) or keyword.iskeyword(name):
+        raise Refused(f"{name!r} is not a lower-case identifier")
+    rel = [p.format(category=category, name=name) for _, p in MANIFEST]
+    taken = [why for why, hit in (
+        (f"{rel[0]} exists", (repo / rel[0]).exists()),
+        (f"{rel[4]} exists", (repo / rel[4]).exists()),
+        (f"ta.{name} exists", hasattr(ta, name)),
+        (f"df.ta.{name} exists", hasattr(accessor_cls, name)),
+        (f"{name!r} is in Category", any(name in v for v in ta.Category.values())),
+    ) if hit]
+    if taken:
+        raise Refused(f"refusing: {'; '.join(taken)}")
+    read = lambda r: (repo / r).read_text(encoding="utf8")
+    return {
+        rel[0]: MODULE.format(name=name, upper=name.upper(), category=category),
+        rel[1]: edit_init(read(rel[1]), name),
+        rel[2]: edit_category(read(rel[2]), category, name),
+        rel[3]: edit_core(read(rel[3]), category, categories, name),
+        rel[4]: TEST.format(name=name, category=category),
+    }
 
 
 def main(argv):
     if len(argv) != 3:
         fail("usage: python docs/new_indicator.py <category> <name>")
-    category, name = argv[1], argv[2]
     sys.path.insert(0, str(REPO))
     import pandas_ta as ta
     from pandas_ta.core import AnalysisIndicators
 
-    categories = list(ta.Category)
-    if category not in categories:
-        fail(f"unknown category {category!r}; one of {categories}")
-    if not re.fullmatch(r"[a-z][a-z0-9_]*", name) or keyword.iskeyword(name):
-        fail(f"{name!r} is not a lower-case identifier")
-    paths = {kind: REPO / p.format(category=category, name=name) for kind, p in
-             (("module", MANIFEST[0][1]), ("test", MANIFEST[4][1]))}
-    taken = [why for why, hit in (
-        (f"{paths['module'].relative_to(REPO)} exists", paths["module"].exists()),
-        (f"{paths['test'].relative_to(REPO)} exists", paths["test"].exists()),
-        (f"ta.{name} exists", hasattr(ta, name)),
-        (f"df.ta.{name} exists", hasattr(AnalysisIndicators, name)),
-        (f"{name!r} is in Category", any(name in v for v in ta.Category.values())),
-    ) if hit]
-    if taken:
-        fail(f"refusing, nothing written: {'; '.join(taken)}")
-
-    upper = name.upper()
-    paths["module"].write_text(MODULE.format(name=name, upper=upper, category=category), encoding="utf8")
-    edit_init(REPO / "pandas_ta" / category / "__init__.py", name)
-    edit_category(REPO / "pandas_ta" / "__init__.py", category, name)
-    edit_core(REPO / "pandas_ta" / "core.py", category, categories, name)
-    paths["test"].write_text(TEST.format(name=name, category=category), encoding="utf8")
-    for kind, p in MANIFEST:
-        print(f"{kind}  {p.format(category=category, name=name)}")
+    try:
+        texts = plan(argv[1], argv[2], ta, AnalysisIndicators)
+    except Refused as e:
+        fail(f"{e}; nothing written")
+    for rel, text in texts.items():
+        (REPO / rel).write_text(text, encoding="utf8")
+    for (kind, _), rel in zip(MANIFEST, texts):
+        print(f"{kind}  {rel}")
     print("next: docs/ImplementingAnIndicator.md")
 
 

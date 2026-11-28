@@ -168,8 +168,8 @@ entry first. Summary of the gates a port must clear:
 | E Attribution | Spearman ρ of each new column against the engine's `compute_all` ∪ the `ml_features` manifest `1d` (329 + 358 = 687 comparators), over the 89 frozen ALTPORT-1 BIST frames (owner's rules, 2026-10-23). Report the measured max with its sample size. Bands (`r3-perframe-0.90`): STRUCK if pooled \|ρ\| ≥ 0.90 or a top-5 comparator's per-frame median ≥ 0.90 · DISCLOSE_GAP 0.80 ≤ ρ < 0.90 · DISCLOSE 0.76 ≤ ρ < 0.80 · SHIP < 0.76. |
 | F Suites | both repos green. |
 
-**Gate E harness (owner-only: it lives in the private repo):** `../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py` (Backtesting #107,
-merged 2026-10-23; reference `../Backtesting/Backtesting/docs/gate_e.md` on Backtesting `main`).
+**Gate E harness (owner-only: it lives in the private repo):**
+`../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py` (Backtesting #107, merged 2026-10-23; reference `../Backtesting/Backtesting/docs/gate_e.md` on Backtesting `main`).
 From `../Backtesting/Backtesting`: `python scripts/analysis/gate_e_overlap.py build` once, then
 `run --module pandas_ta.<category>.<name> --name <name>`; outputs land in
 `../Backtesting/backtest_results/gatee/<name>/`. `run` refuses a stale cache, but **pandas_ta's
