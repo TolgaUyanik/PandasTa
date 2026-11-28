@@ -8,9 +8,11 @@ of the book with a formula was readable (issue #261, 2026-11-08). The definition
 divided by the mean, and finta's constant 3.2, which multiplies both numerator and denominator,
 cancels and is left out. The math is ported, not the code. The ProRealCode port (which does not
 divide by the mean) is the reading not taken (§A4). Nothing here tests predictive value.
-**Status (2026-11-26): Gate A cleared against finta's own code (§A0). Gate E DISCLOSE_GAP,
+**Status (2026-11-26; Gate A evidence updated 2026-11-28): Gate A by the formula oracle written as
+explicit loops (§A1, `tests/test_wavepm.py`); agreement with finta's code was measured 2026-11-26
+before that test was removed (§A0). Gate E DISCLOSE_GAP,
 0.8088 vs `CHOP` (§E).** §A0 and §E were added at merge time and are NOT printed by
-`docs/measure_wavepm.py`: §A0 comes from `tests/test_wavepm.py::test_gate_a_matches_finta_wavepm`,
+`docs/measure_wavepm.py`: §A0 came from `tests/test_wavepm.py::test_gate_a_matches_finta_wavepm` (removed 2026-11-28, see §A0),
 §E from the Gate E harness run recorded in `docs/gate_e_ledger.csv`.
 **Measured:** 2026-11-23, on this tree, by `python docs/measure_wavepm.py`
 (pandas 2.3.3, numpy 1.26.4). Every figure below is printed by that script.
@@ -42,8 +44,9 @@ Source: peerchemist/finta@af01fa5 `finta/finta.py` L2262-L2303.
 - Warm-up: finta's rolling windows use the default `min_periods` = window, so it is NaN on the
   same first length + lookback − 2 bars; a zero rms gives 0/0 = NaN in both.
 
-`tests/test_wavepm.py::_finta_wavepm` transcribes those lines (constant and tanh included).
-Against it the module has identical NaN masks on all eight frames, max |diff| 3.33e-16 on the
+`tests/test_wavepm.py::_finta_wavepm` transcribed those lines (constant and tanh included) until
+2026-11-28, when it was removed: finta is LGPL-3.0 and this repository is MIT. Measured against it
+before removal: the module has identical NaN masks on all eight frames, max |diff| 3.33e-16 on the
 seven moving frames (2.22e-16 on `coarse`).
 
 ## A1 Gate A — the issue's finta form by explicit loops

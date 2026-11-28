@@ -464,7 +464,7 @@ unfired once it expires.
 
 Source: TradingView community indicator "4-Hour Swing Turn V2.0"
 ("4小时波段转折 V2.0") by AIsangbiao, https://www.tradingview.com/script/
-BDi4kEWL/ (ported into AwakenAnalytics/Backtesting TVPTA-6 candidate 13,
+BDi4kEWL/ (ported into the private Backtesting repo, task TVPTA-6 candidate 13,
 2026-08-14; MPL-2.0 per TradingView's open-source publication
 convention). Replaces the entire signal state machine (lines ~76-194 of
 the source): the 5-item confluence score (both the swing-low and the

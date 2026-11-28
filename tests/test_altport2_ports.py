@@ -317,6 +317,11 @@ def test_category_lists_are_sorted_unique_and_complete():
             # A concatenation ("ab" "cd" -> "abcd") is not a function: this catches it.
             assert callable(getattr(ta, n, None)), f"Category entry {n!r} is not ta.{n}"
 
+    # Removed on purpose, so absent from Category although frozen in the grandfathered list
+    # (that file is hash-pinned and is not edited): their TradingView sources are CC BY-NC-SA 4.0
+    # (pressure_pulse, tri_dir_pressure) or "All Rights Reserved" (iama), which an MIT package
+    # cannot carry (owner, 2026-11-28).
+    retired = {"iama", "pressure_pulse", "tri_dir_pressure"}
     registered = {n for names in ta.Category.values() for n in names}
     docs = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs")
     with open(os.path.join(docs, "gate_e_grandfathered.json"), encoding="utf8") as fh:
@@ -324,7 +329,8 @@ def test_category_lists_are_sorted_unique_and_complete():
     with open(os.path.join(docs, "gate_e_ledger.csv"), encoding="utf8", newline="") as fh:
         kept = {r["indicator"] for r in csv.DictReader(fh)
                 if r["verdict"] != "STRUCK" or r["waiver"].strip()}
-    missing = sorted((frozen | kept) - registered)
+    assert retired.isdisjoint(registered), f"retired names are back in Category: {retired & registered}"
+    missing = sorted((frozen | kept) - registered - retired)
     assert missing == [], f"grandfathered or ledgered but no longer in Category: {missing}"
 
 

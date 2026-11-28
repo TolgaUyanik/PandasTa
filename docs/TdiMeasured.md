@@ -89,7 +89,7 @@ manifest), canary bit-equal on AKBNK.IS / BIENY.IS / AGHOL.IS / SASA.IS. `TDI_20
 0.4915, 0.0% of the 89 frames at or above 0.90 -> **SHIP** under `r3-perframe-0.90`
 (well under the 0.76 ship line, matching the issue's own prototype measurement of
 0.4924 / 0.4915 almost exactly). Recorded with `python docs/gate_e_ledger.py record
-/home/tolga/.issue-solver/runs/20261123-150046-148/gatee/is148-tdi-a3774479 --measured
+{runs}/20261123-150046-148/gatee/is148-tdi-a3774479 --measured
 2026-11-23`, which accepted the run (a non-default run, a universe other than 89
 frames, or a non-bit-equal canary would have been refused). No column is STRUCK, so
 nothing is reverted; the port ships as-is.
@@ -113,7 +113,7 @@ SASA.IS. `TDI_20_2`: max \|rho\| 0.4924 vs `mad_pct_Pctl` (manifest, n = 391,017
 per-frame max median \|rho\| 0.4915, 0.0% of the 89 frames at or above 0.90 ->
 **SHIP** under `r3-perframe-0.90`, identical to Round 4's numbers (the pandas_ta source
 feeding the engine did not change). Recorded with `python docs/gate_e_ledger.py record
-/home/tolga/.issue-solver/runs/20261124-120630-148/gatee/is148-tdi-b1bb91c6 --measured
+{runs}/20261124-120630-148/gatee/is148-tdi-b1bb91c6 --measured
 2026-11-24`, which accepted the run and replaced the ledger's `pandas_ta_src_sha1` (the
 squash merge changed the tree hash even though `tdi.py` itself did not) and run id/date.
 No column is STRUCK, so nothing is reverted; the port ships as-is.

@@ -7,12 +7,12 @@
 
 What this file pins, in order of how much it would hurt to lose:
 
-0. **Gate A against finta's own code.** `_finta_wavepm` transcribes
-   peerchemist/finta@af01fa5 `finta/finta.py` L2279-L2303 (master only; no
-   finta release carries `WAVEPM`), 3.2 constant and hand-written tanh
-   included. Identical NaN masks on all eight frames, max |diff| 3.33e-16
-   on the seven moving frames (2.22e-16 on `coarse`; `flat` fires nowhere
-   in either); the test asserts 1e-12.
+0. **Gate A against finta's own code -- removed 2026-11-28.** This file used to
+   transcribe peerchemist/finta@af01fa5 `finta/finta.py` L2279-L2303 as an
+   oracle. finta is LGPL-3.0 and this repository is MIT, so the transcription
+   was removed. The agreement it measured (identical NaN masks, max |diff|
+   3.33e-16 on seven moving frames) stays on record in docs/WavepmMeasured.md;
+   item 1, written from the formula, is now the Gate A test.
 1. **Gate A limb, the issue's finta form by explicit loops.** `_oracle` sums
    every window bar by bar -- no rolling, no code shared with the module --
    and matches it with identical NaN masks on all eight synthetic frames
@@ -294,33 +294,6 @@ def test_offset_and_fillna_do_what_the_kwargs_say():
 
 
 # ------------------------------------------------------------------ Gate A
-
-
-def _finta_wavepm(close, period=LENGTH, lookback_period=LOOKBACK):
-    """peerchemist/finta@af01fa5 finta/finta.py L2279-L2303, transcribed."""
-    ma = close.rolling(window=period).mean()
-    std = close.rolling(window=period).std(ddof=0)
-
-    def tanh(x):
-        two = np.where(x > 0, -2, 2)
-        ex = np.exp(two * x)
-        return np.where(x > 0, 1 - ex, ex - 1) / (1 + ex)
-
-    dev = 3.2 * std
-    power = np.power(dev / ma, 2)
-    variance = Series(power).rolling(window=lookback_period).sum() / lookback_period
-    with np.errstate(invalid="ignore"):
-        return Series(tanh(dev / (np.sqrt(variance) * ma)), index=close.index)
-
-
-@pytest.mark.parametrize("name", NAMES)
-def test_gate_a_matches_finta_wavepm(name):
-    """Identical NaN masks, values within 1e-12 (measured max 3.3e-16)."""
-    c = _c(FRAMES[name]())
-    col, ref = wavepm(c), _finta_wavepm(c)
-    assert bool((col.isna() == ref.isna()).all())
-    if col.notna().any():
-        assert _maxdiff(col, ref) <= 1e-12
 
 
 @pytest.mark.parametrize("name", NAMES)

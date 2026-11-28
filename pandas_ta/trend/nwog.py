@@ -77,7 +77,7 @@ next, not the range traded during either week.
 Source: TradingView community indicator "Key Opens & Session Tracker +
 Highs/Lows & NWOG" by LuxAlgo (see `datastore/source/pine_triage.csv` for
 the exact attribution row), the "New Week Opening Gap (NWOG)" section
-(ported into AwakenAnalytics/Backtesting TVPTA-3, 2026-08-04; MPL-2.0 per
+(ported into the private Backtesting repo, task TVPTA-3, 2026-08-04; MPL-2.0 per
 TradingView's open-source publication convention). Only the NWOG
 computation is ported -- the source script's Key Open (midnight/10AM) ray
 tracking and its Asian/London intraday session high/low tracker are

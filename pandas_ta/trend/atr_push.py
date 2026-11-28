@@ -194,6 +194,9 @@ at least `min_push_atr` x ATR up from the lowest low of the trailing
 `push_window` bars (that window includes the current bar). Bearish is the
 mirror.
 
+Licence: the source script states none; treated as MPL-2.0 by the owner's decision (2026-11-28),
+not by a stated TradingView default; see NOTICE.
+
 Ported from the TradingView Pine v6 source "Buy and Sell Zones"
 (`LStt7FmQ-Buy-and-Sell-Zones.pine`, `wc -l` = 1513; the file has no
 trailing newline, so 1514 content lines). The push detector itself is

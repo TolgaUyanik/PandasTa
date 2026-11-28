@@ -8,7 +8,7 @@ gate (round 1 of 3, HEAD 0156f881e48a) ..."`. The gate's contract is quoted verb
 ## Tasks
 | # | Task id | Source | One-line scope |
 |---|---------|--------|----------------|
-| 1 | BT-DMA-DIST-revert | issue-solver gate-1 contract (`C:/Users/Tolga/.issue-solver/runs/20261025-210235-147/gate-1/`), REVISE, 2 MAJOR / 1 MINOR / 1 NIT | Gate E came back STRUCK: revert `dickson_ma` and every wiring touch point to base `b0422ad`, and write the measured Gate E numbers into `docs/DicksonMaMeasured.md`, which is kept as the receipt |
+| 1 | BT-DMA-DIST-revert | issue-solver gate-1 contract (`{runs}/20261025-210235-147/gate-1/`), REVISE, 2 MAJOR / 1 MINOR / 1 NIT | Gate E came back STRUCK: revert `dickson_ma` and every wiring touch point to base `b0422ad`, and write the measured Gate E numbers into `docs/DicksonMaMeasured.md`, which is kept as the receipt |
 
 ## Clarifications (asked ONCE, before execution)
 - none asked: AskUserQuestion is unavailable in a headless issue-solver session. Ambiguities

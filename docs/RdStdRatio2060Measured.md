@@ -178,7 +178,7 @@ session): max |ρ| 0.6675 vs `squeeze_pro:SQZPRO_OFF`, per-frame max median 0.67
 restatement at the 0.90 line.
 
 Ledger row recorded: `python docs/gate_e_ledger.py record
-/home/tolga/.issue-solver/runs/20261126-213551-179/gatee/is179-rd_std_ratio_20_60-f81ac76a
+{runs}/20261126-213551-179/gatee/is179-rd_std_ratio_20_60-f81ac76a
 --measured 2026-11-26` → `docs/gate_e_ledger.csv`.
 
 Module sha1 (LF-normalised, measured `python docs/measure_rd_std_ratio_20_60.py`):

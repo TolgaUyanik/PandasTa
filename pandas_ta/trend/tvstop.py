@@ -2,7 +2,7 @@
 """Terminal Velocity Stop (TVS) -- port of TradingView `7YXrxMjV`.
 
 Source: `docs/TradingView/pine/7YXrxMjV-Terminal-Velocity-Stop-Lyro-RS.pine`
-in the AwakenAnalytics `Backtesting` repo.  `wc -l` = 116 and
+in the private `Backtesting` repo.  `wc -l` = 116 and
 `grep -c ''` = 116 (the file is newline-terminated, so 116 CONTENT
 lines, no off-by-one); both counts measured 2026-08-27.  `//@version=6`,
 MPL-2.0, (c) LyroRS.
@@ -129,7 +129,7 @@ WHAT WAS BUILT, MEASURED AND THEN DELETED
 duplicates an ENGINE column, and not marginally:
 
     Spearman(TVS_DIST, RSI) = +0.930462 over 404,066 pooled bars
-    (89 BIST_100 daily frames, AwakenAnalytics `Backtesting`).
+    (89 BIST_100 daily frames, the private `Backtesting` repo).
 
 That is not a pooling artifact.  Measured on each frame SEPARATELY the
 same cell reads mean +0.9321 / median +0.9329 / min +0.8126 / max

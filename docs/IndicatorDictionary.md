@@ -135,7 +135,6 @@ No counts are printed here (#331: a retyped or generated total is a line every p
 | `pgo` | H/L/C | `length=None` | `PGO_14` SF | 14 | The Pretty Good Oscillator indicator was created by Mark Johnson to measure the distance of the current close from its N-day Simple Moving Average,… |
 | `po` | C | `length=None` | `PO_14` PX | 13 | The Projection Oscillator measures the percentage deviation of price from its linear regression trend line. It helps identify overbought and oversold… |
 | `ppo` | C | `fast=None`, `slow=None`, `signal=None`, `scalar=None` | `PPO_12_26_9` SF<br>`PPOh_12_26_9` SF<br>`PPOs_12_26_9` SF | 25 | The Percentage Price Oscillator is similar to MACD in measuring momentum. |
-| `pressure_pulse` | O/H/L/C | `balance_length=None`, `min_gain=None`, `max_gain=None`, `drift_gain=None`, `drift_damping=None`, `atr_length=None`, `pulse_norm_length=None`, `pulse_smooth_length=None`, `memory_min=None`, `memory_max=None`, `min_tick=None`, `rel_floor=None` | `PRESSURE_PULSE_20_14_50_5` SF | 0 | Source: TradingView community indicator "MSL Trend Pulse" by MarketStructureLab, https://www.tradingview.com/script/5BLfGp6I-Trend-Pulse/ (ported… |
 | `psl` | O/C | `length=None`, `scalar=None`, `drift=None` | `PSL_12` SF | 11 | The Psychological Line is an oscillator-type indicator that compares the number of the rising periods to the total number of periods. In other words,… |
 | `pvo` | V | `fast=None`, `slow=None`, `signal=None`, `scalar=None` | `PVO_12_26_9` SF<br>`PVOh_12_26_9` SF<br>`PVOs_12_26_9` SF | 25 | Percentage Volume Oscillator is a Momentum Oscillator for Volume. |
 | `pzo` | C | `length=None` | `PZO_14` SF | 13 | An EMA of close signed by the bar's own direction, divided by an EMA of close. Bounded roughly to [-100, 100]: when every bar in the window is an up… |
@@ -174,7 +173,7 @@ No counts are printed here (#331: a retyped or generated total is a line every p
 | indicator | inputs | params (defaults) | outputs — ML form | warm-up | what it measures |
 |---|---|---|---|---|---|
 | `alma` | C | `length=None`, `sigma=None`, `distribution_offset=None` | `ALMA_10_6.0_0.85` PX | 9 | The ALMA moving average uses the curve of the Normal (Gauss) distribution, which can be shifted from 0 to 1. This allows regulating the smoothness… |
-| `bpress` | C | `length=None` | `BPRESS_500` SF | 499 | Ports ONLY the `bubblePressure` sub-component of the TradingView community indicator "Bitcoin Critical State Indicator (BCSI)" by BorisTheBlade687… |
+| `bpress` | C | `length=None` | `BPRESS_500` SF | 499 | Licence of the source script: MPL-2.0 (its header), (c) BorisTheBlade687; this file is MPL-2.0 (see NOTICE). |
 | `dema` | C | `length=None` | `DEMA_10` PX | 9 | The Double Exponential Moving Average attempts to a smoother average with less lag than the normal Exponential Moving Average (EMA). |
 | `dema2` | C | `length=None` | `DEMA2_10` PX | 0 | TradingView `ta.dema2()` -- DEMA built on the source-seeded, per-bar-length `ema2` instead of the SMA-seeded `ema`. Finite from bar 0 where `dema`… |
 | `ema` | C | `length=None` | `EMA_10` PX | 9 | The Exponential Moving Average is more responsive moving average compared to the Simple Moving Average (SMA). The weights are determined by alpha… |
@@ -186,7 +185,6 @@ No counts are printed here (#331: a retyped or generated total is a line every p
 | `hl2` | H/L | — | `HL2` PX | 0 | Indicator: HL2 |
 | `hlc3` | H/L/C | — | `HLC3` PX | 0 | Indicator: HLC3 |
 | `hma` | C | `length=None` | `HMA_10` PX | 11 | The Hull Exponential Moving Average attempts to reduce or remove lag in moving averages. |
-| `iama` | H/L/C | `length=None`, `k=None`, `atr_length=None`, `norm_length=None`, `min_tick=None`, `rel_floor=None` | `IAMA_DIST_9_1.0_14_50` SF | 0 | Source: TradingView community indicator "Institutional Moving Averages" by Michael_Fx_Trader,… |
 | `ichimoku` | H/L/C | `tenkan=None`, `kijun=None`, `senkou=None` | `ISA_9` PX<br>`ISB_26` PX<br>`ITS_9` PX<br>`IKS_26` PX<br>`ICS_26` PX **LEAK** | 77 | Developed Pre WWII as a forecasting model for financial markets. |
 | `ichimoku_ml` | H/L/C | `tenkan=9`, `kijun=26`, `senkou=52` | `ICHI_PRICE_VS_CLOUD` SF<br>`ICHI_PRICE_VS_KIJUN` SF<br>`ICHI_TK_DIST` SF<br>`ICHI_TK_CROSS_AGE` SF<br>`ICHI_CLOUD_COLOR` BIN<br>`ICHI_CLOUD_THICK` SF<br>`ICHI_FUTURE_CLOUD_COLOR` BIN<br>`ICHI_CHIKOU_VS_CLOUD` SF | 77 | 8 normalized, CAUSAL relational features derived from the Ichimoku lines — the ML-proper form of Ichimoku (the raw lines are absolute price levels a… |
 | `jma` | C | `length=None`, `phase=None` | `JMA_7_0` PX | 6 | Mark Jurik's Moving Average (JMA) attempts to eliminate noise to see the "true" underlying activity. It has extremely low lag, is very smooth and is… |
@@ -465,7 +463,7 @@ No counts are printed here (#331: a retyped or generated total is a line every p
 | `adosc` | O/H/L/C/V | `fast=None`, `slow=None` | `ADOSC_3_10` SF | 9 | Accumulation/Distribution Oscillator indicator utilizes Accumulation/Distribution and treats it similarily to MACD or APO. |
 | `amihud` | C/V | `length=None` | `AMIHUD_21` SF | 21 | Amihud (2002)'s illiquidity measure: the average absolute return per unit of dollar volume over a trailing window -- a large price move on thin… |
 | `aobv` | C/V | `fast=None`, `slow=None`, `mamode=None`, `max_lookback=None`, `min_lookback=None` | `OBV` SF<br>`OBV_min_2` SF<br>`OBV_max_2` SF<br>`OBVe_4` SF<br>`OBVe_12` SF<br>`AOBV_LR_2` BIN<br>`AOBV_SR_2` BIN | 11 | Indicator: Archer On Balance Volume (AOBV) |
-| `avwap_z` | H/L/C/V | `anchor=None`, `min_samples=None` | `AVWAP_Z_W` SF<br>`AVWAP_DIST_PCT_W` SF | 1 | Ports ONLY Module 1 ("MODULO 1: VWAP Anclado (automatico)") of the TradingView community indicator "MAEM - Volume Suite" by MAEmisary,… |
+| `avwap_z` | H/L/C/V | `anchor=None`, `min_samples=None` | `AVWAP_Z_W` SF<br>`AVWAP_DIST_PCT_W` SF | 1 | Licence: the source script states none; treated as MPL-2.0 per TradingView's open-source publishing (owner, 2026-11-28; see NOTICE). |
 | `b2_vol_above_mid_20` | H/L/C/V | `length=None` | `B2_VOL_ABOVE_MID_20` SF | 19 | Equilibrium/zeroline reading, crowd talk (Reddit, tier 4): split the current 20-bar window at its own midpoint, `(HHV(high,20) + LLV(low,20)) / 2`,… |
 | `bw_mfi` | H/L/C/V | `length=None`, `raw=False` | `MFI_BW_SF_20` SF | 19 | How much price movement does one unit of volume buy? Price impact, or liquidity efficiency. `eom` is the nearest shipped idea but is directional and… |
 | `cmf` | O/H/L/C/V | `length=None` | `CMF_20` SF | 19 | Chailin Money Flow measures the amount of money flow volume over a specific period in conjunction with Accumulation/Distribution. |
@@ -499,7 +497,6 @@ No counts are printed here (#331: a retyped or generated total is a line every p
 | `rd_obv_dev5` | C/V | `length=None`, `vol_length=None` | `RD_OBV_DEV5_5_20` SF | 19 | On Balance Volume minus its own 5-bar SMA, divided by a 20-bar average volume -- a scale-free read of how far OBV's current level sits from its own… |
 | `rd_vwio_10` | O/C/V | `length=None` | `RD_VWIO_10` SF | 9 | The EMA of volume signed by the direction of the SAME bar's own body (`close` vs. `open`), divided by the EMA of volume itself -- a smoothed read of… |
 | `tod_profile` | C/V | `length=None`, `bb_length=None`, `bb_std=None`, `min_samples=None`, `scope=None`, `tz=None` | `TOD_SLOT_RVOL_20_20` ??<br>`TOD_SLOT_VVOL_20_20` ?? | — | Ports the PROFILE ACCUMULATOR (Pine L101-175) of the TradingView community indicator "Volume & Volatility Time-of-Day - Seasonality Forecast" (source… |
-| `tri_dir_pressure` | O/H/L/C/V | `use_volume=None` | `TRI_DIR_PRESSURE` SF | 0 | Source: TradingView community indicator "Directional Volume Shapes (Zeiierman)" by Zeiierman,… |
 | `vfi` | C/V | `length=None`, `coef=None`, `vcoef=None`, `mamode=None` | `VFI_130` CONST | 259 | The Volume Flow Indicator (VFI) is a volume-based indicator that helps identify the strength of bulls vs bears in the market. It combines price… |
 | `vol_delta` | O/H/L/C/V | — | `VOL_DELTA_APPROX` SF | 0 | Approximates buy/sell volume pressure using OHLCV data without tick data. Positive values indicate net buying pressure; negative values indicate net… |
 | `vol_sign_rev` | C/V | — | `VSR` SF | 1 | Alpha#12 of Kakushadze's "101 Formulaic Alphas" (2016, Wilmott; read from the vnpy `alpha101` copy's restatement, cited by the issue and… |
@@ -583,7 +580,6 @@ Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation nee
 - `pfe`
 - `pgo`
 - `ppo`
-- `pressure_pulse`
 - `psl`
 - `pvo`
 - `pzo`
@@ -613,7 +609,6 @@ Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation nee
 - `bpress`
 - `ema_align`
 - `frama`
-- `iama`
 - `ichimoku_ml`
 - `kalman_trend`
 - `ma_disparity`
@@ -822,7 +817,6 @@ Indicators whose every column is `SF`, `BIN`, or `ORD` — no transformation nee
 - `rd_corr_c_obv_20`
 - `rd_obv_dev5`
 - `rd_vwio_10`
-- `tri_dir_pressure`
 - `vol_delta`
 - `vol_sign_rev`
 - `volcv`

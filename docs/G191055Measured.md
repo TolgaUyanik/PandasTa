@@ -41,7 +41,7 @@ Run `is80-g191_055-da874979`:
 `gate_e_overlap.py run --module pandas_ta.momentum.g191_055`, function
 `g191_055` at its defaults (`kwargs {}`), on the code at `acde1fe`. Every
 number in this section is read from the launcher's copy of the outputs,
-`/home/tolga/.issue-solver/runs/20261111-054610-80/gatee/is80-g191_055-da874979/`
+`{runs}/20261111-054610-80/gatee/is80-g191_055-da874979/`
 (`overlap_max.csv`, `top25.csv`, `perframe.csv`, `degenerate.csv`,
 `meta.json`). That folder exists only on the owner's machine, so the rows
 that decide the verdict are copied here.

@@ -108,7 +108,7 @@ BACKTEST_RESULTS = PARENT / "backtest_results"
 IE = CODE / "backtesting_engine" / "indicator_engine.py"
 SI = CODE / "backtesting_engine" / "speedy_indicators.py"
 ANALYSIS = CODE / "scripts" / "analysis"
-# Exists nowhere under D:\AwakenAnalytics (2026-10-23); SWEPT_SET() tolerates it absent.
+# Exists nowhere under <workspace> (2026-10-23); SWEPT_SET() tolerates it absent.
 INDREF2 = CODE / "docs" / "indicators" / "_indref2_facts.json"
 GATE_E = "../Backtesting/Backtesting/scripts/analysis/gate_e_overlap.py"
 

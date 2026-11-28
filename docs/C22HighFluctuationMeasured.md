@@ -185,7 +185,7 @@ Pooled max \|ρ\| 0.5696 and per-frame max median 0.5603 both sit under the
 near-restatement. Band from `CLAUDE.md`'s Gate E row: STRUCK ≥0.90 pooled or
 per-frame median, DISCLOSE_GAP [0.80, 0.90), DISCLOSE [0.76, 0.80), SHIP
 <0.76. The live ledger row is the `ec7ec0ce` run, recorded by
-`python docs/gate_e_ledger.py record /home/tolga/.issue-solver/runs/20261123-074546-144/gatee/is144-c22_high_fluctuation-ec7ec0ce --measured 2026-11-23`.
+`python docs/gate_e_ledger.py record {runs}/20261123-074546-144/gatee/is144-c22_high_fluctuation-ec7ec0ce --measured 2026-11-23`.
 
 ### Round 2 (review fix) -- why the `b6ea410b` row was retired
 

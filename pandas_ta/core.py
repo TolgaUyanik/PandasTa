@@ -1380,25 +1380,6 @@ class AnalysisIndicators(BasePandasObject):
         result = ppo(close=close, fast=fast, slow=slow, scalar=scalar, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
-    def pressure_pulse(self, balance_length=None, min_gain=None, max_gain=None,
-                        drift_gain=None, drift_damping=None, atr_length=None,
-                        pulse_norm_length=None, pulse_smooth_length=None,
-                        memory_min=None, memory_max=None, min_tick=None,
-                        rel_floor=None, offset=None, **kwargs):
-        open_ = self._get_column(kwargs.pop("open", "open"))
-        high = self._get_column(kwargs.pop("high", "high"))
-        low = self._get_column(kwargs.pop("low", "low"))
-        close = self._get_column(kwargs.pop("close", "close"))
-        result = pressure_pulse(
-            open_=open_, high=high, low=low, close=close,
-            balance_length=balance_length, min_gain=min_gain, max_gain=max_gain,
-            drift_gain=drift_gain, drift_damping=drift_damping, atr_length=atr_length,
-            pulse_norm_length=pulse_norm_length, pulse_smooth_length=pulse_smooth_length,
-            memory_min=memory_min, memory_max=memory_max, min_tick=min_tick,
-            rel_floor=rel_floor, offset=offset, **kwargs,
-        )
-        return self._post_process(result, **kwargs)
-
     def psl(self, open_=None, length=None, scalar=None, drift=None, offset=None, **kwargs):
         if open_ is not None:
             open_ = self._get_column(kwargs.pop("open", "open"))
@@ -1707,16 +1688,6 @@ class AnalysisIndicators(BasePandasObject):
     def kama(self, length=None, fast=None, slow=None, offset=None, **kwargs):
         close = self._get_column(kwargs.pop("close", "close"))
         result = kama(close=close, length=length, fast=fast, slow=slow, offset=offset, **kwargs)
-        return self._post_process(result, **kwargs)
-
-    def iama(self, length=None, k=None, atr_length=None, norm_length=None,
-             min_tick=None, rel_floor=None, offset=None, **kwargs):
-        high = self._get_column(kwargs.pop("high", "high"))
-        low = self._get_column(kwargs.pop("low", "low"))
-        close = self._get_column(kwargs.pop("close", "close"))
-        result = iama(high=high, low=low, close=close, length=length, k=k,
-                       atr_length=atr_length, norm_length=norm_length,
-                       min_tick=min_tick, rel_floor=rel_floor, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def ichimoku(self, tenkan=None, kijun=None, senkou=None, offset=None, **kwargs):
@@ -3753,15 +3724,6 @@ class AnalysisIndicators(BasePandasObject):
                              bb_length=bb_length, bb_std=bb_std,
                              min_samples=min_samples, scope=scope, tz=tz,
                              offset=offset, **kwargs)
-        return self._post_process(result, **kwargs)
-
-    def tri_dir_pressure(self, use_volume=None, offset=None, **kwargs):
-        open_ = self._get_column(kwargs.pop("open", "open"))
-        high = self._get_column(kwargs.pop("high", "high"))
-        low = self._get_column(kwargs.pop("low", "low"))
-        close = self._get_column(kwargs.pop("close", "close"))
-        volume = self._get_column(kwargs.pop("volume", "volume"))
-        result = tri_dir_pressure(open_=open_, high=high, low=low, close=close, volume=volume, use_volume=use_volume, offset=offset, **kwargs)
         return self._post_process(result, **kwargs)
 
     def vfi(self, length=None, coef=None, vcoef=None, mamode=None, offset=None, **kwargs):

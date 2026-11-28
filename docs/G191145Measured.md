@@ -254,7 +254,7 @@ measured numbers above match that prior to every digit the issue quoted, which i
 bit-for-bit agreement with the prototype expression predicted.
 
 The ledger row is recorded with
-`python docs/gate_e_ledger.py record /home/tolga/.issue-solver/runs/20261111-020111-78/gatee/is78-g191_145-88681c5e --measured 2026-11-11`
+`python docs/gate_e_ledger.py record {runs}/20261111-020111-78/gatee/is78-g191_145-88681c5e --measured 2026-11-11`
 (`docs/gate_e_ledger.csv`), which printed
 `g191_145:G191_145_9_26_12 DISCLOSE_GAP 0.8359 vs pvo_PVO_12_26_9 -> docs/gate_e_ledger.csv`.
 `record` compares the run's `pandas_ta_src_sha1` against this tree and refuses a non-default

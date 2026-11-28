@@ -1,6 +1,6 @@
 # Brutally honest review — the PandasTa fork, whole repo — 2026-09-07
 
-Mode A (standalone, advisory). Target: `d:\AwakenAnalytics\PandasTa\`, closing review of a session
+Mode A (standalone, advisory). Target: `<workspace>\PandasTa\`, closing review of a session
 that rewrote the docs, fixed six defect classes, added 18 Pine primitives and a 107-row coverage
 audit, and put the PINEBI work through eight review rounds.
 

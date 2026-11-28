@@ -252,7 +252,7 @@ Run `is134-c22_mode_5-be94141e`, 89 ALTPORT-1 frames, 398,849 pooled bars,
 
 0.1271 < 0.76 (`r3-perframe-0.90` ship line). Recorded in
 `docs/gate_e_ledger.csv` (`python docs/gate_e_ledger.py record
-/home/tolga/.issue-solver/runs/20261121-234543-134/gatee/is134-c22_mode_5-be94141e
+{runs}/20261121-234543-134/gatee/is134-c22_mode_5-be94141e
 --measured 2026-11-22`).
 
 ## F. Gate F — suites

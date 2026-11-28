@@ -40,7 +40,6 @@ from .rd_corr_c_obv_20 import rd_corr_c_obv_20
 from .rd_obv_dev5 import rd_obv_dev5
 from .rd_vwio_10 import rd_vwio_10
 from .tod_profile import tod_profile
-from .tri_dir_pressure import tri_dir_pressure
 from .vfi import vfi
 from .vol_delta import vol_delta
 from .vol_sign_rev import vol_sign_rev

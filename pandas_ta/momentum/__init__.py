@@ -57,7 +57,6 @@ from .pfe import pfe
 from .pgo import pgo
 from .po import po
 from .ppo import ppo
-from .pressure_pulse import pressure_pulse
 from .psl import psl
 from .pvo import pvo
 from .qqe import qqe
