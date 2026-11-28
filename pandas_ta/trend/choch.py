@@ -2,6 +2,7 @@
 import numpy as np
 from pandas import DataFrame
 from pandas_ta.utils import get_offset, verify_series
+from pandas_ta.trend.bos import _confirmed_swings
 
 
 def choch(high, low, close, swing_length=None, offset=None, **kwargs):
@@ -15,9 +16,12 @@ def choch(high, low, close, swing_length=None, offset=None, **kwargs):
 
     if high is None or low is None or close is None: return
 
-    # Compute swing highs/lows and BOS internally
-    swing_high = (high == high.rolling(swing_length, center=True).max()).astype(int)
-    swing_low = (low == low.rolling(swing_length, center=True).min()).astype(int)
+    # Swings are written on the bar that confirms them (bar j + k), as in
+    # `bos`, so no column reads a bar after the one it is written on.
+    sh_conf, sl_conf = _confirmed_swings(high, low, swing_length)
+    sh = sh_conf.to_numpy(dtype=float)
+    sl = sl_conf.to_numpy(dtype=float)
+    cl = close.to_numpy(dtype=float)
 
     n = len(close)
     bos_bull = np.zeros(n)
@@ -25,15 +29,15 @@ def choch(high, low, close, swing_length=None, offset=None, **kwargs):
     last_swing_high = np.nan
     last_swing_low = np.nan
 
-    for i in range(n):
-        if swing_high.iloc[i] == 1:
-            last_swing_high = high.iloc[i]
-        if swing_low.iloc[i] == 1:
-            last_swing_low = low.iloc[i]
-        if not np.isnan(last_swing_high) and close.iloc[i] > last_swing_high:
-            bos_bull[i] = 1
-        if not np.isnan(last_swing_low) and close.iloc[i] < last_swing_low:
-            bos_bear[i] = 1
+    for t in range(n):
+        if not np.isnan(sh[t]):
+            last_swing_high = sh[t]
+        if not np.isnan(sl[t]):
+            last_swing_low = sl[t]
+        if not np.isnan(last_swing_high) and cl[t] > last_swing_high:
+            bos_bull[t] = 1
+        if not np.isnan(last_swing_low) and cl[t] < last_swing_low:
+            bos_bear[t] = 1
 
     # CHoCH: BOS that reverses the prevailing swing trend
     choch_bull = np.zeros(n)
@@ -44,25 +48,25 @@ def choch(high, low, close, swing_length=None, offset=None, **kwargs):
     last_sl = np.nan
     prev_sl = np.nan
 
-    for i in range(n):
-        if swing_high.iloc[i] == 1:
+    for t in range(n):
+        if not np.isnan(sh[t]):
             prev_sh = last_sh
-            last_sh = high.iloc[i]
+            last_sh = sh[t]
             if not np.isnan(prev_sh) and last_sh < prev_sh:
                 trend = -1  # lower high -> downtrend
 
-        if swing_low.iloc[i] == 1:
+        if not np.isnan(sl[t]):
             prev_sl = last_sl
-            last_sl = low.iloc[i]
+            last_sl = sl[t]
             if not np.isnan(prev_sl) and last_sl > prev_sl:
                 trend = 1   # higher low -> uptrend
 
-        if bos_bull[i] == 1 and trend == -1:
-            choch_bull[i] = 1
+        if bos_bull[t] == 1 and trend == -1:
+            choch_bull[t] = 1
             trend = 0   # character changed
 
-        if bos_bear[i] == 1 and trend == 1:
-            choch_bear[i] = 1
+        if bos_bear[t] == 1 and trend == 1:
+            choch_bear[t] = 1
             trend = 0
 
     df = DataFrame({
@@ -90,22 +94,32 @@ choch.__doc__ = \
 A CHoCH occurs when a Break of Structure happens in the direction
 opposite to the prevailing swing trend, signalling a potential reversal.
 
+Causal since issue #332: swings come from `bos`'s `_confirmed_swings` and
+are written on the bar that confirms them, `(swing_length - 1) // 2` bars
+after the pivot. Before #332 `choch` used the same centred
+`rolling(swing_length, center=True)` swings as `bos` and read the same
+number of bars ahead.
+
 Sources:
-    AwakenAnalytics custom indicator (indicator_engine.py)
-    ICT / Smart Money Concept
+    ICT / Smart Money Concept (change of character).
+    Swing confirmation: this repo's `pandas_ta/trend/swing_equilibrium.py`
+    `_confirm_pivots` (MIT), via `pandas_ta.trend.bos._confirmed_swings`.
 
 Calculation:
     Default Inputs:
         swing_length=5
-    Determine prevailing trend from sequence of swing highs/lows.
-    CHoCH_BULL = 1 when BOS_BULL fires during a downtrend (lower highs)
-    CHoCH_BEAR = 1 when BOS_BEAR fires during an uptrend  (higher lows)
+    Swings: as in `bos` (confirmed on bar j + k, rightmost tie wins).
+    The prevailing trend is set on each confirmation bar: a lower swing
+    high sets a downtrend, a higher swing low sets an uptrend.
+    CHoCH_BULL = 1 when BOS_BULL fires during a downtrend
+    CHoCH_BEAR = 1 when BOS_BEAR fires during an uptrend
+    (either resets the trend to neutral)
 
 Args:
     high (pd.Series): Series of 'high's
     low (pd.Series): Series of 'low's
     close (pd.Series): Series of 'close's
-    swing_length (int): Centered rolling window for swing detection. Default: 5
+    swing_length (int): Swing window length, as in `bos`. Default: 5
     offset (int): Periods to offset. Default: 0
 
 Returns:

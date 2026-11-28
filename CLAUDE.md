@@ -124,11 +124,15 @@ live package and lists every column's observed form.
   range(0, m)`, so at `i = 0` it read `ssf.iloc[-1]` — Python negative indexing, the LAST bar of
   the series — and the recursion propagated that forward. Perturbing only bars ≥ 300 of a 400-bar
   frame moved **bar 0** by 31.4. Fixed and pinned by `tests/test_ssf_causality.py`.
-  🔴 **`bos` is a fourth, and it is still OPEN** — all four columns. It flags swings with
-  `rolling(swing_length, center=True)`, so it reads exactly `(swing_length - 1) // 2` bars ahead
-  (measured: 1 / 2 / 3 / 4 at `swing_length` 4 / 5 / 7 / 9). A bug, not a design choice; fixing it
-  changes column values, so **owner's call**. `swing_equilibrium` is the causal model for a fix.
-  Pinned by `tests/test_bos_lookahead.py`, which fails if the reach changes in either direction.
+  **`bos` was a fourth, and `choch` a fifth — both fixed in #332 (2026-11-27/28).** Both flagged swings
+  with `rolling(swing_length, center=True)` and wrote the flag on the pivot bar, so every column
+  read exactly `(swing_length - 1) // 2` bars ahead (measured for `bos`: 1 / 2 / 3 / 4 at
+  `swing_length` 4 / 5 / 7 / 9; `choch` used the same two lines and its mutant measures the same
+  reach). A bug, not a design choice. Both now share `pandas_ta.trend.bos._confirmed_swings`
+  (the same window, each swing written on the bar that confirms it, rightmost tie wins, modelled
+  on `swing_equilibrium`), so their column VALUES changed under unchanged names. Pinned by
+  `tests/test_bos_causal.py` (mutant with the old placement caught; `tests/test_bos_lookahead.py`
+  is deleted).
   **Do not trust this list as a substitute for measuring.** `ssf` was found by a per-parent
   perturbation probe in MLCOL-1's companion screen, not by reading it; a hand-maintained list
   contains only the cases someone already thought of.
